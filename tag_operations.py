@@ -24,44 +24,57 @@ def find_audio_files(root: Path) -> Iterator[Path]:
 def get_tags(path: Path) -> Optional[Dict[str, Any]]:
     """
     Return tags dict from a file: artist, album, year, tracknum, discnum, title.
-    Returns None if tags cannot be read.
+    Returns None if tags cannot be read or file is invalid/corrupted.
     """
-    audio = MutagenFile(str(path), easy=True)
-    if audio is None or not audio.tags:
+    try:
+        audio = MutagenFile(str(path), easy=True)
+        if audio is None or not audio.tags:
+            return None
+    except Exception as e:
+        # File might be corrupted, wrong format, or unreadable
+        # Log warning but don't crash - just skip this file
+        from logging_utils import log
+        log(f"[WARN] Could not read tags from {path}: {e}")
         return None
 
-    def _get(tag: str, default: str = "") -> str:
-        v = audio.tags.get(tag)
-        return v[0] if v else default
-
-    artist = _get("albumartist") or _get("artist") or "Unknown Artist"
-    album = _get("album") or "Unknown Album"
-
-    date = _get("date") or _get("year") or ""
-    year = date[:4] if len(date) >= 4 and date[:4].isdigit() else ""
-
-    trackno = _get("tracknumber") or "0"
-    discno = _get("discnumber") or "1"
-    title = _get("title") or path.stem
-
     try:
-        tracknum = int(trackno.split("/")[0])
-    except ValueError:
-        tracknum = 0
+        def _get(tag: str, default: str = "") -> str:
+            v = audio.tags.get(tag)
+            return v[0] if v else default
 
-    try:
-        discnum = int(discno.split("/")[0])
-    except ValueError:
-        discnum = 1
+        artist = _get("albumartist") or _get("artist") or "Unknown Artist"
+        album = _get("album") or "Unknown Album"
 
-    return {
-        "artist": artist.strip(),
-        "album": album.strip(),
-        "year": year.strip(),
-        "tracknum": tracknum,
-        "discnum": discnum,
-        "title": title.strip(),
-    }
+        date = _get("date") or _get("year") or ""
+        year = date[:4] if len(date) >= 4 and date[:4].isdigit() else ""
+
+        trackno = _get("tracknumber") or "0"
+        discno = _get("discnumber") or "1"
+        title = _get("title") or path.stem
+
+        try:
+            tracknum = int(trackno.split("/")[0])
+        except ValueError:
+            tracknum = 0
+
+        try:
+            discnum = int(discno.split("/")[0])
+        except ValueError:
+            discnum = 1
+
+        return {
+            "artist": artist.strip(),
+            "album": album.strip(),
+            "year": year.strip(),
+            "tracknum": tracknum,
+            "discnum": discnum,
+            "title": title.strip(),
+        }
+    except Exception as e:
+        # Error reading tags even though file opened
+        from logging_utils import log
+        log(f"[WARN] Error processing tags from {path}: {e}")
+        return None
 
 
 def group_by_album(files: List[Path]) -> Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]]:
