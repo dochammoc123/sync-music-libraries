@@ -130,7 +130,21 @@ def choose_album_year(items: List[Tuple[Path, Dict[str, Any]]]) -> str:
     return numeric_candidates[0][1]
 
 
+def sanitize_filename_component(name: str) -> str:
+    """
+    Make a string safe for use as a Windows/macOS filename component:
+    - Replace invalid characters: <>:"/\\|?*
+    - Strip trailing spaces and periods (Windows hates those)
+    """
+    invalid = '<>:"/\\|?*'
+    sanitized = "".join("_" if c in invalid else c for c in name)
+    # Windows: no trailing space or dot
+    sanitized = sanitized.rstrip(" .")
+    return sanitized
+
+
 def format_track_filename(tags: Dict[str, Any], ext: str) -> str:
     """Format a track filename from tags."""
-    return f"{tags['tracknum']:02d} - {tags['title']}{ext.lower()}"
+    safe_title = sanitize_filename_component(tags["title"])
+    return f"{tags['tracknum']:02d} - {safe_title}{ext.lower()}"
 

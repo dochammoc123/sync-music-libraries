@@ -60,7 +60,7 @@ BACKUP_ROOT = MUSIC_ROOT.parent / "_EmbeddedArtOriginal"
 UPDATE_ROOT = MUSIC_ROOT.parent / "_UpdateOverlay"
 
 # Audio file extensions considered "audio"
-AUDIO_EXT = {".flac", ".mp3", ".m4a", ".aac", ".ogg", ".wav", ".wma"}
+AUDIO_EXT = {".flac", ".mp3", ".m4a", ".aac", ".ogg", ".wav", ".wma", ".m4v"}
 
 # Lossless extension we want to KEEP when present
 PREFERRED_EXT = ".flac"

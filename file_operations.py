@@ -18,14 +18,14 @@ from logging_utils import (
     album_label_from_tags,
     log,
 )
-from tag_operations import choose_album_year, format_track_filename
+from tag_operations import choose_album_year, format_track_filename, sanitize_filename_component
 
 
 def make_album_dir(root: Path, artist: str, album: str, year: str, dry_run: bool = False) -> Path:
     """Create an album directory path and optionally create it."""
-    safe_artist = artist.replace(":", " -")
+    safe_artist = sanitize_filename_component(artist)
     disp_year = f"({year}) " if year else ""
-    safe_album = album.replace(":", " -")
+    safe_album = sanitize_filename_component(album)
     album_dir = root / safe_artist / (disp_year + safe_album)
     if not dry_run:
         album_dir.mkdir(parents=True, exist_ok=True)
