@@ -142,3 +142,4 @@ sync-music-libraries/
 - ✅ Tray launcher updated to use new structure
 - ✅ Backward compatible (original script still works)
 
+

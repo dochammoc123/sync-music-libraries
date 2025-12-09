@@ -83,3 +83,4 @@ ENABLE_WEB_ART_LOOKUP = True     # enable/disable web art lookups
 # Files we consider ignorable "junk" in download folders
 JUNK_FILENAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
+
