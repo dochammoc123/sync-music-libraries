@@ -37,23 +37,40 @@ if [ -f "$SOURCE_DIR/test_quick.py" ]; then
     cp -f "$SOURCE_DIR/test_quick.py" "$DEPLOY_FOLDER/test_quick.py"
 fi
 
+# Copy existing run scripts
+echo "Copying run scripts..."
+if [ -f "$SOURCE_DIR/normal_run.command" ]; then
+    cp -f "$SOURCE_DIR/normal_run.command" "$DEPLOY_FOLDER/normal_run.command"
+    chmod +x "$DEPLOY_FOLDER/normal_run.command"
+fi
+if [ -f "$SOURCE_DIR/restore_originals.command" ]; then
+    cp -f "$SOURCE_DIR/restore_originals.command" "$DEPLOY_FOLDER/restore_originals.command"
+    chmod +x "$DEPLOY_FOLDER/restore_originals.command"
+fi
+if [ -f "$SOURCE_DIR/safe_test_run.command" ]; then
+    cp -f "$SOURCE_DIR/safe_test_run.command" "$DEPLOY_FOLDER/safe_test_run.command"
+    chmod +x "$DEPLOY_FOLDER/safe_test_run.command"
+fi
+if [ -f "$SOURCE_DIR/embed_art.command" ]; then
+    cp -f "$SOURCE_DIR/embed_art.command" "$DEPLOY_FOLDER/embed_art.command"
+    chmod +x "$DEPLOY_FOLDER/embed_art.command"
+fi
+
+# Copy tray launcher
+if [ -f "$SOURCE_DIR/library_tray_launcher.py" ]; then
+    cp -f "$SOURCE_DIR/library_tray_launcher.py" "$DEPLOY_FOLDER/library_tray_launcher.py"
+fi
+
+# Copy icons directory
+if [ -d "$SOURCE_DIR/icons" ]; then
+    echo "Copying icons directory..."
+    cp -R "$SOURCE_DIR/icons" "$DEPLOY_FOLDER/"
+fi
+
 # Copy requirements
 if [ -f "$SOURCE_DIR/requirements.txt" ]; then
     cp -f "$SOURCE_DIR/requirements.txt" "$DEPLOY_FOLDER/requirements.txt"
 fi
-
-# Create test run script (with venv activation)
-echo "Creating test run script..."
-cat > "$DEPLOY_FOLDER/test_run.command" << 'EOF'
-#!/bin/bash
-# Test run script for refactored music library sync
-# Activates venv and runs dry-run test
-source ~/local_python_envs/t8sync/bin/activate
-cd "$(dirname "$0")"
-python3 main.py --mode normal --dry
-read -p "Press Enter to continue..."
-EOF
-chmod +x "$DEPLOY_FOLDER/test_run.command"
 
 echo ""
 echo "========================================"
@@ -68,8 +85,7 @@ echo "  2. cd \"$DEPLOY_FOLDER\""
 echo "  3. python3 test_quick.py"
 echo "  4. python3 main.py --mode normal --dry"
 echo ""
-echo "Or run: open \"$DEPLOY_FOLDER/test_run.command\""
-echo "  (This will activate venv automatically)"
+echo "Or use your existing test scripts (safe_test_run.command, etc.)"
 echo ""
 read -p "Press Enter to continue..."
 

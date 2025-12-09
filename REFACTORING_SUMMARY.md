@@ -86,7 +86,9 @@ The original `library_sync_and_upgrade.py` (1269 lines) has been split into:
 
 ## Migration Path
 
-The original `library_sync_and_upgrade.py` is preserved for backward compatibility. The new `main.py` provides the same functionality with improved structure.
+The original `library_sync_and_upgrade.py` is preserved for backward compatibility and reference. The new `main.py` provides the same functionality with improved structure.
+
+**Note**: The existing run scripts (normal_run.bat, safe_test_run.bat, etc.) still reference the original script. These can be updated to use `main.py` once testing confirms the refactored version works correctly.
 
 ### For Users:
 - **No changes required** - The script works the same way

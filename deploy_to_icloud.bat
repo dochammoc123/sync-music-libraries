@@ -37,22 +37,36 @@ if exist "%SOURCE_DIR%test_quick.py" (
     copy /Y "%SOURCE_DIR%test_quick.py" "%DEPLOY_FOLDER%\test_quick.py"
 )
 
+REM Copy existing run scripts
+echo Copying run scripts...
+if exist "%SOURCE_DIR%normal_run.bat" (
+    copy /Y "%SOURCE_DIR%normal_run.bat" "%DEPLOY_FOLDER%\normal_run.bat"
+)
+if exist "%SOURCE_DIR%restore_originals.bat" (
+    copy /Y "%SOURCE_DIR%restore_originals.bat" "%DEPLOY_FOLDER%\restore_originals.bat"
+)
+if exist "%SOURCE_DIR%safe_test_run.bat" (
+    copy /Y "%SOURCE_DIR%safe_test_run.bat" "%DEPLOY_FOLDER%\safe_test_run.bat"
+)
+if exist "%SOURCE_DIR%embed_art.bat" (
+    copy /Y "%SOURCE_DIR%embed_art.bat" "%DEPLOY_FOLDER%\embed_art.bat"
+)
+
+REM Copy tray launcher
+if exist "%SOURCE_DIR%library_tray_launcher.py" (
+    copy /Y "%SOURCE_DIR%library_tray_launcher.py" "%DEPLOY_FOLDER%\library_tray_launcher.py"
+)
+
+REM Copy icons directory
+if exist "%SOURCE_DIR%icons" (
+    echo Copying icons directory...
+    xcopy /E /I /Y "%SOURCE_DIR%icons" "%DEPLOY_FOLDER%\icons"
+)
+
 REM Copy requirements
 if exist "%SOURCE_DIR%requirements.txt" (
     copy /Y "%SOURCE_DIR%requirements.txt" "%DEPLOY_FOLDER%\requirements.txt"
 )
-
-REM Create test run script (with venv activation)
-echo Creating test run script...
-(
-echo @echo off
-echo REM Test run script for refactored music library sync
-echo REM Activates venv and runs dry-run test
-echo C:\Users\docha\local_python_envs\t8sync\Scripts\activate
-echo cd /d "%DEPLOY_FOLDER%"
-echo python main.py --mode normal --dry
-echo pause
-) > "%DEPLOY_FOLDER%\test_run.bat"
 
 echo.
 echo ========================================
@@ -67,8 +81,7 @@ echo   2. cd /d "%DEPLOY_FOLDER%"
 echo   3. python test_quick.py
 echo   4. python main.py --mode normal --dry
 echo.
-echo Or run: %DEPLOY_FOLDER%\test_run.bat
-echo   (This will activate venv automatically)
+echo Or use your existing test scripts (safe_test_run.bat, etc.)
 echo.
 pause
 
