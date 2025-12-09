@@ -42,11 +42,13 @@ if [ -f "$SOURCE_DIR/requirements.txt" ]; then
     cp -f "$SOURCE_DIR/requirements.txt" "$DEPLOY_FOLDER/requirements.txt"
 fi
 
-# Create test run script
+# Create test run script (with venv activation)
 echo "Creating test run script..."
 cat > "$DEPLOY_FOLDER/test_run.command" << 'EOF'
 #!/bin/bash
 # Test run script for refactored music library sync
+# Activates venv and runs dry-run test
+source ~/local_python_envs/t8sync/bin/activate
 cd "$(dirname "$0")"
 python3 main.py --mode normal --dry
 read -p "Press Enter to continue..."
@@ -61,11 +63,13 @@ echo ""
 echo "Files deployed to: $DEPLOY_FOLDER"
 echo ""
 echo "To test:"
-echo "  1. cd \"$DEPLOY_FOLDER\""
-echo "  2. python3 test_quick.py"
-echo "  3. python3 main.py --mode normal --dry"
+echo "  1. Activate venv: source ~/local_python_envs/t8sync/bin/activate"
+echo "  2. cd \"$DEPLOY_FOLDER\""
+echo "  3. python3 test_quick.py"
+echo "  4. python3 main.py --mode normal --dry"
 echo ""
 echo "Or run: open \"$DEPLOY_FOLDER/test_run.command\""
+echo "  (This will activate venv automatically)"
 echo ""
 read -p "Press Enter to continue..."
 

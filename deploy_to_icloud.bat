@@ -6,7 +6,7 @@ setlocal
 
 set "SOURCE_DIR=%~dp0"
 set "ICLOUD_SCRIPTS=C:\Users\docha\iCloudDrive\scripts"
-set "DEPLOY_FOLDER=%ICLOUD_SCRIPTS%\music-sync-refactored"
+set "DEPLOY_FOLDER=%ICLOUD_SCRIPTS%\sync-music-libraries"
 
 echo ========================================
 echo Deploying Refactored Music Library Sync
@@ -42,11 +42,13 @@ if exist "%SOURCE_DIR%requirements.txt" (
     copy /Y "%SOURCE_DIR%requirements.txt" "%DEPLOY_FOLDER%\requirements.txt"
 )
 
-REM Create test run script
+REM Create test run script (with venv activation)
 echo Creating test run script...
 (
 echo @echo off
 echo REM Test run script for refactored music library sync
+echo REM Activates venv and runs dry-run test
+echo C:\Users\docha\local_python_envs\t8sync\Scripts\activate
 echo cd /d "%DEPLOY_FOLDER%"
 echo python main.py --mode normal --dry
 echo pause
@@ -60,11 +62,13 @@ echo.
 echo Files deployed to: %DEPLOY_FOLDER%
 echo.
 echo To test:
-echo   1. cd /d "%DEPLOY_FOLDER%"
-echo   2. python test_quick.py
-echo   3. python main.py --mode normal --dry
+echo   1. Activate venv: C:\Users\docha\local_python_envs\t8sync\Scripts\activate
+echo   2. cd /d "%DEPLOY_FOLDER%"
+echo   3. python test_quick.py
+echo   4. python main.py --mode normal --dry
 echo.
 echo Or run: %DEPLOY_FOLDER%\test_run.bat
+echo   (This will activate venv automatically)
 echo.
 pause
 

@@ -1,5 +1,17 @@
 # Deployment and Testing Guide
 
+## Prerequisites
+
+**⚠️ IMPORTANT: Read [PREREQUISITES.md](PREREQUISITES.md) first!**
+
+Before deploying or testing, ensure you have:
+- Python 3.11+ installed
+- Virtual environment created at `C:\Users\docha\local_python_envs\t8sync` (Windows) or `~/local_python_envs/t8sync` (macOS)
+- Dependencies installed: `pip install -r requirements.txt`
+- Virtual environment activated before running scripts
+
+See [PREREQUISITES.md](PREREQUISITES.md) for detailed setup instructions.
+
 ## Quick Start
 
 ### Windows
@@ -20,8 +32,9 @@
    reset_test_environment.bat
    ```
 
-4. **Test the refactored code:**
+4. **Activate virtual environment and test:**
    ```cmd
+   C:\Users\docha\local_python_envs\t8sync\Scripts\activate
    cd C:\Users\docha\iCloudDrive\scripts\music-sync-refactored
    python test_quick.py
    python main.py --mode normal --dry
@@ -47,8 +60,9 @@
    ./reset_test_environment.command
    ```
 
-4. **Test the refactored code:**
+4. **Activate virtual environment and test:**
    ```bash
+   source ~/local_python_envs/t8sync/bin/activate
    cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/scripts/music-sync-refactored
    python3 test_quick.py
    python3 main.py --mode normal --dry
@@ -72,16 +86,24 @@
    - Copy a few albums from `E:\Plex Library\Music` (Windows) or your iTunes library (macOS)
    - Paste into `C:\Users\docha\Downloads\Music` (Windows) or `~/Downloads/Music` (macOS)
 
-3. **Run dry-run test:**
+3. **Activate venv and run dry-run test:**
    ```bash
-   cd [deployed-folder]
+   # Windows
+   C:\Users\docha\local_python_envs\t8sync\Scripts\activate
+   cd C:\Users\docha\iCloudDrive\scripts\music-sync-refactored
    python main.py --mode normal --dry
+   
+   # macOS
+   source ~/local_python_envs/t8sync/bin/activate
+   cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/scripts/music-sync-refactored
+   python3 main.py --mode normal --dry
    ```
    - Review the output
    - Check what would be done
 
 4. **Run actual sync (if dry-run looks good):**
    ```bash
+   # Make sure venv is still activated, then:
    python main.py --mode normal
    ```
 

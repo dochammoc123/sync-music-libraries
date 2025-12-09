@@ -13,17 +13,34 @@ A comprehensive Python script for organizing, syncing, and managing music librar
 - **Tray Launcher**: System tray application for easy access
 - **Comprehensive Logging**: Detailed logs with summary reports
 
+## Prerequisites
+
+**⚠️ IMPORTANT: See [PREREQUISITES.md](PREREQUISITES.md) for detailed setup instructions.**
+
+Before using this script, you need:
+- Python 3.11 or later
+- Virtual environment set up at:
+  - Windows: `C:\Users\docha\local_python_envs\t8sync`
+  - macOS: `~/local_python_envs/t8sync`
+- All dependencies installed (see PREREQUISITES.md)
+
 ## Installation
 
 1. Clone or download this repository
-2. Create a virtual environment:
+2. **Set up virtual environment** (see [PREREQUISITES.md](PREREQUISITES.md)):
    ```bash
-   python -m venv .venv
+   # Windows
+   cd C:\Users\docha\local_python_envs
+   python -m venv t8sync
+   
+   # macOS
+   cd ~/local_python_envs
+   python3 -m venv t8sync
    ```
-3. Activate the virtual environment:
-   - Windows: `.venv\Scripts\activate`
-   - macOS/Linux: `source .venv/bin/activate`
-4. Install dependencies:
+3. **Activate the virtual environment:**
+   - Windows: `C:\Users\docha\local_python_envs\t8sync\Scripts\activate`
+   - macOS: `source ~/local_python_envs/t8sync/bin/activate`
+4. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
