@@ -77,17 +77,22 @@ def get_tags(path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
-def group_by_album(files: List[Path]) -> Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]]:
+def group_by_album(files: List[Path]) -> Tuple[Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]], List[Path]]:
     """
     Group paths into albums by (artist, album) ONLY.
     Year is still read from tags but not used as part of the key.
-    Returns dict mapping (artist, album) -> list of (path, tags) tuples.
+    Returns:
+        - dict mapping (artist, album) -> list of (path, tags) tuples
+        - list of files that were skipped (no tags/invalid)
     """
     albums: Dict[Tuple[str, str], List[Tuple[Path, Dict]]] = {}
+    skipped_files: List[Path] = []
+    
     for f in files:
         tags = get_tags(f)
         if not tags:
             log(f"[WARN] No tags for {f}, skipping.")
+            skipped_files.append(f)
             continue
 
         artist = tags["artist"]
@@ -96,7 +101,7 @@ def group_by_album(files: List[Path]) -> Dict[Tuple[str, str], List[Tuple[Path, 
         key = (artist, album)
         albums.setdefault(key, []).append((f, tags))
 
-    return albums
+    return albums, skipped_files
 
 
 def choose_album_year(items: List[Tuple[Path, Dict[str, Any]]]) -> str:
