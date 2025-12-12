@@ -134,6 +134,8 @@ def backup_flac_if_needed(flac_path: Path, dry_run: bool = False, backup_enabled
         return
     backup_path = BACKUP_ROOT / rel
     if backup_path.exists():
+        # Backup already exists - skip to avoid overwriting original backup
+        # This handles cases where file is modified multiple times (tags, then art)
         return
     log(f"  BACKUP: {flac_path} -> {backup_path}")
     if not dry_run:
