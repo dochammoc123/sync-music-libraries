@@ -103,12 +103,15 @@ def fetch_art_from_web(artist: str, album: str, cover_path: Path, dry_run: bool 
 def find_predownloaded_art_source_for_album(items: List[Tuple[Path, Dict[str, Any]]]) -> Optional[Path]:
     """
     Given the list of (path, tags) for an album's tracks in DOWNLOADS_DIR,
-    look in their parent directories for standard art files:
-    large_cover.jpg, folder.jpg, cover.jpg (in that priority).
+    look in their parent directories for standard art files.
+    Priority: large_cover.jpg > cover.jpg (for cover.jpg)
+    folder.jpg and cover.jpg have equal priority, but if both exist,
+    cover.jpg is used for cover.jpg and folder.jpg is preserved separately.
     Returns a Path or None.
     """
     candidate_dirs = {p.parent for (p, _tags) in items}
-    art_priority = ["large_cover.jpg", "folder.jpg", "cover.jpg"]
+    # Priority: large_cover.jpg > cover.jpg (folder.jpg handled separately)
+    art_priority = ["large_cover.jpg", "cover.jpg"]
 
     for art_name in art_priority:
         for d in candidate_dirs:

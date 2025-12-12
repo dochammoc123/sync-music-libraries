@@ -157,10 +157,11 @@ def move_album_from_downloads(
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dest))
 
+    # Find art files: large_cover.jpg and cover.jpg (folder.jpg handled separately)
     predownloaded_art = find_predownloaded_art_source_for_album(items)
     used_predownloaded_art = predownloaded_art is not None
     
-    # Check if folder.jpg exists separately in downloads (may be different from cover.jpg)
+    # Check if folder.jpg exists separately in downloads (equal priority with cover.jpg)
     predownloaded_folder = None
     candidate_dirs = {p.parent for (p, _tags) in items}
     for d in candidate_dirs:
@@ -168,23 +169,48 @@ def move_album_from_downloads(
         if folder_candidate.exists():
             predownloaded_folder = folder_candidate
             break
+    
+    # Check if cover.jpg exists separately (for when both folder.jpg and cover.jpg exist)
+    predownloaded_cover = None
+    for d in candidate_dirs:
+        cover_candidate = d / "cover.jpg"
+        if cover_candidate.exists():
+            predownloaded_cover = cover_candidate
+            break
 
-    if used_predownloaded_art:
-        log(f"  PRE-DOWNLOADED ART: using {predownloaded_art.name} as album artwork source")
+    if used_predownloaded_art or predownloaded_folder or predownloaded_cover:
         cover_dest = album_dir / "cover.jpg"
         folder_dest = album_dir / "folder.jpg"
         if not dry_run:
             cover_dest.parent.mkdir(parents=True, exist_ok=True)
-            # Copy to cover.jpg (renaming if needed, e.g., large_cover.jpg -> cover.jpg)
-            shutil.copy2(predownloaded_art, cover_dest)
-            # Copy folder.jpg: preserve separate folder.jpg if it exists, otherwise use same as cover
+            
+            # Determine source for cover.jpg:
+            # Priority: large_cover.jpg > cover.jpg (if both folder.jpg and cover.jpg exist, use cover.jpg)
+            if predownloaded_art:
+                # large_cover.jpg or cover.jpg found (large_cover has priority)
+                log(f"  PRE-DOWNLOADED ART: using {predownloaded_art.name} for cover.jpg")
+                shutil.copy2(predownloaded_art, cover_dest)
+            elif predownloaded_cover:
+                # Only cover.jpg exists (no large_cover.jpg)
+                log(f"  PRE-DOWNLOADED ART: using cover.jpg for cover.jpg")
+                shutil.copy2(predownloaded_cover, cover_dest)
+            elif predownloaded_folder:
+                # Only folder.jpg exists, use it for cover.jpg
+                log(f"  PRE-DOWNLOADED ART: using folder.jpg for cover.jpg")
+                shutil.copy2(predownloaded_folder, cover_dest)
+            
+            # Determine source for folder.jpg:
+            # Preserve folder.jpg if it exists, otherwise use same as cover.jpg
             if predownloaded_folder:
                 log(f"  Copying separate folder.jpg from downloads (may differ from cover.jpg)")
                 shutil.copy2(predownloaded_folder, folder_dest)
-            else:
-                # If only one art file found (could be large_cover.jpg, folder.jpg, or cover.jpg),
-                # copy it to both cover.jpg and folder.jpg
+            elif predownloaded_art:
+                # Use large_cover.jpg or cover.jpg for folder.jpg
                 shutil.copy2(predownloaded_art, folder_dest)
+            elif predownloaded_cover:
+                # Use cover.jpg for folder.jpg
+                shutil.copy2(predownloaded_cover, folder_dest)
+        
         add_album_event_label(label, "Art found pre-downloaded.")
     else:
         log("  No pre-downloaded art files found (large_cover/folder/cover).")
