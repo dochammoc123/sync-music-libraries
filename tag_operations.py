@@ -428,10 +428,11 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
     try:
         ext = path.suffix.lower()
         
-        # Backup FLAC files before writing tags (if backup enabled)
-        if backup_enabled and ext == ".flac" and not dry_run:
-            from artwork import backup_flac_if_needed
-            backup_flac_if_needed(path, dry_run, backup_enabled)
+        # Backup audio files before writing tags (if backup enabled)
+        # Works for all audio file types (FLAC, MP3, M4A, etc.), not just FLAC
+        if backup_enabled and not dry_run:
+            from artwork import backup_audio_file_if_needed
+            backup_audio_file_if_needed(path, dry_run, backup_enabled)
         
         if ext == ".flac":
             audio = FLAC(str(path))

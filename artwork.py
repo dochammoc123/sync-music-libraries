@@ -121,15 +121,16 @@ def find_predownloaded_art_source_for_album(items: List[Tuple[Path, Dict[str, An
     return None
 
 
-def backup_flac_if_needed(flac_path: Path, dry_run: bool = False, backup_enabled: bool = True) -> None:
+def backup_audio_file_if_needed(audio_path: Path, dry_run: bool = False, backup_enabled: bool = True) -> None:
     """
-    If backup_enabled is True, create a backup copy of this FLAC under BACKUP_ROOT,
+    If backup_enabled is True, create a backup copy of this audio file under BACKUP_ROOT,
     mirroring MUSIC_ROOT structure. Only create if it does not already exist.
+    Works for all audio file types (FLAC, MP3, M4A, etc.), not just FLAC.
     """
     if not backup_enabled:
         return
     try:
-        rel = flac_path.relative_to(MUSIC_ROOT)
+        rel = audio_path.relative_to(MUSIC_ROOT)
     except ValueError:
         return
     backup_path = BACKUP_ROOT / rel
@@ -137,11 +138,17 @@ def backup_flac_if_needed(flac_path: Path, dry_run: bool = False, backup_enabled
         # Backup already exists - skip to avoid overwriting original backup
         # This handles cases where file is modified multiple times (tags, then art)
         return
-    log(f"  BACKUP: {flac_path} -> {backup_path}")
+    log(f"  BACKUP: {audio_path} -> {backup_path}")
     if not dry_run:
         import shutil
         backup_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(flac_path, backup_path)
+        shutil.copy2(audio_path, backup_path)
+
+
+# Alias for backward compatibility
+def backup_flac_if_needed(flac_path: Path, dry_run: bool = False, backup_enabled: bool = True) -> None:
+    """Alias for backup_audio_file_if_needed() for backward compatibility."""
+    backup_audio_file_if_needed(flac_path, dry_run, backup_enabled)
 
 
 def ensure_cover_and_folder(
