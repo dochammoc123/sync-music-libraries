@@ -73,26 +73,18 @@ def get_tags_from_path(path: Path, downloads_root: Path) -> Dict[str, Any]:
 def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """
     Return tags dict from a file: artist, album, year, tracknum, discnum, title.
-    If tags cannot be read, falls back to path-based extraction if downloads_root is provided.
-    Returns None only if both tag reading and path extraction fail.
+    Returns None if tags cannot be read. Does NOT use path-based fallback here -
+    that decision is made at the directory level in group_by_album().
     """
     try:
         audio = MutagenFile(str(path), easy=True)
         if audio is None or not audio.tags:
-            # Try path-based fallback if available
-            if downloads_root and downloads_root in path.parents:
-                from logging_utils import log
-                log(f"[WARN] No tags in {path}, using path-based fallback")
-                return get_tags_from_path(path, downloads_root)
             return None
     except Exception as e:
         # File might be corrupted, wrong format, or unreadable
-        # Try path-based fallback if available
+        # Log warning but return None - path-based fallback will be handled at directory level
         from logging_utils import log
         log(f"[WARN] Could not read tags from {path}: {e}")
-        if downloads_root and downloads_root in path.parents:
-            log(f"  Using path-based fallback for {path}")
-            return get_tags_from_path(path, downloads_root)
         return None
 
     try:
