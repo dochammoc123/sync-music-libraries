@@ -329,13 +329,13 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
                     path_album = fallback_tags["album"]
                     
                     # Verify via MusicBrainz before using path-based values
-                    artist, album = choose_album_artist_album([], verify_via_mb=True)
-                    # If MusicBrainz didn't help, use path-based
-                    if artist == "Unknown Artist" and album == "Unknown Album":
+                    verified = verify_album_via_musicbrainz(path_artist, path_album)
+                    if verified:
+                        artist, album = verified
+                        log(f"[WARN] No tags in directory {dir_path}, MusicBrainz verified: {path_artist} - {path_album} -> {artist} - {album}")
+                    else:
                         artist, album = path_artist, path_album
                         log(f"[WARN] No tags in directory {dir_path}, using path-based: {artist} - {album}")
-                    else:
-                        log(f"[WARN] No tags in directory {dir_path}, MusicBrainz verified: {artist} - {album}")
                     
                     dir_to_key[dir_path] = (artist, album)
                     
