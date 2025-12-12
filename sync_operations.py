@@ -235,14 +235,17 @@ def restore_flacs_from_backups(dry_run: bool = False) -> None:
                 # Move up to parent directory
                 current = current.parent
 
-    # After all restores, check if BACKUP_ROOT itself is empty (optional cleanup)
+    # After all restores, check if BACKUP_ROOT itself is empty and delete it
     if not dry_run and CLEAN_EMPTY_BACKUP_FOLDERS:
         try:
             if BACKUP_ROOT.exists():
                 contents = list(BACKUP_ROOT.iterdir())
                 if not contents:
-                    log(f"  [CLEANUP] Backup root is empty, but keeping it (may be needed for future backups)")
-                    # Note: We don't delete BACKUP_ROOT itself, just log that it's empty
+                    log(f"  [CLEANUP] Backup root is empty, removing it (will be recreated on next backup)")
+                    try:
+                        BACKUP_ROOT.rmdir()
+                    except OSError as e:
+                        log(f"  [CLEANUP WARN] Could not remove empty backup root {BACKUP_ROOT}: {e}")
         except Exception as e:
             log(f"  [CLEANUP WARN] Could not check backup root: {e}")
 
