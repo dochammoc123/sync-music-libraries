@@ -419,13 +419,19 @@ def format_track_filename(tags: Dict[str, Any], ext: str) -> str:
     return f"{tags['tracknum']:02d} - {safe_title}{ext.lower()}"
 
 
-def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False) -> bool:
+def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, backup_enabled: bool = True) -> bool:
     """
     Write tags to an audio file.
+    If backup_enabled is True and file is FLAC, backs up the file first.
     Returns True if successful, False otherwise.
     """
     try:
         ext = path.suffix.lower()
+        
+        # Backup FLAC files before writing tags (if backup enabled)
+        if backup_enabled and ext == ".flac" and not dry_run:
+            from artwork import backup_flac_if_needed
+            backup_flac_if_needed(path, dry_run, backup_enabled)
         
         if ext == ".flac":
             audio = FLAC(str(path))

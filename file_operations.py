@@ -154,48 +154,21 @@ def move_album_from_downloads(
     for src, tags in items_sorted:
         ext = src.suffix
         
-        # Check if file has tags - if not, write tags first so filename can use tag values
-        needs_tags = False
+        # Try to read tags from source file for filename generation
+        # Don't write tags yet - that happens later after backup during embed step
         tags_to_use = tags.copy()
-        
-        # Try to read tags from source file
         try:
             from tag_operations import get_tags
             original_tags = get_tags(src)
-            if not original_tags:
-                needs_tags = True
-            elif not original_tags.get("title") or not original_tags.get("artist") or original_tags.get("tracknum", 0) == 0:
-                needs_tags = True
-            else:
+            if original_tags and original_tags.get("title") and original_tags.get("tracknum", 0) > 0:
                 # File has good tags, use them for filename
                 tags_to_use = original_tags.copy()
         except Exception:
-            # Can't read tags, need to write them
-            needs_tags = True
-        
-        # If tags are missing/incomplete, write them first (before moving/renaming)
-        if needs_tags and not dry_run:
-            # Ensure we have complete tag info - use album metadata if available
-            if album_metadata:
-                tags_to_use["artist"] = album_metadata["artist"]
-                tags_to_use["album"] = album_metadata["album"]
-                if not tags_to_use.get("year") and album_metadata.get("year"):
-                    tags_to_use["year"] = album_metadata["year"]
-            
-            # Write tags to source file first
-            if write_tags_to_file(src, tags_to_use, dry_run=False):
-                log(f"    ✓ Added tags to {src.name} (before move)")
-                # Re-read tags from file to get actual values
-                try:
-                    updated_tags = get_tags(src)
-                    if updated_tags:
-                        tags_to_use = updated_tags
-                except Exception:
-                    pass
-            else:
-                log(f"    [WARN] Could not add tags to {src.name}")
+            # Can't read tags, use fallback tags for filename
+            pass
         
         # Generate filename from tags (title and tracknum from tags, not filename)
+        # If tags are missing, filename will use fallback values (from path/filename parsing)
         filename = format_track_filename(tags_to_use, ext)
         if len(discs) > 1:
             disc_label = f"CD{tags_to_use['discnum']}"

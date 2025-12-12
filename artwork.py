@@ -226,6 +226,86 @@ def embed_art_into_flacs(album_dir: Path, dry_run: bool = False, backup_enabled:
                     audio.save()
 
 
+def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True) -> None:
+    """
+    Walk the entire MUSIC_ROOT and add missing tags to files that don't have them.
+    Only writes tags after backing up files (if backup_enabled).
+    Uses album metadata from other files in the same album directory.
+    """
+    from config import MUSIC_ROOT, AUDIO_EXT
+    from tag_operations import get_tags, write_tags_to_file
+    from pathlib import Path
+    import os
+    
+    log("\n[ADD TAGS] Adding missing tags to files without tags...")
+    
+    for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
+        album_dir = Path(dirpath)
+        audio_files = [album_dir / f for f in filenames if Path(f).suffix.lower() in AUDIO_EXT]
+        if not audio_files:
+            continue
+        
+        # Get album metadata from files that have tags
+        album_metadata = None
+        files_with_tags = []
+        files_without_tags = []
+        
+        for audio_file in audio_files:
+            tags = get_tags(audio_file)
+            if tags and tags.get("title") and tags.get("artist") and tags.get("tracknum", 0) > 0:
+                files_with_tags.append((audio_file, tags))
+                if not album_metadata:
+                    album_metadata = {
+                        "artist": tags.get("artist"),
+                        "album": tags.get("album"),
+                        "year": tags.get("year", ""),
+                    }
+            else:
+                files_without_tags.append(audio_file)
+        
+        # If we have album metadata and files without tags, add tags to them
+        if album_metadata and files_without_tags:
+            for audio_file in files_without_tags:
+                # Get existing tags (may have partial info from filename parsing)
+                existing_tags = get_tags(audio_file)
+                if not existing_tags:
+                    existing_tags = {}
+                
+                # Build complete tags using album metadata
+                tags_to_write = {
+                    "artist": album_metadata["artist"],
+                    "album": album_metadata["album"],
+                    "year": album_metadata.get("year", ""),
+                    "tracknum": existing_tags.get("tracknum", 0),
+                    "discnum": existing_tags.get("discnum", 1),
+                    "title": existing_tags.get("title", audio_file.stem),
+                }
+                
+                # Extract track number from filename if not in tags
+                if tags_to_write["tracknum"] == 0:
+                    import re
+                    match = re.match(r'^(\d+)', audio_file.stem)
+                    if match:
+                        try:
+                            tags_to_write["tracknum"] = int(match.group(1))
+                        except ValueError:
+                            pass
+                
+                # Extract title from filename if not in tags
+                if not tags_to_write.get("title") or tags_to_write["title"] == audio_file.stem:
+                    import re
+                    title = audio_file.stem
+                    title = re.sub(r'^\d+\s*-\s*', '', title).strip()
+                    if title:
+                        tags_to_write["title"] = title
+                
+                log(f"  Adding tags to {audio_file.name}")
+                if write_tags_to_file(audio_file, tags_to_write, dry_run, backup_enabled):
+                    log(f"    ✓ Added tags to {audio_file.name}")
+                else:
+                    log(f"    [WARN] Could not add tags to {audio_file.name}")
+
+
 def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True, embed_if_missing: bool = True) -> None:
     """
     Walk the entire MUSIC_ROOT and embed cover.jpg into FLACs

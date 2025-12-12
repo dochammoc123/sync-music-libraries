@@ -116,7 +116,11 @@ def main() -> None:
         log("\nStep 3: Upgrade albums to FLAC-only where FLAC exists...")
         upgrade_albums_to_flac_only(DRY_RUN)
 
-        log("\nStep 4: Embed missing artwork (only FLACs with no embedded art)...")
+        log("\nStep 4: Add missing tags to files without tags...")
+        from artwork import add_missing_tags_global
+        add_missing_tags_global(DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
+        
+        log("\nStep 5: Embed missing artwork (only FLACs with no embedded art)...")
         embed_missing_art_global(DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED, EMBED_IF_MISSING)
 
         if EMBED_ALL:
@@ -136,13 +140,13 @@ def main() -> None:
                 label = album_label_from_dir(album_dir)
                 add_album_event_label(label, "Embedded new art from overlay.")
 
-        log("\nStep 5: Sync master library to T8...")
+        log("\nStep 6: Sync master library to T8...")
         sync_music_to_t8(DRY_RUN)
 
-        log("\nStep 6: Sync empty UPDATE overlay directory structure...")
+        log("\nStep 7: Sync empty UPDATE overlay directory structure...")
         sync_update_root_structure(DRY_RUN)
 
-        log("\nStep 7: Final missing-art fixup...")
+        log("\nStep 8: Final missing-art fixup...")
         fixup_missing_art(DRY_RUN)
 
         log("\nStep 8: Writing summary log...")
