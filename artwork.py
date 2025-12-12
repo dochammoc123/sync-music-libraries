@@ -188,24 +188,11 @@ def ensure_cover_and_folder(
 
     if cover_path.exists():
         if not folder_path.exists():
-            # Check if folder.jpg exists in downloads (may have been preserved separately)
-            # Only create from cover.jpg if it doesn't exist in downloads
-            predownloaded_folder = None
-            candidate_dirs = {p.parent for (p, _tags) in album_files}
-            for d in candidate_dirs:
-                folder_candidate = d / "folder.jpg"
-                if folder_candidate.exists():
-                    predownloaded_folder = folder_candidate
-                    break
-            
-            if predownloaded_folder:
-                log(f"  Copying separate folder.jpg from downloads (preserved, may differ from cover.jpg)")
-                if not dry_run:
-                    shutil.copy2(predownloaded_folder, folder_path)
-            else:
-                log("  Creating folder.jpg from cover.jpg")
-                if not dry_run:
-                    shutil.copy2(cover_path, folder_path)
+            # Create folder.jpg from cover.jpg if it doesn't exist
+            # Note: move_album_from_downloads() already handles copying folder.jpg from downloads
+            log("  Creating folder.jpg from cover.jpg")
+            if not dry_run:
+                shutil.copy2(cover_path, folder_path)
 
 
 def embed_art_into_flacs(album_dir: Path, dry_run: bool = False, backup_enabled: bool = True) -> None:

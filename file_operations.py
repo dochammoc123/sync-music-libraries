@@ -175,13 +175,15 @@ def move_album_from_downloads(
         folder_dest = album_dir / "folder.jpg"
         if not dry_run:
             cover_dest.parent.mkdir(parents=True, exist_ok=True)
+            # Copy to cover.jpg (renaming if needed, e.g., large_cover.jpg -> cover.jpg)
             shutil.copy2(predownloaded_art, cover_dest)
-            # Only copy to folder.jpg if folder.jpg doesn't exist separately
-            # If folder.jpg exists separately, preserve it (may be different from cover.jpg)
+            # Copy folder.jpg: preserve separate folder.jpg if it exists, otherwise use same as cover
             if predownloaded_folder:
-                log(f"  PRESERVING separate folder.jpg from downloads (may differ from cover.jpg)")
+                log(f"  Copying separate folder.jpg from downloads (may differ from cover.jpg)")
                 shutil.copy2(predownloaded_folder, folder_dest)
             else:
+                # If only one art file found (could be large_cover.jpg, folder.jpg, or cover.jpg),
+                # copy it to both cover.jpg and folder.jpg
                 shutil.copy2(predownloaded_art, folder_dest)
         add_album_event_label(label, "Art found pre-downloaded.")
     else:
