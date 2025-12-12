@@ -203,8 +203,8 @@ def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_v
     Strategy:
       1. Collect all artist/album pairs from files that have tags.
       2. Find the most common (artist, album) pair.
-      3. If verify_via_mb is True and we have a candidate, verify via MusicBrainz.
-      4. If no files have tags, try MusicBrainz lookup with path-based fallback.
+      3. If tags exist, use them directly (they already handle Various Artists correctly).
+      4. If no files have tags, try path-based fallback, then MusicBrainz (for Various Artists detection).
       5. Last resort: use path-based fallback or "Unknown Artist/Album".
     
     Returns (artist, album) tuple.
@@ -214,24 +214,16 @@ def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_v
     
     if artist_album_pairs:
         # Find most common (artist, album) pair
+        # Tags already handle Various Artists correctly, so use them as-is
         counts = Counter(artist_album_pairs)
         max_count = max(counts.values())
         candidates = [pair for pair, c in counts.items() if c == max_count]
         candidate_artist, candidate_album = candidates[0]
         
-        # Verify via MusicBrainz if enabled
-        if verify_via_mb and candidate_artist != "Unknown Artist" and candidate_album != "Unknown Album":
-            verified = verify_album_via_musicbrainz(candidate_artist, candidate_album)
-            if verified:
-                verified_artist, verified_album = verified
-                log(f"  [MB VERIFY] Verified: {candidate_artist} - {candidate_album} -> {verified_artist} - {verified_album}")
-                return (verified_artist, verified_album)
-            else:
-                log(f"  [MB VERIFY] No MusicBrainz match for {candidate_artist} - {candidate_album}, using tag values")
-        
+        # Use tag values directly (they already handle Various Artists)
         return (candidate_artist, candidate_album)
     
-    # No tags available - try path-based fallback, then MusicBrainz
+    # No tags available - try path-based fallback, then MusicBrainz (for Various Artists detection)
     if items:
         first_path = items[0][0]
         fallback_tags = get_tags_from_path(first_path, first_path.parent.parent.parent)
@@ -240,6 +232,7 @@ def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_v
             path_album = fallback_tags["album"]
             
             # Try MusicBrainz verification before using path-based values
+            # This is where we detect Various Artists when tags don't exist
             if verify_via_mb and path_artist != "Unknown Artist" and path_album != "Unknown Album":
                 verified = verify_album_via_musicbrainz(path_artist, path_album)
                 if verified:
