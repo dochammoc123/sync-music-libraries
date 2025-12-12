@@ -153,9 +153,52 @@ def move_album_from_downloads(
 
     for src, tags in items_sorted:
         ext = src.suffix
-        filename = format_track_filename(tags, ext)
+        
+        # Check if file has tags - if not, write tags first so filename can use tag values
+        needs_tags = False
+        tags_to_use = tags.copy()
+        
+        # Try to read tags from source file
+        try:
+            from tag_operations import get_tags
+            original_tags = get_tags(src)
+            if not original_tags:
+                needs_tags = True
+            elif not original_tags.get("title") or not original_tags.get("artist") or original_tags.get("tracknum", 0) == 0:
+                needs_tags = True
+            else:
+                # File has good tags, use them for filename
+                tags_to_use = original_tags.copy()
+        except Exception:
+            # Can't read tags, need to write them
+            needs_tags = True
+        
+        # If tags are missing/incomplete, write them first (before moving/renaming)
+        if needs_tags and not dry_run:
+            # Ensure we have complete tag info - use album metadata if available
+            if album_metadata:
+                tags_to_use["artist"] = album_metadata["artist"]
+                tags_to_use["album"] = album_metadata["album"]
+                if not tags_to_use.get("year") and album_metadata.get("year"):
+                    tags_to_use["year"] = album_metadata["year"]
+            
+            # Write tags to source file first
+            if write_tags_to_file(src, tags_to_use, dry_run=False):
+                log(f"    ✓ Added tags to {src.name} (before move)")
+                # Re-read tags from file to get actual values
+                try:
+                    updated_tags = get_tags(src)
+                    if updated_tags:
+                        tags_to_use = updated_tags
+                except Exception:
+                    pass
+            else:
+                log(f"    [WARN] Could not add tags to {src.name}")
+        
+        # Generate filename from tags (title and tracknum from tags, not filename)
+        filename = format_track_filename(tags_to_use, ext)
         if len(discs) > 1:
-            disc_label = f"CD{tags['discnum']}"
+            disc_label = f"CD{tags_to_use['discnum']}"
             disc_dir = album_dir / disc_label
             if not dry_run:
                 disc_dir.mkdir(exist_ok=True)
@@ -167,41 +210,6 @@ def move_album_from_downloads(
         if not dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dest))
-            
-            # Check if file needs tags written
-            # Try to read tags from the moved file - if it fails or tags are incomplete, write them
-            needs_tags = False
-            try:
-                from tag_operations import get_tags
-                original_tags = get_tags(dest)  # Try reading tags from moved file
-                # If no tags or tracknum is 0 but we have a better tracknum from tags dict
-                if not original_tags:
-                    needs_tags = True
-                    log(f"    No tags found in {dest.name}, will add tags")
-                elif original_tags.get("tracknum", 0) == 0 and tags.get("tracknum", 0) > 0:
-                    needs_tags = True
-                    log(f"    Incomplete tags in {dest.name} (tracknum=0), will update tags")
-                elif not original_tags.get("title") or not original_tags.get("artist"):
-                    needs_tags = True
-                    log(f"    Missing title/artist in {dest.name}, will update tags")
-            except Exception as e:
-                # Can't read tags (file might be corrupted), definitely need to write them
-                needs_tags = True
-                log(f"    Could not read tags from {dest.name}: {e}, will add tags")
-            
-            if needs_tags:
-                # Ensure we have complete tag info - use album metadata if available
-                tags_to_write = tags.copy()
-                if album_metadata:
-                    tags_to_write["artist"] = album_metadata["artist"]
-                    tags_to_write["album"] = album_metadata["album"]
-                    if not tags_to_write.get("year") and album_metadata.get("year"):
-                        tags_to_write["year"] = album_metadata["year"]
-                
-                if write_tags_to_file(dest, tags_to_write, dry_run=False):
-                    log(f"    ✓ Added/updated tags in {dest.name}")
-                else:
-                    log(f"    [WARN] Could not add tags to {dest.name}")
 
     # Find art files: large_cover.jpg and cover.jpg (folder.jpg handled separately)
     predownloaded_art = find_predownloaded_art_source_for_album(items)
