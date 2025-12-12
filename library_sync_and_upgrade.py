@@ -82,7 +82,7 @@ BACKUP_ROOT = MUSIC_ROOT.parent / "_EmbeddedArtOriginal"
 UPDATE_ROOT = MUSIC_ROOT.parent / "_UpdateOverlay"
 
 # Audio file extensions considered "audio"
-AUDIO_EXT = {".flac", ".mp3", ".m4a", ".aac", ".ogg", ".wav", ".wma"}
+AUDIO_EXT = {".flac", ".mp3", ".m4a", ".aac", ".ogg", ".wav", ".wma", ".m4v"}
 
 # Lossless extension we want to KEEP when present
 PREFERRED_EXT = ".flac"
@@ -428,10 +428,23 @@ def choose_album_year(items) -> str:
     return numeric_candidates[0][1]
 
 
+def sanitize_filename_component(name: str) -> str:
+    """
+    Make a string safe for use as a Windows/macOS filename component:
+    - Replace invalid characters: <>:"/\\|?*
+    - Strip trailing spaces and periods (Windows hates those)
+    """
+    invalid = '<>:"/\\|?*'
+    sanitized = "".join("_" if c in invalid else c for c in name)
+    # Windows: no trailing space or dot
+    sanitized = sanitized.rstrip(" .")
+    return sanitized
+
+
 def make_album_dir(root: Path, artist: str, album: str, year: str) -> Path:
-    safe_artist = artist.replace(":", " -")
+    safe_artist = sanitize_filename_component(artist)
     disp_year = f"({year}) " if year else ""
-    safe_album = album.replace(":", " -")
+    safe_album = sanitize_filename_component(album)
     album_dir = root / safe_artist / (disp_year + safe_album)
     if not DRY_RUN:
         album_dir.mkdir(parents=True, exist_ok=True)
@@ -439,7 +452,8 @@ def make_album_dir(root: Path, artist: str, album: str, year: str) -> Path:
 
 
 def format_track_filename(tags, ext: str) -> str:
-    return f"{tags['tracknum']:02d} - {tags['title']}{ext.lower()}"
+    safe_title = sanitize_filename_component(tags["title"])
+    return f"{tags['tracknum']:02d} - {safe_title}{ext.lower()}"
 
 
 def export_embedded_art_to_cover(first_file: Path, cover_path: Path) -> bool:
