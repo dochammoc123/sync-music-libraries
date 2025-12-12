@@ -7,6 +7,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from mutagen import File as MutagenFile
+from mutagen.easyid3 import EasyID3
+from mutagen.flac import FLAC
+from mutagen.mp4 import MP4
 import musicbrainzngs
 
 from config import AUDIO_EXT, ENABLE_WEB_ART_LOOKUP, MB_APP, MB_VER, MB_CONTACT, WEB_ART_LOOKUP_TIMEOUT
@@ -42,11 +45,25 @@ def get_tags_from_path(path: Path, downloads_root: Path) -> Dict[str, Any]:
             artist = "Unknown Artist"
             album = "Unknown Album"
         
-        # Extract title from filename (remove extension and track number if present)
-        title = path.stem
-        # Try to remove leading track number like "02 - " or "02."
+        # Extract title and track number from filename
         import re
-        title = re.sub(r'^\d+\s*[-.]\s*', '', title).strip()
+        title = path.stem
+        
+        # Try to extract track number from filename like "02 - " or "02."
+        tracknum = 0
+        track_match = re.match(r'^(\d+)\s*[-.]\s*', title)
+        if track_match:
+            try:
+                tracknum = int(track_match.group(1))
+            except ValueError:
+                tracknum = 0
+            # Remove track number prefix
+            title = re.sub(r'^\d+\s*[-.]\s*', '', title).strip()
+        
+        # Try to remove artist prefix like "Lorde - " or "Artist - "
+        # This handles cases like "02 - Lorde - 400 Lux" -> "400 Lux"
+        # Pattern: "Artist - Title" format (after tracknum removed)
+        title = re.sub(r'^[^-]+-\s*', '', title).strip()  # Remove "Artist - " prefix
         if not title:
             title = path.stem
         
@@ -54,7 +71,7 @@ def get_tags_from_path(path: Path, downloads_root: Path) -> Dict[str, Any]:
             "artist": artist.strip(),
             "album": album.strip(),
             "year": "",
-            "tracknum": 0,
+            "tracknum": tracknum,
             "discnum": 1,
             "title": title.strip(),
         }
@@ -400,4 +417,74 @@ def format_track_filename(tags: Dict[str, Any], ext: str) -> str:
     """Format a track filename from tags."""
     safe_title = sanitize_filename_component(tags["title"])
     return f"{tags['tracknum']:02d} - {safe_title}{ext.lower()}"
+
+
+def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False) -> bool:
+    """
+    Write tags to an audio file.
+    Returns True if successful, False otherwise.
+    """
+    try:
+        ext = path.suffix.lower()
+        
+        if ext == ".flac":
+            audio = FLAC(str(path))
+            audio["TITLE"] = tags["title"]
+            audio["ARTIST"] = tags["artist"]
+            audio["ALBUM"] = tags["album"]
+            if tags.get("year"):
+                audio["DATE"] = tags["year"]
+            audio["TRACKNUMBER"] = str(tags["tracknum"])
+            if tags.get("discnum", 1) > 1:
+                audio["DISCNUMBER"] = str(tags["discnum"])
+            if not dry_run:
+                audio.save()
+            return True
+            
+        elif ext in {".mp3", ".mp4", ".m4a", ".m4v"}:
+            if ext in {".mp4", ".m4a", ".m4v"}:
+                audio = MP4(str(path))
+                audio["\xa9nam"] = tags["title"]
+                audio["\xa9ART"] = tags["artist"]
+                audio["\xa9alb"] = tags["album"]
+                if tags.get("year"):
+                    audio["\xa9day"] = tags["year"]
+                audio["trkn"] = [(tags["tracknum"], 0)]
+                if tags.get("discnum", 1) > 1:
+                    audio["disk"] = [(tags["discnum"], 0)]
+            else:
+                audio = EasyID3(str(path))
+                audio["title"] = tags["title"]
+                audio["artist"] = tags["artist"]
+                audio["album"] = tags["album"]
+                if tags.get("year"):
+                    audio["date"] = tags["year"]
+                audio["tracknumber"] = str(tags["tracknum"])
+                if tags.get("discnum", 1) > 1:
+                    audio["discnumber"] = str(tags["discnum"])
+            if not dry_run:
+                audio.save()
+            return True
+            
+        else:
+            # Try generic MutagenFile for other formats
+            audio = MutagenFile(str(path), easy=True)
+            if audio is not None:
+                audio["title"] = tags["title"]
+                audio["artist"] = tags["artist"]
+                audio["album"] = tags["album"]
+                if tags.get("year"):
+                    audio["date"] = tags["year"]
+                audio["tracknumber"] = str(tags["tracknum"])
+                if tags.get("discnum", 1) > 1:
+                    audio["discnumber"] = str(tags["discnum"])
+                if not dry_run:
+                    audio.save()
+                return True
+                
+        return False
+        
+    except Exception as e:
+        log(f"  [WARN] Could not write tags to {path}: {e}")
+        return False
 

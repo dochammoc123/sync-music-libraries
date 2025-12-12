@@ -18,7 +18,7 @@ from logging_utils import (
     album_label_from_tags,
     log,
 )
-from tag_operations import choose_album_year, format_track_filename, sanitize_filename_component
+from tag_operations import choose_album_year, format_track_filename, sanitize_filename_component, write_tags_to_file
 
 
 def make_album_dir(root: Path, artist: str, album: str, year: str, dry_run: bool = False) -> Path:
@@ -156,6 +156,22 @@ def move_album_from_downloads(
         if not dry_run:
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dest))
+            
+            # If tags were missing/fallback, try to write tags to the file
+            # Check if this file originally had tags by seeing if we got tags from get_tags()
+            original_tags = None
+            try:
+                from tag_operations import get_tags
+                original_tags = get_tags(dest)  # Try reading tags from the moved file
+            except Exception:
+                pass
+            
+            # If tags are missing or incomplete (tracknum=0 when it shouldn't be), write tags
+            if not original_tags or (original_tags.get("tracknum", 0) == 0 and tags.get("tracknum", 0) > 0):
+                if write_tags_to_file(dest, tags, dry_run=False):
+                    log(f"    Added tags to {dest.name}")
+                else:
+                    log(f"    [WARN] Could not add tags to {dest.name}")
 
     # Find art files: large_cover.jpg and cover.jpg (folder.jpg handled separately)
     predownloaded_art = find_predownloaded_art_source_for_album(items)
