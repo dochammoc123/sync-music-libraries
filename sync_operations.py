@@ -6,7 +6,7 @@ import shutil
 from pathlib import Path
 from typing import Set, Tuple
 
-from config import AUDIO_EXT, BACKUP_ROOT, MUSIC_ROOT, T8_ROOT, UPDATE_ROOT
+from config import AUDIO_EXT, BACKUP_ROOT, CLEAN_EMPTY_BACKUP_FOLDERS, MUSIC_ROOT, T8_ROOT, UPDATE_ROOT
 from logging_utils import (
     add_album_event_label,
     album_label_from_dir,
@@ -205,10 +205,33 @@ def restore_flacs_from_backups(dry_run: bool = False) -> None:
                     label = album_label_from_dir(dest.parent)
                     add_album_warning_label(label, f"[WARN] Could not delete backup {backup_file}: {e}")
 
-        if not dry_run:
-            try:
-                if not os.listdir(backup_dir):
-                    backup_dir.rmdir()
-            except OSError:
-                pass
+        # Clean up empty directories after restoring files
+        if not dry_run and CLEAN_EMPTY_BACKUP_FOLDERS:
+            current = backup_dir
+            while True:
+                try:
+                    # Stop at BACKUP_ROOT (don't delete the root itself)
+                    if current.resolve() == BACKUP_ROOT.resolve():
+                        break
+                except FileNotFoundError:
+                    break
+
+                try:
+                    contents = list(current.iterdir())
+                except FileNotFoundError:
+                    break
+
+                if contents:
+                    # Directory not empty, stop cleaning
+                    break
+
+                log(f"  [CLEANUP] Removing empty backup folder: {current}")
+                try:
+                    current.rmdir()
+                except OSError as e:
+                    log(f"    [CLEANUP WARN] Could not remove {current}: {e}")
+                    break
+
+                # Move up to parent directory
+                current = current.parent
 

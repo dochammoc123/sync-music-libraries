@@ -23,11 +23,11 @@ def icloud_dir() -> Path:
     elif SYSTEM == "Darwin":
         return home / "Library" / "Mobile Documents" / "com~apple~CloudDocs"
     else:
-        return home / "scripts"
+        return home / "icloud" # not used
 
 
 ICLOUD = icloud_dir()
-SCRIPTS_ROOT = ICLOUD / "scripts"
+SCRIPTS_ROOT = ICLOUD / "scripts" / "sync-music-libraries"
 
 # Per-OS config
 if SYSTEM == "Windows":
@@ -72,6 +72,9 @@ MB_CONTACT = "dochammoc@gmail.com"  # optional but recommended
 
 # Delete empty directories under DOWNLOADS_DIR after moving files?
 CLEAN_EMPTY_DOWNLOAD_FOLDERS = True
+
+# Delete empty directories under BACKUP_ROOT after restoring files?
+CLEAN_EMPTY_BACKUP_FOLDERS = True
 
 LOG_MAX_BYTES = 1_000_000    # ~1 MB per log file
 LOG_BACKUP_COUNT = 5         # keep up to 5 old logs
