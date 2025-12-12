@@ -204,7 +204,9 @@ def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_v
       1. Collect all artist/album pairs from files that have tags.
       2. Find the most common (artist, album) pair.
       3. If tags exist, use them directly (they already handle Various Artists correctly).
-      4. If no files have tags, try path-based fallback, then MusicBrainz (for Various Artists detection).
+      4. If can't determine albumDir from most used tag (all tags are missing):
+         - Use path-based fallback to extract artist/album from folder structure
+         - Verify via MusicBrainz (for Various Artists detection and verification)
       5. Last resort: use path-based fallback or "Unknown Artist/Album".
     
     Returns (artist, album) tuple.
@@ -223,7 +225,8 @@ def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_v
         # Use tag values directly (they already handle Various Artists)
         return (candidate_artist, candidate_album)
     
-    # No tags available - try path-based fallback, then MusicBrainz (for Various Artists detection)
+    # Can't determine albumDir from most used tag (all tags are missing)
+    # Use path-based fallback, then verify via MusicBrainz (for Various Artists detection)
     if items:
         first_path = items[0][0]
         fallback_tags = get_tags_from_path(first_path, first_path.parent.parent.parent)
@@ -257,8 +260,10 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
       1. First, group files by their parent directory (album folder in downloads)
       2. For each directory group, determine artist/album from files with tags
          (using most common value, similar to choose_album_year)
-      3. For files without tags, use the determined artist/album (not path-based)
-      4. Group all files by the determined (artist, album) key
+      3. If can't determine from tags (all tags missing), use path-based fallback
+         and verify via MusicBrainz (for Various Artists detection)
+      4. For files without tags, use the determined artist/album
+      5. Group all files by the determined (artist, album) key
     
     Returns dict mapping (artist, album) -> list of (path, tags) tuples.
     """
@@ -313,7 +318,8 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
                         "title": f.stem,
                     }))
         else:
-            # No files have tags - try path-based fallback, then MusicBrainz verification
+            # Can't determine albumDir from most used tag (all tags are missing)
+            # Use path-based fallback, then verify via MusicBrainz
             if dir_files:
                 first_file = dir_files[0]
                 fallback_tags = get_tags_from_path(first_file, downloads_root if downloads_root else first_file.parent.parent.parent)
