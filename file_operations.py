@@ -157,17 +157,21 @@ def move_album_from_downloads(
             dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.move(str(src), str(dest))
             
-            # If tags were missing/fallback, try to write tags to the file
-            # Check if this file originally had tags by seeing if we got tags from get_tags()
-            original_tags = None
+            # Check if file originally had tags by trying to read them from source (before move)
+            # If tags are missing or incomplete (tracknum=0 when filename suggests it should be >0),
+            # write tags to the file
+            needs_tags = False
             try:
                 from tag_operations import get_tags
-                original_tags = get_tags(dest)  # Try reading tags from the moved file
+                original_tags = get_tags(dest)  # Try reading tags from moved file
+                # If no tags or tracknum is 0 but we have a better tracknum from filename/tags dict
+                if not original_tags or (original_tags.get("tracknum", 0) == 0 and tags.get("tracknum", 0) > 0):
+                    needs_tags = True
             except Exception:
-                pass
+                # Can't read tags, definitely need to write them
+                needs_tags = True
             
-            # If tags are missing or incomplete (tracknum=0 when it shouldn't be), write tags
-            if not original_tags or (original_tags.get("tracknum", 0) == 0 and tags.get("tracknum", 0) > 0):
+            if needs_tags:
                 if write_tags_to_file(dest, tags, dry_run=False):
                     log(f"    Added tags to {dest.name}")
                 else:
