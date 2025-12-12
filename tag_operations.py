@@ -21,20 +21,77 @@ def find_audio_files(root: Path) -> Iterator[Path]:
                 yield p
 
 
-def get_tags(path: Path) -> Optional[Dict[str, Any]]:
+def get_tags_from_path(path: Path, downloads_root: Path) -> Dict[str, Any]:
+    """
+    Fallback: Extract basic info from file path when tags can't be read.
+    Assumes structure like: downloads_root/Artist/Album/track.flac
+    """
+    try:
+        rel = path.relative_to(downloads_root)
+        parts = list(rel.parts)
+        
+        # Extract artist and album from path
+        if len(parts) >= 2:
+            artist = parts[0]
+            album = parts[1]
+        elif len(parts) == 1:
+            artist = "Unknown Artist"
+            album = "Unknown Album"
+        else:
+            artist = "Unknown Artist"
+            album = "Unknown Album"
+        
+        # Extract title from filename (remove extension and track number if present)
+        title = path.stem
+        # Try to remove leading track number like "02 - " or "02."
+        import re
+        title = re.sub(r'^\d+\s*[-.]\s*', '', title).strip()
+        if not title:
+            title = path.stem
+        
+        return {
+            "artist": artist.strip(),
+            "album": album.strip(),
+            "year": "",
+            "tracknum": 0,
+            "discnum": 1,
+            "title": title.strip(),
+        }
+    except Exception:
+        # Fallback to minimal info
+        return {
+            "artist": "Unknown Artist",
+            "album": "Unknown Album",
+            "year": "",
+            "tracknum": 0,
+            "discnum": 1,
+            "title": path.stem,
+        }
+
+
+def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """
     Return tags dict from a file: artist, album, year, tracknum, discnum, title.
-    Returns None if tags cannot be read or file is invalid/corrupted.
+    If tags cannot be read, falls back to path-based extraction if downloads_root is provided.
+    Returns None only if both tag reading and path extraction fail.
     """
     try:
         audio = MutagenFile(str(path), easy=True)
         if audio is None or not audio.tags:
+            # Try path-based fallback if available
+            if downloads_root and downloads_root in path.parents:
+                from logging_utils import log
+                log(f"[WARN] No tags in {path}, using path-based fallback")
+                return get_tags_from_path(path, downloads_root)
             return None
     except Exception as e:
         # File might be corrupted, wrong format, or unreadable
-        # Log warning but don't crash - just skip this file
+        # Try path-based fallback if available
         from logging_utils import log
         log(f"[WARN] Could not read tags from {path}: {e}")
+        if downloads_root and downloads_root in path.parents:
+            log(f"  Using path-based fallback for {path}")
+            return get_tags_from_path(path, downloads_root)
         return None
 
     try:
@@ -77,23 +134,27 @@ def get_tags(path: Path) -> Optional[Dict[str, Any]]:
         return None
 
 
-def group_by_album(files: List[Path]) -> Tuple[Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]], List[Path]]:
+def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]]:
     """
     Group paths into albums by (artist, album) ONLY.
     Year is still read from tags but not used as part of the key.
-    Returns:
-        - dict mapping (artist, album) -> list of (path, tags) tuples
-        - list of files that were skipped (no tags/invalid)
+    If tags can't be read, uses path-based fallback to extract artist/album.
+    Returns dict mapping (artist, album) -> list of (path, tags) tuples.
     """
     albums: Dict[Tuple[str, str], List[Tuple[Path, Dict]]] = {}
-    skipped_files: List[Path] = []
     
     for f in files:
-        tags = get_tags(f)
+        tags = get_tags(f, downloads_root)
         if not tags:
-            log(f"[WARN] No tags for {f}, skipping.")
-            skipped_files.append(f)
-            continue
+            # Last resort: use path fallback even if downloads_root not provided
+            from logging_utils import log
+            log(f"[WARN] No tags for {f}, using minimal path-based info")
+            # Try to infer downloads root from path
+            potential_root = f.parent.parent.parent  # Assume Downloads/Music structure
+            tags = get_tags_from_path(f, potential_root)
+            if not tags:
+                log(f"[ERROR] Could not process {f}, skipping.")
+                continue
 
         artist = tags["artist"]
         album = tags["album"]
@@ -101,7 +162,7 @@ def group_by_album(files: List[Path]) -> Tuple[Dict[Tuple[str, str], List[Tuple[
         key = (artist, album)
         albums.setdefault(key, []).append((f, tags))
 
-    return albums, skipped_files
+    return albums
 
 
 def choose_album_year(items: List[Tuple[Path, Dict[str, Any]]]) -> str:

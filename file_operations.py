@@ -189,7 +189,6 @@ def move_album_from_downloads(
 def process_downloads(dry_run: bool = False) -> None:
     """Process all albums in the downloads directory."""
     from tag_operations import find_audio_files, group_by_album
-    from logging_utils import add_global_warning
     
     log(f"Scanning downloads: {DOWNLOADS_DIR}")
     audio_files = list(find_audio_files(DOWNLOADS_DIR))
@@ -197,14 +196,8 @@ def process_downloads(dry_run: bool = False) -> None:
         log("No audio files found in downloads.")
         return
 
-    albums, skipped_files = group_by_album(audio_files)
+    albums = group_by_album(audio_files, downloads_root=DOWNLOADS_DIR)
     log(f"Found {len(albums)} album(s) in downloads.")
-    
-    if skipped_files:
-        log(f"[WARN] {len(skipped_files)} file(s) skipped due to missing/invalid tags:")
-        for skipped in skipped_files:
-            log(f"  - {skipped}")
-        add_global_warning(f"{len(skipped_files)} file(s) in downloads could not be processed (missing/invalid tags). These files remain in downloads for manual review.")
 
     for idx, (album_key, items) in enumerate(albums.items(), start=1):
         artist, album = album_key
