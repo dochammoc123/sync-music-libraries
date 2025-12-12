@@ -159,6 +159,15 @@ def move_album_from_downloads(
 
     predownloaded_art = find_predownloaded_art_source_for_album(items)
     used_predownloaded_art = predownloaded_art is not None
+    
+    # Check if folder.jpg exists separately in downloads (may be different from cover.jpg)
+    predownloaded_folder = None
+    candidate_dirs = {p.parent for (p, _tags) in items}
+    for d in candidate_dirs:
+        folder_candidate = d / "folder.jpg"
+        if folder_candidate.exists():
+            predownloaded_folder = folder_candidate
+            break
 
     if used_predownloaded_art:
         log(f"  PRE-DOWNLOADED ART: using {predownloaded_art.name} as album artwork source")
@@ -167,7 +176,13 @@ def move_album_from_downloads(
         if not dry_run:
             cover_dest.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(predownloaded_art, cover_dest)
-            shutil.copy2(predownloaded_art, folder_dest)
+            # Only copy to folder.jpg if folder.jpg doesn't exist separately
+            # If folder.jpg exists separately, preserve it (may be different from cover.jpg)
+            if predownloaded_folder:
+                log(f"  PRESERVING separate folder.jpg from downloads (may differ from cover.jpg)")
+                shutil.copy2(predownloaded_folder, folder_dest)
+            else:
+                shutil.copy2(predownloaded_art, folder_dest)
         add_album_event_label(label, "Art found pre-downloaded.")
     else:
         log("  No pre-downloaded art files found (large_cover/folder/cover).")
