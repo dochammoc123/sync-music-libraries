@@ -7,8 +7,9 @@ from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from mutagen import File as MutagenFile
+import musicbrainzngs
 
-from config import AUDIO_EXT
+from config import AUDIO_EXT, ENABLE_WEB_ART_LOOKUP, MB_APP, MB_VER, MB_CONTACT, WEB_ART_LOOKUP_TIMEOUT
 from logging_utils import log
 
 
@@ -134,15 +135,79 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
         return None
 
 
-def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]]) -> Tuple[str, str]:
+def verify_album_via_musicbrainz(artist: str, album: str) -> Optional[Tuple[str, str]]:
+    """
+    Query MusicBrainz to verify/identify an album.
+    Returns (verified_artist, verified_album) if found, None otherwise.
+    Handles "Various Artists" compilations.
+    """
+    if not ENABLE_WEB_ART_LOOKUP:
+        return None
+    
+    try:
+        # Initialize MusicBrainz if not already done
+        try:
+            musicbrainzngs.set_useragent(MB_APP, MB_VER, MB_CONTACT)
+        except Exception:
+            pass  # Already initialized
+        
+        # Search for the release
+        result = musicbrainzngs.search_releases(
+            artist=artist,
+            release=album,
+            limit=5  # Get a few results to find best match
+        )
+        
+        releases = result.get("release-list", [])
+        if not releases:
+            return None
+        
+        # Use the first result (most relevant)
+        release = releases[0]
+        
+        # Get artist credit (handles "Various Artists" and collaborations)
+        artist_credit_list = release.get("artist-credit", [])
+        if artist_credit_list:
+            # For compilations, artist-credit might be empty or have "Various Artists"
+            # Check if it's a compilation
+            if release.get("release-group", {}).get("secondary-type-list"):
+                secondary_types = release["release-group"]["secondary-type-list"]
+                if any(st.get("secondary-type") == "Compilation" for st in secondary_types):
+                    verified_artist = "Various Artists"
+                else:
+                    # Get primary artist from credit
+                    artist_name = artist_credit_list[0].get("name", artist)
+                    verified_artist = artist_name
+            else:
+                # Regular album - get primary artist
+                artist_name = artist_credit_list[0].get("name", artist)
+                verified_artist = artist_name
+        else:
+            # No artist credit - might be compilation
+            verified_artist = "Various Artists"
+        
+        verified_album = release.get("title", album)
+        
+        return (verified_artist, verified_album)
+        
+    except Exception as e:
+        log(f"  [WARN] MusicBrainz lookup failed for {artist} - {album}: {e}")
+        return None
+
+
+def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_via_mb: bool = True) -> Tuple[str, str]:
     """
     Given a list of (path, tags) for files in the same directory, pick canonical
     artist and album values similar to choose_album_year.
     
     Strategy:
-      - Collect all artist/album pairs from files that have tags.
-      - Find the most common (artist, album) pair.
-      - If no files have tags, use path-based fallback from the directory structure.
+      1. Collect all artist/album pairs from files that have tags.
+      2. Find the most common (artist, album) pair.
+      3. If verify_via_mb is True and we have a candidate, verify via MusicBrainz.
+      4. If no files have tags, try MusicBrainz lookup with path-based fallback.
+      5. Last resort: use path-based fallback or "Unknown Artist/Album".
+    
+    Returns (artist, album) tuple.
     """
     # Collect artist/album from files with tags
     artist_album_pairs = [(t["artist"], t["album"]) for (_p, t) in items if t.get("artist") and t.get("album")]
@@ -152,15 +217,39 @@ def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]]) -> Tuple
         counts = Counter(artist_album_pairs)
         max_count = max(counts.values())
         candidates = [pair for pair, c in counts.items() if c == max_count]
-        # If tie, pick first (could be improved to prefer more specific values)
-        return candidates[0]
+        candidate_artist, candidate_album = candidates[0]
+        
+        # Verify via MusicBrainz if enabled
+        if verify_via_mb and candidate_artist != "Unknown Artist" and candidate_album != "Unknown Album":
+            verified = verify_album_via_musicbrainz(candidate_artist, candidate_album)
+            if verified:
+                verified_artist, verified_album = verified
+                log(f"  [MB VERIFY] Verified: {candidate_artist} - {candidate_album} -> {verified_artist} - {verified_album}")
+                return (verified_artist, verified_album)
+            else:
+                log(f"  [MB VERIFY] No MusicBrainz match for {candidate_artist} - {candidate_album}, using tag values")
+        
+        return (candidate_artist, candidate_album)
     
-    # No tags available - use path-based fallback from first file's directory
+    # No tags available - try path-based fallback, then MusicBrainz
     if items:
         first_path = items[0][0]
         fallback_tags = get_tags_from_path(first_path, first_path.parent.parent.parent)
         if fallback_tags:
-            return (fallback_tags["artist"], fallback_tags["album"])
+            path_artist = fallback_tags["artist"]
+            path_album = fallback_tags["album"]
+            
+            # Try MusicBrainz verification before using path-based values
+            if verify_via_mb and path_artist != "Unknown Artist" and path_album != "Unknown Album":
+                verified = verify_album_via_musicbrainz(path_artist, path_album)
+                if verified:
+                    verified_artist, verified_album = verified
+                    log(f"  [MB VERIFY] Verified path-based: {path_artist} - {path_album} -> {verified_artist} - {verified_album}")
+                    return (verified_artist, verified_album)
+                else:
+                    log(f"  [MB VERIFY] No MusicBrainz match for path-based {path_artist} - {path_album}, using path values")
+            
+            return (path_artist, path_album)
     
     # Last resort
     return ("Unknown Artist", "Unknown Album")
@@ -202,9 +291,9 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
             else:
                 items_without_tags.append(f)
         
-        # Determine artist/album from files with tags
+        # Determine artist/album from files with tags (with MusicBrainz verification)
         if items_with_tags:
-            artist, album = choose_album_artist_album(items_with_tags)
+            artist, album = choose_album_artist_album(items_with_tags, verify_via_mb=True)
             dir_to_key[dir_path] = (artist, album)
             
             # Add files with tags
@@ -231,15 +320,25 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
                         "title": f.stem,
                     }))
         else:
-            # No files have tags - use path-based fallback for the directory
+            # No files have tags - try path-based fallback, then MusicBrainz verification
             if dir_files:
                 first_file = dir_files[0]
                 fallback_tags = get_tags_from_path(first_file, downloads_root if downloads_root else first_file.parent.parent.parent)
                 if fallback_tags:
-                    artist, album = fallback_tags["artist"], fallback_tags["album"]
+                    path_artist = fallback_tags["artist"]
+                    path_album = fallback_tags["album"]
+                    
+                    # Verify via MusicBrainz before using path-based values
+                    artist, album = choose_album_artist_album([], verify_via_mb=True)
+                    # If MusicBrainz didn't help, use path-based
+                    if artist == "Unknown Artist" and album == "Unknown Album":
+                        artist, album = path_artist, path_album
+                        log(f"[WARN] No tags in directory {dir_path}, using path-based: {artist} - {album}")
+                    else:
+                        log(f"[WARN] No tags in directory {dir_path}, MusicBrainz verified: {artist} - {album}")
+                    
                     dir_to_key[dir_path] = (artist, album)
-                    from logging_utils import log
-                    log(f"[WARN] No tags in directory {dir_path}, using path-based: {artist} - {album}")
+                    
                     for f in dir_files:
                         tags = get_tags_from_path(f, downloads_root if downloads_root else f.parent.parent.parent)
                         if tags:
