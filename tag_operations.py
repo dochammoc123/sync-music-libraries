@@ -134,34 +134,131 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
         return None
 
 
+def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]]) -> Tuple[str, str]:
+    """
+    Given a list of (path, tags) for files in the same directory, pick canonical
+    artist and album values similar to choose_album_year.
+    
+    Strategy:
+      - Collect all artist/album pairs from files that have tags.
+      - Find the most common (artist, album) pair.
+      - If no files have tags, use path-based fallback from the directory structure.
+    """
+    # Collect artist/album from files with tags
+    artist_album_pairs = [(t["artist"], t["album"]) for (_p, t) in items if t.get("artist") and t.get("album")]
+    
+    if artist_album_pairs:
+        # Find most common (artist, album) pair
+        counts = Counter(artist_album_pairs)
+        max_count = max(counts.values())
+        candidates = [pair for pair, c in counts.items() if c == max_count]
+        # If tie, pick first (could be improved to prefer more specific values)
+        return candidates[0]
+    
+    # No tags available - use path-based fallback from first file's directory
+    if items:
+        first_path = items[0][0]
+        fallback_tags = get_tags_from_path(first_path, first_path.parent.parent.parent)
+        if fallback_tags:
+            return (fallback_tags["artist"], fallback_tags["album"])
+    
+    # Last resort
+    return ("Unknown Artist", "Unknown Album")
+
+
 def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]]:
     """
     Group paths into albums by (artist, album) ONLY.
     Year is still read from tags but not used as part of the key.
-    If tags can't be read, uses path-based fallback to extract artist/album.
+    
+    Strategy:
+      1. First, group files by their parent directory (album folder in downloads)
+      2. For each directory group, determine artist/album from files with tags
+         (using most common value, similar to choose_album_year)
+      3. For files without tags, use the determined artist/album (not path-based)
+      4. Group all files by the determined (artist, album) key
+    
     Returns dict mapping (artist, album) -> list of (path, tags) tuples.
     """
-    albums: Dict[Tuple[str, str], List[Tuple[Path, Dict]]] = {}
-    
+    # Step 1: Group files by their parent directory
+    files_by_dir: Dict[Path, List[Path]] = {}
     for f in files:
-        tags = get_tags(f, downloads_root)
-        if not tags:
-            # Last resort: use path fallback even if downloads_root not provided
-            from logging_utils import log
-            log(f"[WARN] No tags for {f}, using minimal path-based info")
-            # Try to infer downloads root from path
-            potential_root = f.parent.parent.parent  # Assume Downloads/Music structure
-            tags = get_tags_from_path(f, potential_root)
-            if not tags:
-                log(f"[ERROR] Could not process {f}, skipping.")
-                continue
-
-        artist = tags["artist"]
-        album = tags["album"]
-
-        key = (artist, album)
+        parent_dir = f.parent
+        files_by_dir.setdefault(parent_dir, []).append(f)
+    
+    # Step 2: For each directory, get tags and determine artist/album
+    all_items: List[Tuple[Path, Dict[str, Any]]] = []
+    dir_to_key: Dict[Path, Tuple[str, str]] = {}
+    
+    for dir_path, dir_files in files_by_dir.items():
+        # Get tags for all files in this directory
+        items_with_tags: List[Tuple[Path, Dict[str, Any]]] = []
+        items_without_tags: List[Path] = []
+        
+        for f in dir_files:
+            tags = get_tags(f, downloads_root)
+            if tags:
+                items_with_tags.append((f, tags))
+            else:
+                items_without_tags.append(f)
+        
+        # Determine artist/album from files with tags
+        if items_with_tags:
+            artist, album = choose_album_artist_album(items_with_tags)
+            dir_to_key[dir_path] = (artist, album)
+            
+            # Add files with tags
+            all_items.extend(items_with_tags)
+            
+            # For files without tags, create minimal tags using determined artist/album
+            for f in items_without_tags:
+                from logging_utils import log
+                log(f"[WARN] No tags for {f}, using artist/album from other files in directory: {artist} - {album}")
+                # Create minimal tags with determined artist/album
+                fallback_tags = get_tags_from_path(f, downloads_root if downloads_root else f.parent.parent.parent)
+                if fallback_tags:
+                    fallback_tags["artist"] = artist
+                    fallback_tags["album"] = album
+                    all_items.append((f, fallback_tags))
+                else:
+                    # Last resort
+                    all_items.append((f, {
+                        "artist": artist,
+                        "album": album,
+                        "year": "",
+                        "tracknum": 0,
+                        "discnum": 1,
+                        "title": f.stem,
+                    }))
+        else:
+            # No files have tags - use path-based fallback for the directory
+            if dir_files:
+                first_file = dir_files[0]
+                fallback_tags = get_tags_from_path(first_file, downloads_root if downloads_root else first_file.parent.parent.parent)
+                if fallback_tags:
+                    artist, album = fallback_tags["artist"], fallback_tags["album"]
+                    dir_to_key[dir_path] = (artist, album)
+                    from logging_utils import log
+                    log(f"[WARN] No tags in directory {dir_path}, using path-based: {artist} - {album}")
+                    for f in dir_files:
+                        tags = get_tags_from_path(f, downloads_root if downloads_root else f.parent.parent.parent)
+                        if tags:
+                            tags["artist"] = artist
+                            tags["album"] = album
+                            all_items.append((f, tags))
+    
+    # Step 3: Group all items by (artist, album) key
+    albums: Dict[Tuple[str, str], List[Tuple[Path, Dict]]] = {}
+    for f, tags in all_items:
+        # Use the determined key for this file's directory, or fall back to tags
+        dir_path = f.parent
+        if dir_path in dir_to_key:
+            key = dir_to_key[dir_path]
+        else:
+            key = (tags["artist"], tags["album"])
+        
         albums.setdefault(key, []).append((f, tags))
-
+    
     return albums
 
 
