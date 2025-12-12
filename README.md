@@ -97,7 +97,9 @@ Right-click the tray icon to access:
 ```
 sync-music-libraries/
 ├── library_sync_and_upgrade.py  # Main script (legacy, being refactored)
-├── library_tray_launcher.py      # Tray launcher
+├── library_sync_and_upgrade_updated.py  # Has wip for logging refactor and some fixes (merged)
+├── library_tray_launcher.py      # Tray launcher (live)
+├── library_tray_launcher_updated.py # Some changes (merged into live)
 ├── config.py                     # Configuration module
 ├── logging_utils.py              # Logging utilities
 ├── file_operations.py            # File operations

@@ -41,7 +41,7 @@ DRY_RUN = False
 BACKUP_ORIGINAL_FLAC_BEFORE_EMBED = True
 RESTORE_FROM_BACKUP_MODE = False
 
-# Embedding behavior flags
+# Embedding behavior flags (overridden by command line arguments)
 EMBED_IF_MISSING = False        # embed cover.jpg only into FLACs that currently lack embedded art
 EMBED_FROM_UPDATES = False      # in embed mode, force embed for albums with cover.jpg from UPDATE_ROOT
 EMBED_ALL = False               # advanced: embed cover.jpg into all FLACs in all albums
@@ -148,7 +148,7 @@ def main() -> None:
         log("\nStep 8: Writing summary log...")
         write_summary_log(args.mode, DRY_RUN)
 
-        log("Step 9: Run summary notification...")
+        log("\nStep 9: Run summary notification...")
         notify_run_summary(args.mode)
                
         log("\nRun complete.")

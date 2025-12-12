@@ -39,8 +39,8 @@ if SYSTEM == "Windows":
 
 elif SYSTEM == "Darwin":
     DOWNLOADS_DIR = Path.home() / "Downloads" / "Music"
-    MUSIC_ROOT = ICLOUD / "TestMusicLibrary" / "ROON" / "Music"
-    T8_ROOT = ICLOUD / "TestMusicLibrary" / "T8" / "Music"
+    MUSIC_ROOT = "SMB:" / "TestMusicLibrary" / "ROON" / "Music"
+    T8_ROOT = "SMB:" / "TestMusicLibrary" / "T8" / "Music"
     LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_macos.log"
     SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_macos_summary.log"
 

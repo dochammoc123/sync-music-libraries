@@ -83,7 +83,7 @@ See [PREREQUISITES.md](PREREQUISITES.md) for detailed setup instructions.
    - ⚠️ **WARNING**: This deletes all files in test directories!
 
 2. **Copy test albums:**
-   - Copy a few albums from `E:\Plex Library\Music` (Windows) or your iTunes library (macOS)
+   - Copy a few albums from `E:\Plex Library\Music` (Windows) share to same (macOS)
    - Paste into `C:\Users\docha\Downloads\Music` (Windows) or `~/Downloads/Music` (macOS)
 
 3. **Activate venv and run dry-run test:**
@@ -96,7 +96,7 @@ See [PREREQUISITES.md](PREREQUISITES.md) for detailed setup instructions.
    # macOS
    source ~/local_python_envs/t8sync/bin/activate
    cd ~/Library/Mobile\ Documents/com~apple~CloudDocs/scripts/music-sync-refactored
-   python3 main.py --mode normal --dry
+   python main.py --mode normal --dry
    ```
    - Review the output
    - Check what would be done
@@ -109,8 +109,8 @@ See [PREREQUISITES.md](PREREQUISITES.md) for detailed setup instructions.
 
 5. **Verify results:**
    - Check files in `D:\TestMusicLibrary\ROON\Music` (Windows)
-   - Check files in `[iCloud]/TestMusicLibrary/ROON/Music` (macOS)
    - Check T8 sync: `D:\TestMusicLibrary\T8\Music` (Windows)
+   - Shares to same (macOS)
    - Review summary log
 
 ## Directory Structure
@@ -120,24 +120,24 @@ See [PREREQUISITES.md](PREREQUISITES.md) for detailed setup instructions.
 C:\Users\docha\Downloads\Music          # Source: Copy albums here
 D:\TestMusicLibrary\ROON\Music         # Target: Organized library
 D:\TestMusicLibrary\T8\Music            # T8 sync destination
-D:\TestMusicLibrary\_EmbeddedArtOriginal # FLAC backups
-D:\TestMusicLibrary\_UpdateOverlay      # Update patches
+D:\TestMusicLibrary\ROON\_EmbeddedArtOriginal # FLAC backups
+D:\TestMusicLibrary\ROON\_UpdateOverlay      # Update patches
 ```
 
 ### macOS Test Directories
 ```
 ~/Downloads/Music                       # Source: Copy albums here
-~/Library/Mobile Documents/.../TestMusicLibrary/ROON/Music  # Target
-~/Library/Mobile Documents/.../TestMusicLibrary/T8/Music    # T8 sync
-~/Library/Mobile Documents/.../TestMusicLibrary/_EmbeddedArtOriginal  # Backups
-~/Library/Mobile Documents/.../TestMusicLibrary/_UpdateOverlay        # Updates
+SMB:? /.../TestMusicLibrary/ROON/Music  # Target
+SMB:? /.../TestMusicLibrary/T8/Music    # T8 sync
+SMB:? /.../TestMusicLibrary/ROON/_EmbeddedArtOriginal  # Backups
+SMB:? /.../TestMusicLibrary/ROON/_UpdateOverlay        # Updates
 ```
 
 ## Deployment Location
 
 The refactored code is deployed to:
-- **Windows**: `C:\Users\docha\iCloudDrive\scripts\music-sync-refactored`
-- **macOS**: `~/Library/Mobile Documents/com~apple~CloudDocs/scripts/music-sync-refactored`
+- **Windows**: `C:\Users\docha\iCloudDrive\scripts\sync-music-libraries`
+- **macOS**: `~/Library/Mobile Documents/com~apple~CloudDocs/scripts/sync-music-libraries`
 
 This keeps it separate from your existing scripts in the parent `scripts` folder.
 
@@ -183,7 +183,7 @@ To verify the refactored version works the same:
 
 1. ✅ Verify refactored code works correctly
 2. ✅ Compare with original script output
-3. 🔄 Merge in your other refactored script (if different)
+3. ✅ Merge in your other refactored script (if different)
 4. 🔄 Re-test after merge
 5. 💬 Discuss log architecture improvements
 6. 🐛 Fix any bugs found during testing
