@@ -11,6 +11,7 @@ from config import (
     CLEAN_EMPTY_DOWNLOAD_FOLDERS,
     DOWNLOADS_DIR,
     JUNK_FILENAMES,
+    JUNK_FOLDER_NAMES,
     MUSIC_ROOT,
 )
 from logging_utils import (
@@ -57,6 +58,16 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
         for f in list(d.iterdir()):
             name = f.name
             suffix = f.suffix.lower()
+
+            # Check if this is a known junk folder (e.g., "originals" from Qobuz errors)
+            if f.is_dir() and name.lower() in JUNK_FOLDER_NAMES:
+                log(f"[CLEANUP] Removing junk folder and contents: {f}")
+                try:
+                    import shutil
+                    shutil.rmtree(f)
+                except Exception as e:
+                    log(f"[CLEANUP WARN] Could not delete junk folder {f}: {e}")
+                continue
 
             if suffix in {".jpg", ".jpeg", ".png", ".gif"}:
                 log(f"[CLEANUP] Removing leftover image in downloads: {f}")
