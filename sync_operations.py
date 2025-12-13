@@ -33,10 +33,24 @@ def remove_backup_for(rel_path: Path, dry_run: bool = False) -> None:
 def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Path]]:
     """
     Copy any files found under UPDATE_ROOT into MUSIC_ROOT, mirroring structure.
+    
+    PRIMARY PURPOSE: Allow embedding new artwork into selected albums.
+    - No way to drop a JPG by itself into downloads (without album folder) and know 
+      what album on ROON to update/embed.
+    - UPDATE_ROOT maintains structure synced with ROON, so you can drop cover.jpg 
+      into the correct album path.
+    
+    SECONDARY FUNCTION: Direct overlay of music files (audio files).
+    - Files are copied directly without filename normalization.
+    - Later step removes MP3 if FLAC exists (FLAC-only upgrade).
+    - Most music file updates come from downloads folder.
+    - UPDATE_ROOT mainly used for isolated art updates.
+    
+    Behavior:
     - Audio files: treated as new originals; any existing backup for that path is removed.
     - Other files (e.g., cover.jpg) overwrite/create assets in MUSIC_ROOT.
-
-    Files in UPDATE_ROOT are deleted after being applied.
+    - Files in UPDATE_ROOT are deleted after being applied.
+    
     Returns:
       updated_album_dirs: set of album directories in MUSIC_ROOT that were touched.
       albums_with_new_cover: subset where cover.jpg came from UPDATE_ROOT.
