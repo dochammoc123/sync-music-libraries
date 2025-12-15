@@ -79,9 +79,11 @@ def album_label_from_tags(artist: str, album: str, year: str) -> str:
 def album_label_from_dir(album_dir: Path) -> str:
     """
     Build a label from the directory under MUSIC_ROOT, e.g.
-    'Artist - (1995) Album'. Falls back to path if odd.
+    'Artist - Album (1995)'. Normalizes year format to match album_label_from_tags().
+    Falls back to path if odd.
     """
     from config import MUSIC_ROOT
+    import re
     
     try:
         rel = album_dir.relative_to(MUSIC_ROOT)
@@ -96,7 +98,17 @@ def album_label_from_dir(album_dir: Path) -> str:
     if len(parts) >= 2:
         artist = parts[0]
         album_folder = parts[1]
-        return f"{artist} - {album_folder}"
+        
+        # Extract year from album folder if it's at the beginning: "(2012) Album Name"
+        # Normalize to match album_label_from_tags() format: "Artist - Album (2012)"
+        year_match = re.match(r'^\((\d{4})\)\s*(.+)$', album_folder)
+        if year_match:
+            year = year_match.group(1)
+            album = year_match.group(2).strip()
+            return f"{artist} - {album} ({year})"
+        else:
+            # No year prefix, use as-is
+            return f"{artist} - {album_folder}"
     else:
         return rel.as_posix()
 
@@ -150,34 +162,29 @@ def notify_run_summary(mode: str) -> None:
     """
     Simple cross-platform notification at the end of a run,
     mentioning whether there were warnings.
+    Now just logs to console - no blocking prompts.
     """
     total_warnings = sum(len(v["warnings"]) for v in ALBUM_SUMMARY.values()) + len(GLOBAL_WARNINGS)
 
     if total_warnings == 0:
-        title = "Library Sync Complete"
         message = f"Mode: {mode} — finished with no warnings."
     else:
-        title = "Library Sync Complete (Warnings)"
         message = f"Mode: {mode} — finished with {total_warnings} warning(s)."
 
-    # macOS Notification
+    log(f"Run complete: {message}")
+
+    # macOS Notification (non-blocking)
     if SYSTEM == "Darwin":
         try:
             subprocess.run([
                 "osascript", "-e",
-                f'display notification "{message}" with title "{title}"'
+                f'display notification "{message}" with title "Library Sync Complete"'
             ], check=False)
         except Exception as e:
             log(f"[WARN] macOS notification failed: {e}")
 
-    # Windows Notification
-    elif SYSTEM == "Windows":
-        try:
-            import ctypes
-            MB_OK = 0x0
-            ctypes.windll.user32.MessageBoxW(0, message, title, MB_OK)
-        except Exception as e:
-            log(f"[WARN] Windows notification failed: {e}")
+    # Windows: No blocking MessageBox - just log to console
+    # The console and summary log viewer will remain open for user to review
 
     # Other OS: no-op beyond log line
 

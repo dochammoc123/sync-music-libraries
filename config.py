@@ -83,11 +83,13 @@ WEB_ART_LOOKUP_TIMEOUT = 4       # seconds per fetch attempt
 WEB_ART_LOOKUP_RETRIES = 3       # number of attempts
 ENABLE_WEB_ART_LOOKUP = True     # enable/disable web art lookups
 
-# Files we consider ignorable "junk" in download folders
-JUNK_FILENAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
+# Files we clean up from download folders (exact filenames)
+CLEANUP_FILENAMES = {".DS_Store", "Thumbs.db", "desktop.ini"}
 
-# Folder names we consider "junk" in download folders (e.g., from Qobuz download errors)
-# These folders and their contents will be removed during cleanup
-JUNK_FOLDER_NAMES = {"originals"}
+# Extensions we clean up from download folders (incomplete downloads, leftover images, archives, etc.)
+CLEANUP_EXTENSIONS = {".partial", ".jpg", ".jpeg", ".png", ".gif", ".zip"}
+
+# Archive formats we support for extraction (can be extended with 7z, rar, etc.)
+ARCHIVE_EXTENSIONS = {".zip"}  # Add ".7z", ".rar", etc. as needed
 
 

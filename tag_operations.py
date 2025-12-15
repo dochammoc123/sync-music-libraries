@@ -87,6 +87,189 @@ def get_tags_from_path(path: Path, downloads_root: Path) -> Dict[str, Any]:
         }
 
 
+def get_sample_rate(audio_path: Path) -> Optional[int]:
+    """
+    Get the sample rate (frequency) in Hz from an audio file.
+    Returns None if cannot be determined.
+    """
+    try:
+        audio = MutagenFile(str(audio_path))
+        if audio is None:
+            return None
+        
+        # Most formats expose sample_rate via .info
+        if hasattr(audio, 'info') and hasattr(audio.info, 'sample_rate'):
+            return int(audio.info.sample_rate)
+        
+        return None
+    except Exception:
+        return None
+
+
+def get_bitrate(audio_path: Path) -> Optional[int]:
+    """
+    Get the bitrate in bits per second from an audio file.
+    Returns None if cannot be determined.
+    Note: For lossless formats (FLAC), this is the actual encoded bitrate, not sample rate.
+    """
+    try:
+        audio = MutagenFile(str(audio_path))
+        if audio is None:
+            return None
+        
+        if hasattr(audio, 'info') and hasattr(audio.info, 'bitrate'):
+            # bitrate is typically in bps (bits per second)
+            return int(audio.info.bitrate)
+        
+        return None
+    except Exception:
+        return None
+
+
+def get_audio_duration(audio_path: Path) -> Optional[float]:
+    """
+    Get the audio duration in seconds from an audio file.
+    Returns None if cannot be determined.
+    Note: This is metadata duration, which may be incorrect for truncated files.
+    """
+    try:
+        audio = MutagenFile(str(audio_path))
+        if audio is None:
+            return None
+        
+        if hasattr(audio, 'info') and hasattr(audio.info, 'length'):
+            return float(audio.info.length)
+        
+        return None
+    except Exception:
+        return None
+
+
+def estimate_expected_file_size(duration: float, sample_rate: int, channels: int = 2, format: str = "flac", bitrate: Optional[int] = None) -> Optional[int]:
+    """
+    Estimate expected file size for an audio file based on duration, sample rate, format, and actual bitrate.
+    Returns estimated size in bytes, or None if cannot estimate.
+    
+    If bitrate is provided, uses that directly (most accurate).
+    Otherwise falls back to format-based estimates.
+    
+    For FLAC: Uses actual bitrate if available, otherwise estimates based on compression ratio
+    For MP3/M4A/AAC: Uses actual bitrate if available, otherwise uses format defaults
+    """
+    if duration <= 0:
+        return None
+    
+    # If we have actual bitrate, use it directly (most accurate)
+    if bitrate and bitrate > 0:
+        # bitrate is in bits per second, convert to bytes: duration * bitrate / 8
+        estimated = int(duration * bitrate / 8)
+        return estimated
+    
+    # Fall back to format-based estimates if no bitrate available
+    if format.lower() == "flac":
+        if sample_rate <= 0:
+            return None
+        # FLAC: uncompressed ≈ duration * sample_rate * channels * 3 bytes (24-bit)
+        uncompressed = duration * sample_rate * channels * 3
+        # FLAC compression ratio typically 0.5-0.7, use 0.6 as average
+        estimated = int(uncompressed * 0.6)
+        return estimated
+    elif format.lower() in ("mp3", "m4a", "aac"):
+        # Lossy formats: estimate based on typical bitrates
+        # MP3: 128-320 kbps, use 192 kbps as average
+        # M4A/AAC: similar, use 256 kbps as average
+        default_bitrate = 192000 if format.lower() == "mp3" else 256000  # bits per second
+        estimated = int(duration * default_bitrate / 8)
+        return estimated
+    
+    return None
+
+
+def check_file_size_warning(audio_path: Path) -> Optional[Tuple[str, str]]:
+    """
+    Check if file size seems unusually small for its duration/quality.
+    Returns (level, message) tuple if suspicious, None otherwise.
+    Level is either "WARN" (< 80% of expected) or "INFO" (80-90% of expected).
+    
+    Uses expected bitrate based on sample rate/format (NOT actual file bitrate,
+    since truncated files will have artificially low bitrates).
+    
+    Note: This is a heuristic - actual file size can vary significantly.
+    - WARN: File is < 80% of expected (may be truncated)
+    - INFO: File is 80-90% of expected (suspicious but not certain)
+    
+    Future enhancement: To truly detect truncated files, we could attempt to decode
+    the last second of audio using ffmpeg/pydub. This would require:
+    - Additional dependency (ffmpeg or pydub)
+    - Slower processing (decoding each file)
+    - More reliable detection of truncation
+    
+    For now, file size comparison when duplicates exist is the most practical approach.
+    """
+    try:
+        file_size = audio_path.stat().st_size
+        duration = get_audio_duration(audio_path)
+        sample_rate = get_sample_rate(audio_path)
+        bitrate = get_bitrate(audio_path)  # Get actual bitrate from file
+        
+        if not duration:
+            return None
+        
+        # Get format from extension
+        ext = audio_path.suffix.lower()
+        format_name = ext[1:] if ext else "flac"  # Remove the dot
+        
+        # Get channels (default to 2 if can't determine)
+        channels = 2
+        try:
+            audio = MutagenFile(str(audio_path))
+            if audio and hasattr(audio, 'info') and hasattr(audio.info, 'channels'):
+                channels = audio.info.channels
+        except Exception:
+            pass
+        
+        # Calculate expected bitrate based on sample rate and format (NOT actual file bitrate)
+        # Truncated files will have artificially low bitrates, so we need expected values
+        expected_bitrate = None
+        if format_name == "flac" and sample_rate:
+            # FLAC: estimate based on sample rate (higher sample rate = higher bitrate)
+            # Typical FLAC bitrates: 44.1kHz ≈ 800-1000 kbps, 96kHz ≈ 2000-3000 kbps, 192kHz ≈ 4000-6000 kbps
+            if sample_rate >= 192000:
+                expected_bitrate = 5000000  # ~5 Mbps for 192kHz
+            elif sample_rate >= 96000:
+                expected_bitrate = 2500000  # ~2.5 Mbps for 96kHz
+            elif sample_rate >= 44100:
+                expected_bitrate = 900000   # ~900 kbps for 44.1kHz
+            else:
+                # Fallback: calculate from sample rate
+                expected_bitrate = int(sample_rate * channels * 24 * 0.6)
+        elif format_name in ("mp3", "m4a", "aac"):
+            # Lossy formats: use typical bitrates (MP3: 320kbps, M4A/AAC: 256kbps)
+            expected_bitrate = 320000 if format_name == "mp3" else 256000
+        
+        # Use expected bitrate (not actual file bitrate) to detect truncation
+        expected_size = estimate_expected_file_size(duration, sample_rate, channels, format_name, expected_bitrate)
+        if not expected_size:
+            return None
+        
+        # Check size ratio and return appropriate warning level
+        # WARN: < 85% of expected (likely truncated)
+        # INFO: 85-96% of expected (suspicious - may be missing end, like Royals at 95.9%)
+        size_ratio = file_size / expected_size if expected_size > 0 else 1.0
+        
+        if size_ratio < 0.96:
+            bitrate_str = f" @ {expected_bitrate/1000:.0f}kbps expected" if expected_bitrate else f" @ {sample_rate}Hz" if sample_rate else ""
+            message = f"File size ({file_size:,} bytes) is {size_ratio*100:.0f}% of expected ({expected_size:,} bytes) for {duration:.1f}s{bitrate_str} - may be truncated or corrupted"
+            if size_ratio < 0.85:
+                return ("WARN", message)
+            elif size_ratio < 0.96:
+                return ("INFO", message)
+        
+        return None
+    except Exception:
+        return None
+
+
 def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """
     Return tags dict from a file: artist, album, year, tracknum, discnum, title.
@@ -260,33 +443,104 @@ def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_v
     return ("Unknown Artist", "Unknown Album")
 
 
+def find_root_album_directory(file_path: Path, all_files: List[Path], downloads_root: Optional[Path] = None) -> Path:
+    """
+    Find the root album directory for a file.
+    
+    The root album directory is the first directory (walking up from the file)
+    that contains music files, but never DOWNLOADS_DIR itself.
+    This allows us to treat files in subdirectories (like "originals") as if they
+    were in the parent directory.
+    
+    Important: DOWNLOADS_DIR is never treated as an album folder, even if it
+    contains music files directly (e.g., from browser downloads).
+    
+    Example:
+      - File: Downloads/Music/Lorde/Pure Heroine/originals/track.flac
+      - If Lorde/Pure Heroine/ contains music files, return Lorde/Pure Heroine/
+      - If file is directly in Downloads/Music/, return Downloads/Music/ (but this
+        should be handled separately as files without album structure)
+    """
+    current = file_path.parent
+    root_dir = current
+    
+    # Never treat downloads_root itself as an album directory
+    if downloads_root and current.resolve() == downloads_root.resolve():
+        # File is directly in downloads root - return it as-is (will be handled separately)
+        return current
+    
+    # Walk up the directory tree (but stop before reaching downloads_root)
+    while True:
+        # Check if we've reached downloads root - stop before it
+        if downloads_root:
+            try:
+                if current.resolve() == downloads_root.resolve():
+                    break
+            except (FileNotFoundError, OSError):
+                break
+        
+        # Check if this directory contains any music files (other than the current file)
+        dir_has_music = any(
+            f.parent.resolve() == current.resolve() and f != file_path
+            for f in all_files
+        )
+        
+        if dir_has_music:
+            root_dir = current
+        
+        # Stop if we can't go higher
+        try:
+            parent = current.parent
+            if parent == current:  # Reached filesystem root
+                break
+            # Stop if next parent would be downloads_root
+            if downloads_root:
+                try:
+                    if parent.resolve() == downloads_root.resolve():
+                        break
+                except (FileNotFoundError, OSError):
+                    pass
+            current = parent
+        except (ValueError, AttributeError):
+            break
+    
+    return root_dir
+
+
 def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> Dict[Tuple[str, str], List[Tuple[Path, Dict[str, Any]]]]:
     """
     Group paths into albums by (artist, album) ONLY.
     Year is still read from tags but not used as part of the key.
     
     Strategy:
-      1. First, group files by their parent directory (album folder in downloads)
-      2. For each directory group, determine artist/album from files with tags
+      1. Find the root album directory for each file (first directory containing music files)
+         This treats files in subdirectories (like "originals") as if they were in the parent
+      2. Group files by their root album directory
+      3. For each directory group, determine artist/album from files with tags
          (using most common value, similar to choose_album_year)
-      3. If can't determine from tags (all tags missing), use path-based fallback
+      4. If can't determine from tags (all tags missing), use path-based fallback
          and verify via MusicBrainz (for Various Artists detection)
-      4. For files without tags, use the determined artist/album
-      5. Group all files by the determined (artist, album) key
+      5. For files without tags, use the determined artist/album
+      6. Group all files by the determined (artist, album) key
     
     Returns dict mapping (artist, album) -> list of (path, tags) tuples.
     """
-    # Step 1: Group files by their parent directory
+    # Step 1: Find root album directory for each file and group by root directory
     files_by_dir: Dict[Path, List[Path]] = {}
     for f in files:
-        parent_dir = f.parent
-        files_by_dir.setdefault(parent_dir, []).append(f)
+        root_dir = find_root_album_directory(f, files, downloads_root)
+        files_by_dir.setdefault(root_dir, []).append(f)
     
     # Step 2: For each directory, get tags and determine artist/album
     all_items: List[Tuple[Path, Dict[str, Any]]] = []
     dir_to_key: Dict[Path, Tuple[str, str]] = {}
     
     for dir_path, dir_files in files_by_dir.items():
+        # Special case: if dir_path is downloads_root, files are directly in downloads
+        # (e.g., from browser downloads). These will be grouped by tags only.
+        if downloads_root and dir_path.resolve() == downloads_root.resolve():
+            log(f"  [GROUP] Files directly in downloads root (no album folder structure)")
+        
         # Get tags for all files in this directory
         items_with_tags: List[Tuple[Path, Dict[str, Any]]] = []
         items_without_tags: List[Path] = []
@@ -308,7 +562,6 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
             
             # For files without tags, create minimal tags using determined artist/album
             for f in items_without_tags:
-                from logging_utils import log
                 log(f"[WARN] No tags for {f}, using artist/album from other files in directory: {artist} - {album}")
                 # Create minimal tags with determined artist/album
                 fallback_tags = get_tags_from_path(f, downloads_root if downloads_root else f.parent.parent.parent)
@@ -422,34 +675,71 @@ def format_track_filename(tags: Dict[str, Any], ext: str) -> str:
 def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, backup_enabled: bool = True) -> bool:
     """
     Write tags to an audio file.
-    If backup_enabled is True and file is FLAC, backs up the file first.
+    If backup_enabled is True, backs up the file first.
+    Detects actual file format (not just extension) to handle misnamed files.
     Returns True if successful, False otherwise.
     """
     try:
         ext = path.suffix.lower()
         
         # Backup audio files before writing tags (if backup enabled)
-        # Works for all audio file types (FLAC, MP3, M4A, etc.), not just FLAC
         if backup_enabled and not dry_run:
             from artwork import backup_audio_file_if_needed
             backup_audio_file_if_needed(path, dry_run, backup_enabled)
         
-        if ext == ".flac":
-            audio = FLAC(str(path))
-            audio["TITLE"] = tags["title"]
-            audio["ARTIST"] = tags["artist"]
-            audio["ALBUM"] = tags["album"]
-            if tags.get("year"):
-                audio["DATE"] = tags["year"]
-            audio["TRACKNUMBER"] = str(tags["tracknum"])
-            if tags.get("discnum", 1) > 1:
-                audio["DISCNUMBER"] = str(tags["discnum"])
-            if not dry_run:
-                audio.save()
-            return True
-            
-        elif ext in {".mp3", ".mp4", ".m4a", ".m4v"}:
-            if ext in {".mp4", ".m4a", ".m4v"}:
+        # Try to detect actual file format first (handles misnamed files)
+        detected_format = None
+        try:
+            audio_test = MutagenFile(str(path))
+            if audio_test is not None:
+                # Detect format from MutagenFile type
+                if hasattr(audio_test, 'mime'):
+                    mime = audio_test.mime
+                    if 'flac' in mime.lower():
+                        detected_format = 'flac'
+                    elif 'mp3' in mime.lower() or 'mpeg' in mime.lower():
+                        detected_format = 'mp3'
+                    elif 'mp4' in mime.lower() or 'm4a' in mime.lower():
+                        detected_format = 'mp4'
+                # Also check by class name
+                class_name = type(audio_test).__name__.lower()
+                if 'flac' in class_name:
+                    detected_format = 'flac'
+                elif 'mp3' in class_name or 'id3' in class_name:
+                    detected_format = 'mp3'
+                elif 'mp4' in class_name or 'm4a' in class_name:
+                    detected_format = 'mp4'
+        except Exception:
+            pass  # Will try format-specific handlers below
+        
+        # Use detected format if available, otherwise fall back to extension
+        use_format = detected_format or ext.lstrip('.')
+        
+        # Try FLAC first (if detected or extension suggests it)
+        if use_format == 'flac' or ext == ".flac":
+            try:
+                audio = FLAC(str(path))
+                audio["TITLE"] = tags["title"]
+                audio["ARTIST"] = tags["artist"]
+                audio["ALBUM"] = tags["album"]
+                if tags.get("year"):
+                    audio["DATE"] = tags["year"]
+                audio["TRACKNUMBER"] = str(tags["tracknum"])
+                if tags.get("discnum", 1) > 1:
+                    audio["DISCNUMBER"] = str(tags["discnum"])
+                if not dry_run:
+                    audio.save()
+                return True
+            except Exception as e:
+                if ext == ".flac":
+                    # If extension says FLAC but it's not, try other formats
+                    log(f"  [WARN] File has .flac extension but is not valid FLAC, trying other formats: {e}")
+                else:
+                    raise  # Re-raise if we weren't expecting FLAC
+        
+        # Try MP4/M4A (if detected or extension suggests it)
+        if use_format in {'mp4', 'm4a'} or ext in {".mp4", ".m4a", ".m4v"}:
+            try:
                 audio = MP4(str(path))
                 audio["\xa9nam"] = tags["title"]
                 audio["\xa9ART"] = tags["artist"]
@@ -459,24 +749,19 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
                 audio["trkn"] = [(tags["tracknum"], 0)]
                 if tags.get("discnum", 1) > 1:
                     audio["disk"] = [(tags["discnum"], 0)]
-            else:
+                if not dry_run:
+                    audio.save()
+                return True
+            except Exception:
+                if ext in {".mp4", ".m4a", ".m4v"}:
+                    pass  # Try MP3 next
+                else:
+                    raise
+        
+        # Try MP3 (if detected or extension suggests it)
+        if use_format == 'mp3' or ext == ".mp3":
+            try:
                 audio = EasyID3(str(path))
-                audio["title"] = tags["title"]
-                audio["artist"] = tags["artist"]
-                audio["album"] = tags["album"]
-                if tags.get("year"):
-                    audio["date"] = tags["year"]
-                audio["tracknumber"] = str(tags["tracknum"])
-                if tags.get("discnum", 1) > 1:
-                    audio["discnumber"] = str(tags["discnum"])
-            if not dry_run:
-                audio.save()
-            return True
-            
-        else:
-            # Try generic MutagenFile for other formats
-            audio = MutagenFile(str(path), easy=True)
-            if audio is not None:
                 audio["title"] = tags["title"]
                 audio["artist"] = tags["artist"]
                 audio["album"] = tags["album"]
@@ -488,7 +773,31 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
                 if not dry_run:
                     audio.save()
                 return True
+            except Exception:
+                if ext == ".mp3":
+                    pass  # Try generic next
+                else:
+                    raise
+        
+        # Try generic MutagenFile for other formats
+        try:
+            audio = MutagenFile(str(path), easy=True)
+            if audio is not None and audio.tags:
+                audio["title"] = tags["title"]
+                audio["artist"] = tags["artist"]
+                audio["album"] = tags["album"]
+                if tags.get("year"):
+                    audio["date"] = tags["year"]
+                audio["tracknumber"] = str(tags["tracknum"])
+                if tags.get("discnum", 1) > 1:
+                    audio["discnumber"] = str(tags["discnum"])
+                if not dry_run:
+                    audio.save()
+                return True
+        except Exception:
+            pass
                 
+        log(f"  [WARN] Could not determine file format for {path}")
         return False
         
     except Exception as e:

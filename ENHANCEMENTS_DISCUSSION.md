@@ -80,31 +80,58 @@
 
 ### Secondary Function:
 - **Direct overlay of music files** (audio files)
-- Files are copied directly without filename normalization
+- Audio filenames are normalized using tags (same as downloads) to ensure consistency
 - Later step removes MP3 if FLAC exists (FLAC-only upgrade)
 - Most music file updates come from downloads folder
 - UPDATE_ROOT mainly used for isolated art updates
 
 ### Current Behavior (from `sync_operations.py::apply_updates_from_overlay()`):
 1. Scans `UPDATE_ROOT` recursively
-2. For audio files: copies to `MUSIC_ROOT`, removes backup for that path
+2. For audio files: normalizes filename using tags, copies to `MUSIC_ROOT`, removes backup for that path
 3. For other files (cover.jpg, etc.): copies to `MUSIC_ROOT`
 4. Deletes source files from `UPDATE_ROOT` after copying
 5. Returns list of updated album directories
+6. Warns if destination file exists (for future bitrate upgrade feature)
 
-### Potential Enhancement:
-- **Maybe normalize filenames** in UPDATE_ROOT to ensure no duplicates
-- Checksum check as optional safety measure
-- Keep existing behavior otherwise
+### Future Enhancement - Frequency/Sample Rate Comparison:
+- **Compare sample rates (frequency)** when same filename/ext detected
+- Only compare within same extension (e.g., FLAC to FLAC, not FLAC to MP3)
+- Warn user if overwriting with lower sample rate
+- Ask for confirmation before overwrite
+- Assumption: FLAC is lossless (always preferred over other formats)
+- Within same format: prefer higher sample rate (e.g., 96kHz > 44.1kHz)
+- Example: Two purchases of same album, one 96kHz FLAC, one 44.1kHz FLAC → warn and ask
+- Uses same logic as downloads: both normalize filenames and overwrite existing files
+
+---
+
+## 5. Corrupted Files Handling
+
+### Current Behavior:
+- Corrupted files (can't read tags/art) are left as-is
+- Tag writing and art embedding skip corrupted files gracefully
+- New downloads with same filename will overwrite corrupted files (via `shutil.move()`)
+- Format detection tries multiple formats if extension doesn't match
+
+### Design Intent:
+- **Leave corrupted files as-is** - can't be fixed if truly corrupted
+- **Allow new downloads to replace** - if same filename detected, new file overwrites old
+- **Don't try to fix** - corrupted files are skipped during tag/art operations
+
+### Current Code Location:
+- `tag_operations.py::write_tags_to_file()` - tries multiple formats, logs warning if all fail
+- `artwork.py::embed_missing_art_global()` - tries multiple formats, skips if can't read
+- `file_operations.py::move_album_from_downloads()` - uses `shutil.move()` which overwrites existing files
 
 ---
 
 ## Summary
 
-1. **Duplicate Detection**: Consider adding to UPDATE_ROOT processing, optional checksum
+1. **Duplicate Detection**: Filenames normalized in UPDATE_ROOT, future bitrate upgrade feature
 2. **Tag-less Files**: Leave current logic alone - it works
 3. **FLAC-only Logic**: Keep as-is, test edge cases
-4. **Update Overlay**: Document design intent, consider filename normalization for duplicates
+4. **Update Overlay**: Filenames now normalized, future bitrate upgrade feature documented
+5. **Corrupted Files**: Left as-is, new downloads can overwrite
 
 **Focus**: Bug fixes, documentation, understanding current state.
 
