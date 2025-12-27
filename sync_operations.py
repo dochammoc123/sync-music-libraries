@@ -7,7 +7,7 @@ import shutil
 from pathlib import Path
 from typing import Set, Tuple
 
-from config import AUDIO_EXT, BACKUP_ROOT, CLEAN_EMPTY_BACKUP_FOLDERS, MUSIC_ROOT, T8_ROOT, UPDATE_ROOT
+from config import AUDIO_EXT, BACKUP_ROOT, CLEAN_EMPTY_BACKUP_FOLDERS, MUSIC_ROOT, T8_ROOT, T8_SYNC_USE_CHECKSUMS, UPDATE_ROOT
 from logging_utils import (
     add_album_event_label,
     album_label_from_dir,
@@ -218,11 +218,20 @@ def sync_update_root_structure(dry_run: bool = False) -> None:
                             pass
 
 
-def sync_music_to_t8(dry_run: bool = False) -> None:
+def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
     """
     Simple mirror: Copy everything from ROON to T8.
     T8 is just a straight mirror of ROON - no complex logic needed.
+    
+    Args:
+        dry_run: If True, don't make any changes
+        use_checksums: If True, use MD5 checksums for comparison (slower but accurate).
+                       If None, uses T8_SYNC_USE_CHECKSUMS from config.
+                       If False, uses fast size+mtime comparison (default).
     """
+    if use_checksums is None:
+        use_checksums = T8_SYNC_USE_CHECKSUMS
+    
     if T8_ROOT is None:
         log("\n[T8 SYNC] T8_ROOT is None, skipping sync.")
         return
@@ -240,11 +249,87 @@ def sync_music_to_t8(dry_run: bool = False) -> None:
         for name in filenames:
             src_file = src_dir / name
             dst_file = dst_dir / name
-            if (not dst_file.exists()
-                    or src_file.stat().st_mtime > dst_file.stat().st_mtime):
-                log(f"  COPY: {src_file} -> {dst_file}")
-                if not dry_run:
-                    shutil.copy2(src_file, dst_file)
+            
+            try:
+                # Check if file needs to be copied
+                should_copy = False
+                skip_reason = None
+                
+                if not dst_file.exists():
+                    should_copy = True
+                else:
+                    # Destination exists - use fast comparison: size + mtime
+                    # This is much faster than checksums while still being reliable
+                    try:
+                        src_stat = src_file.stat()
+                        dst_stat = dst_file.stat()
+                        src_size = src_stat.st_size
+                        dst_size = dst_stat.st_size
+                        src_mtime = src_stat.st_mtime
+                        dst_mtime = dst_stat.st_mtime
+                        
+                        # Quick check: if sizes differ, files are definitely different
+                        if src_size != dst_size:
+                            should_copy = True
+                        else:
+                            # Same size - use configured comparison method
+                            if use_checksums:
+                                # Accurate mode: compute checksums (slower but more reliable)
+                                def file_checksum(path: Path) -> str:
+                                    """Calculate MD5 checksum of a file."""
+                                    hash_md5 = hashlib.md5()
+                                    try:
+                                        with path.open("rb") as f:
+                                            for chunk in iter(lambda: f.read(4096), b""):
+                                                hash_md5.update(chunk)
+                                        return hash_md5.hexdigest()
+                                    except Exception:
+                                        return None
+                                
+                                src_checksum = file_checksum(src_file)
+                                dst_checksum = file_checksum(dst_file)
+                                
+                                if src_checksum is None or dst_checksum is None:
+                                    # Couldn't compute checksum - copy to be safe
+                                    log(f"  [T8 SYNC WARN] Could not compute checksum for {src_file.name}, will copy")
+                                    should_copy = True
+                                elif src_checksum == dst_checksum:
+                                    # Files are identical - skip
+                                    skip_reason = "files are identical (same checksum)"
+                                else:
+                                    # Files are different - copy
+                                    should_copy = True
+                            else:
+                                # Fast mode: compare mtimes (much faster)
+                                # If mtimes match (within 1 second tolerance for network filesystem rounding), likely same file
+                                # If source is newer, copy (file was updated)
+                                # If destination is newer, could be same file or different file with newer timestamp
+                                # For safety: only skip if sizes match AND mtimes are very close (within 1 second)
+                                mtime_diff = abs(src_mtime - dst_mtime)
+                                if mtime_diff <= 1.0:
+                                    # Sizes match and mtimes are very close - likely the same file
+                                    skip_reason = f"files appear identical (size: {src_size} bytes, mtime diff: {mtime_diff:.1f}s)"
+                                else:
+                                    # Sizes match but mtimes differ significantly - copy to be safe
+                                    should_copy = True
+                    except OSError as e:
+                        # If we can't stat/read files, try to copy anyway
+                        log(f"  [T8 SYNC WARN] Could not check destination {dst_file}: {e}, will attempt copy")
+                        should_copy = True
+                
+                if should_copy:
+                    log(f"  COPY: {src_file} -> {dst_file}")
+                    if not dry_run:
+                        try:
+                            shutil.copy2(src_file, dst_file)
+                        except Exception as e:
+                            log(f"    [T8 SYNC ERROR] Failed to copy {src_file.name}: {e}")
+                            add_album_warning_label(album_label_from_dir(src_dir), f"[WARN] Failed to copy {src_file.name} to T8: {e}")
+                elif skip_reason:
+                    log(f"  SKIP: {src_file.name} ({skip_reason})")
+            except Exception as e:
+                log(f"  [T8 SYNC ERROR] Error processing {src_file.name}: {e}")
+                add_album_warning_label(album_label_from_dir(src_dir), f"[WARN] Error syncing {src_file.name} to T8: {e}")
 
     # Remove files on T8 that don't exist in ROON
     for dirpath, dirnames, filenames in os.walk(T8_ROOT, topdown=False):

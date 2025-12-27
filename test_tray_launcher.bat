@@ -21,11 +21,11 @@ if exist "C:\Users\docha\local_python_envs\t8sync\.venv\Scripts\python.exe" (
 REM Check scripts directory
 echo.
 echo Checking scripts directory...
-if exist "C:\Users\docha\iCloudDrive\scripts\library_tray_launcher.py" (
+if exist "C:\Users\docha\iCloudDrive\scripts\sync-music-libraries\library_tray_launcher.py" (
     echo   [OK] Tray launcher script found
 ) else (
     echo   [ERROR] Tray launcher script NOT found!
-    echo   Expected: C:\Users\docha\iCloudDrive\scripts\library_tray_launcher.py
+    echo   Expected: C:\Users\docha\iCloudDrive\scripts\sync-music-libraries\library_tray_launcher.py
     pause
     exit /b 1
 )
@@ -33,7 +33,7 @@ if exist "C:\Users\docha\iCloudDrive\scripts\library_tray_launcher.py" (
 REM Check for main.py or library_sync_and_upgrade.py
 echo.
 echo Checking for sync script...
-if exist "C:\Users\docha\iCloudDrive\scripts\main.py" (
+if exist "C:\Users\docha\iCloudDrive\scripts\sync-music-libraries\main.py" (
     echo   [OK] main.py found (refactored version)
 ) else if exist "C:\Users\docha\iCloudDrive\scripts\library_sync_and_upgrade.py" (
     echo   [OK] library_sync_and_upgrade.py found (original version)
@@ -45,7 +45,7 @@ if exist "C:\Users\docha\iCloudDrive\scripts\main.py" (
 REM Check for icons
 echo.
 echo Checking for icons...
-if exist "C:\Users\docha\iCloudDrive\scripts\icons\pulse_32.png" (
+if exist "C:\Users\docha\iCloudDrive\scripts\sync-music-libraries\icons\pulse_32.png" (
     echo   [OK] Icons directory found
 ) else (
     echo   [WARN] Icons directory not found!

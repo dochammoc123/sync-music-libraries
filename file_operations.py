@@ -471,6 +471,8 @@ def move_album_from_downloads(
                 size_str = f" ({art_size[0]}x{art_size[1]})" if art_size else ""
                 
                 # Check if we should upgrade existing cover.jpg
+                # Only upgrade if new image has MORE pixels (larger dimensions)
+                # Same pixel dimensions = same quality, regardless of file size (which is just encoding/compression)
                 should_upgrade = True
                 existing_size = None
                 if cover_dest.exists():
@@ -478,9 +480,9 @@ def move_album_from_downloads(
                     if art_size and existing_size:
                         existing_pixels = existing_size[0] * existing_size[1]
                         new_pixels = art_size[0] * art_size[1]
-                        if new_pixels < existing_pixels or (new_pixels == existing_pixels and art_size[2] <= existing_size[2]):
+                        if new_pixels <= existing_pixels:
                             should_upgrade = False
-                            log(f"  PRE-DOWNLOADED ART: keeping existing cover.jpg (existing: {existing_pixels}px, new: {new_pixels}px)")
+                            log(f"  PRE-DOWNLOADED ART: keeping existing cover.jpg (existing: {existing_pixels}px, new: {new_pixels}px - same or smaller dimensions)")
                 
                 if should_upgrade:
                     if existing_size:
@@ -537,6 +539,23 @@ def move_album_from_downloads(
                         new_pixels = art_size[0] * art_size[1] if art_size else 0
                         old_pixels = existing_size[0] * existing_size[1]
                         log(f"    Upgraded cover.jpg (new: {new_pixels}px, previous: {old_pixels}px)")
+                    
+                    # Clean up the source art file if it's in the album directory (MUSIC_ROOT)
+                    # This handles pattern-matched art files like "pure-heroine-lorde.jpg" that were copied to cover.jpg
+                    # Only clean up if the source file is in the same directory as cover.jpg (not in downloads)
+                    try:
+                        from config import MUSIC_ROOT
+                        if predownloaded_art.exists() and album_dir.resolve() in predownloaded_art.resolve().parents:
+                            # Source art file is in the album directory - clean it up since we've copied it to cover.jpg
+                            log(f"    Cleaning up source art file: {predownloaded_art.name}")
+                            if not dry_run:
+                                try:
+                                    predownloaded_art.unlink()
+                                except Exception as e:
+                                    log(f"    [WARN] Could not delete source art file {predownloaded_art.name}: {e}")
+                    except Exception:
+                        # If we can't determine the path relationship, don't clean up (safer)
+                        pass
             elif predownloaded_folder:
                 # Only folder.jpg exists, use it for cover.jpg
                 log(f"  PRE-DOWNLOADED ART: using folder.jpg for cover.jpg")

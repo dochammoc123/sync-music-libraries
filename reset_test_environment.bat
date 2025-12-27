@@ -5,10 +5,10 @@ REM This cleans up test directories so you can start fresh
 setlocal
 
 set "DOWNLOADS_MUSIC=C:\Users\docha\Downloads\Music"
-set "TEST_MUSIC_ROOT=D:\TestMusicLibrary\ROON\Music"
-set "TEST_T8_ROOT=D:\TestMusicLibrary\T8\Music"
-set "BACKUP_ROOT=D:\TestMusicLibrary\ROON\_EmbeddedArtOriginal"
-set "UPDATE_ROOT=D:\TestMusicLibrary\ROON\_UpdateOverlay"
+set "TEST_MUSIC_ROOT=\\ROCK\Data\Storage\InternalStorage\Music"
+set "TEST_T8_ROOT=\\10.0.1.27\Share\EB5E-E9D3\Music"
+set "BACKUP_ROOT=\\ROCK\Data\Storage\InternalStorage\_EmbeddedArtOriginal"
+set "UPDATE_ROOT=\\ROCK\Data\Storage\InternalStorage\_UpdateOverlay"
 
 echo ========================================
 echo Reset Test Environment
@@ -76,7 +76,7 @@ echo.
 echo Test environment cleaned. Ready for fresh testing.
 echo.
 echo Next steps:
-echo   1. Copy a few albums from E:\Plex Library\Music to %DOWNLOADS_MUSIC%
+echo   1. Copy a few albums from C:\Users\docha\Downloads\from_Plex to %DOWNLOADS_MUSIC%
 echo   2. Run the sync script to test
 echo.
 pause

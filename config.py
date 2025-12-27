@@ -4,8 +4,9 @@ Contains all paths, constants, and configuration settings.
 """
 import os
 import platform
+import shutil
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Tuple
 
 # ===================== ENVIRONMENT CONFIG =====================
 
@@ -32,8 +33,8 @@ SCRIPTS_ROOT = ICLOUD / "scripts" / "sync-music-libraries"
 # Per-OS config
 if SYSTEM == "Windows":
     DOWNLOADS_DIR = Path.home() / "Downloads" / "Music"
-    MUSIC_ROOT = Path("D:/TestMusicLibrary/ROON/Music")
-    T8_ROOT = Path("D:/TestMusicLibrary/T8/Music")
+    MUSIC_ROOT = Path("//ROCK/Data/Storage/InternalStorage/Music")
+    T8_ROOT = Path("//10.0.1.27/Share/EB5E-E9D3/Music")
     LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_windows.log"
     SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_windows_summary.log"
 
@@ -91,5 +92,138 @@ CLEANUP_EXTENSIONS = {".partial", ".jpg", ".jpeg", ".png", ".gif", ".zip"}
 
 # Archive formats we support for extraction (can be extended with 7z, rar, etc.)
 ARCHIVE_EXTENSIONS = {".zip"}  # Add ".7z", ".rar", etc. as needed
+
+# Minimum disk capacity required (1TB in bytes) - protects against targeting system drives
+MIN_DISK_CAPACITY_BYTES = 1_000_000_000_000  # 1TB
+
+# T8 sync comparison mode
+# False (default): Fast mode - uses file size + mtime comparison (much faster)
+# True: Accurate mode - uses MD5 checksums (slower but more reliable)
+T8_SYNC_USE_CHECKSUMS = False
+
+
+def get_disk_root_path(path: Path) -> Path:
+    """
+    Get the disk root path for a given path.
+    For UNC paths (//SERVER/Share/Path), returns \\\\SERVER\\Share (Windows format).
+    For local paths (C:\\Path), returns C:\\.
+    """
+    path_str = str(path)
+    
+    # Handle UNC paths (Windows network shares)
+    if path_str.startswith("\\\\") or path_str.startswith("//"):
+        # UNC path: //SERVER/Share/Path or \\SERVER\Share\Path -> \\SERVER\Share
+        # Normalize to forward slashes first, then convert to Windows format
+        normalized = path_str.replace("\\", "/").strip("/")
+        parts = normalized.split("/")
+        if len(parts) >= 2:
+            # Return \\SERVER\Share (Windows UNC format)
+            if SYSTEM == "Windows":
+                return Path(f"\\\\{parts[0]}\\{parts[1]}")
+            else:
+                return Path(f"//{parts[0]}/{parts[1]}")
+        # Fallback to original path if malformed
+        return path
+    
+    # For local paths, get the root (drive letter on Windows, / on Unix)
+    return Path(path.anchor)
+
+
+def check_disk_capacity(path: Path, min_bytes: int = MIN_DISK_CAPACITY_BYTES) -> Tuple[bool, float, str]:
+    """
+    Check if the disk containing the given path has at least min_bytes total capacity.
+    This protects against accidentally targeting system drives which are typically smaller.
+    
+    Args:
+        path: The path to check disk capacity for
+        min_bytes: Minimum required disk capacity in bytes (default: 1TB)
+    
+    Returns:
+        Tuple of (has_enough_capacity: bool, capacity_gb: float, path_checked: str)
+        Returns (False, 0.0, path_checked) if check fails or path is inaccessible
+    """
+    import logging
+    import time
+    logger = logging.getLogger("library_sync")
+    
+    try:
+        # Get the disk root path (handle UNC paths properly)
+        disk_root = get_disk_root_path(path)
+        disk_root_str = str(disk_root)
+        
+        # On Windows, ensure UNC paths use backslashes for shutil.disk_usage()
+        if SYSTEM == "Windows" and disk_root_str.startswith("\\\\"):
+            # Already in Windows format (\\SERVER\Share)
+            check_path = disk_root
+        elif SYSTEM == "Windows" and (disk_root_str.startswith("//") or disk_root_str.startswith("/")):
+            # Convert forward slashes to backslashes for Windows UNC
+            check_path_str = disk_root_str.replace("/", "\\")
+            if check_path_str.startswith("//"):
+                check_path_str = "\\" + check_path_str[1:]  # //SERVER/Share -> \SERVER\Share
+            check_path = Path(check_path_str)
+        else:
+            # For local paths, check if path exists or use disk root
+            check_path = path if path.exists() else disk_root
+        
+        # For network shares (UNC paths), try multiple times with retry logic
+        # This helps when running from systray where network might not be immediately available
+        is_unc_path = SYSTEM == "Windows" and str(check_path).startswith("\\\\")
+        max_retries = 3 if is_unc_path else 1
+        retry_delay = 0.5  # 0.5 seconds between retries
+        
+        # Try to find an accessible path - start with disk root, then try the original path
+        usage = None
+        paths_to_try = [check_path, path]
+        last_error = None
+        
+        for attempt in range(max_retries):
+            for test_path in paths_to_try:
+                try:
+                    # Check if path is accessible
+                    test_str = str(test_path)
+                    # For UNC paths, we can try even if exists() fails (network might not be ready)
+                    if test_path.exists() or (SYSTEM == "Windows" and test_str.startswith("\\\\")):
+                        usage = shutil.disk_usage(test_path)
+                        if usage and usage.total > 0:
+                            break
+                        else:
+                            # Got usage but it's 0 - might be a timing issue, retry
+                            logger.debug(f"Disk usage returned 0 for {test_path}, retrying...")
+                            usage = None
+                            if attempt < max_retries - 1:
+                                time.sleep(retry_delay)
+                except (OSError, PermissionError) as e:
+                    last_error = e
+                    logger.debug(f"Could not get disk usage for {test_path} (attempt {attempt + 1}/{max_retries}): {e}")
+                    if attempt < max_retries - 1 and is_unc_path:
+                        time.sleep(retry_delay)
+                    continue
+            
+            if usage and usage.total > 0:
+                break
+        
+        if usage is None or usage.total == 0:
+            # All paths failed or returned 0
+            error_msg = f"Could not access any path to check disk capacity: {path}"
+            if last_error:
+                error_msg += f" (last error: {last_error})"
+            if is_unc_path:
+                logger.warning(f"{error_msg} - Network share may not be accessible or may need authentication")
+            raise OSError(error_msg)
+        
+        total_bytes = usage.total
+        capacity_gb = total_bytes / (1024 ** 3)  # Convert to GB
+        
+        has_enough = total_bytes >= min_bytes
+        
+        return (has_enough, capacity_gb, disk_root_str)
+    
+    except Exception as e:
+        # Log the error for debugging
+        logger.warning(f"Error checking disk capacity for {path}: {e}")
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug(f"Full traceback:", exc_info=True)
+        # Path doesn't exist, not accessible, or other error
+        return (False, 0.0, str(path))
 
 

@@ -138,7 +138,7 @@ def stop_busy_animation():
 
 # ---------- Run the sync script ----------
 
-def run_sync(mode="normal", dry=False):
+def run_sync(mode="normal", dry=False, checksums=False):
     """
     Kick off library_sync_and_upgrade.py in a background thread.
     """
@@ -157,6 +157,8 @@ def run_sync(mode="normal", dry=False):
             args = [PYTHON_EXE, str(SYNC_SCRIPT), "--mode", mode]
             if dry:
                 args.append("--dry")
+            if checksums:
+                args.append("--t8-checksums")
 
             # Run the sync script from the scripts directory
             proc = subprocess.run(args, cwd=str(SCRIPTS_ROOT))
@@ -175,6 +177,9 @@ def run_sync(mode="normal", dry=False):
 
 def on_run_normal(icon, item):
     run_sync(mode="normal", dry=False)
+
+def on_run_normal_checksums(icon, item):
+    run_sync(mode="normal", dry=False, checksums=True)
 
 def on_run_embed(icon, item):
     run_sync(mode="embed", dry=False)
@@ -206,6 +211,7 @@ def setup_tray():
 
     menu = pystray.Menu(
         item("Run (normal)", on_run_normal),
+        item("Run (normal-checksums)", on_run_normal_checksums),
         item("Run (embed)", on_run_embed),
         item("Run (restore)", on_run_restore),
         item("DRY Run (normal)", on_run_normal_dry),
