@@ -159,11 +159,68 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
             remove_backup_for(rel, dry_run)
             updated_album_dirs.add(dest.parent)
         else:
+            # Handle non-audio files (artwork, etc.)
+            # Normalize artwork filenames based on location (album vs artist folder)
+            image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+            is_image = src.suffix.lower() in image_extensions
+            
+            if is_image:
+                # Determine if this is an album folder or artist folder
+                # Album folder: MUSIC_ROOT/Artist/(Year) Album/image.jpg
+                # Artist folder: MUSIC_ROOT/Artist/image.jpg
+                dest_parent = dest.parent
+                dest_grandparent = dest_parent.parent
+                
+                # Check if this is an artist folder (parent's parent is MUSIC_ROOT)
+                is_artist_folder = False
+                try:
+                    if dest_grandparent == MUSIC_ROOT:
+                        # Artist folder: MUSIC_ROOT/Artist/image.jpg
+                        is_artist_folder = True
+                    else:
+                        # Album folder: MUSIC_ROOT/Artist/(Year) Album/image.jpg
+                        # Parent should have audio files (it's an album folder)
+                        is_artist_folder = False
+                except (ValueError, AttributeError):
+                    # If we can't determine relationship, assume it's an album folder (safer default)
+                    is_artist_folder = False
+                
+                if is_artist_folder:
+                    # Artist artwork: normalize to folder.jpg (preferred for artists)
+                    # Location is already correct (artist folder), just normalize filename
+                    normalized_dest = dest_parent / "folder.jpg"
+                    log(f"  [UPDATE ARTIST ART] Normalizing {src.name} -> folder.jpg in artist folder")
+                    dest = normalized_dest
+                else:
+                    # Album artwork: normalize to cover.jpg
+                    # Location is already correct (album folder), just normalize filename
+                    normalized_dest = dest_parent / "cover.jpg"
+                    log(f"  [UPDATE ALBUM ART] Normalizing {src.name} -> cover.jpg in album folder")
+                    dest = normalized_dest
+            
             log(f"  [UPDATE ASSET] {src} -> {dest}")
             if not dry_run:
-                shutil.copy2(src, dest)
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                # Convert image format if needed (PNG/GIF → JPG)
+                if is_image and src.suffix.lower() in {".png", ".gif", ".webp"}:
+                    try:
+                        from PIL import Image
+                        with Image.open(src) as img:
+                            # Convert RGBA to RGB if needed
+                            if img.mode in ("RGBA", "LA", "P"):
+                                rgb_img = Image.new("RGB", img.size, (255, 255, 255))
+                                if img.mode == "P":
+                                    img = img.convert("RGBA")
+                                rgb_img.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+                                img = rgb_img
+                            img.save(dest, "JPEG", quality=95, optimize=True)
+                    except Exception as e:
+                        log(f"  [UPDATE WARN] Could not convert {src.name} to JPEG, copying as-is: {e}")
+                        shutil.copy2(src, dest)
+                else:
+                    shutil.copy2(src, dest)
             updated_album_dirs.add(dest.parent)
-            if src.name.lower() == "cover.jpg":
+            if is_image and not is_artist_folder and dest.name.lower() == "cover.jpg":
                 albums_with_new_cover.add(dest.parent)
 
         if not dry_run:

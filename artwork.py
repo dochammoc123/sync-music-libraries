@@ -110,29 +110,36 @@ def fetch_art_from_web(artist: str, album: str, cover_path: Path, dry_run: bool 
 
 def find_artist_images_in_folder(artist_dir: Path) -> Optional[Path]:
     """
-    Find artist images in the artist folder (e.g., image_medium.png, image_large.png, folder.jpg, artist.jpg).
+    Find artist images in the artist folder.
+    Priority order:
+      1. folder.jpg (preferred for artist art)
+      2. artist.jpg (secondary standard name)
+      3. Any other image files (normalized - any name/type)
+    
     Returns the best/largest image found, or None.
     """
     if not artist_dir.exists() or not artist_dir.is_dir():
         return None
     
-    # Look for standard artist image filenames (priority order)
-    standard_names = ["image_large.png", "image_large.jpg", "image_medium.png", "image_medium.jpg", 
-                      "folder.jpg", "artist.jpg", "cover.jpg"]
+    # Priority 1: Check for folder.jpg (preferred for artist art)
+    folder_jpg = artist_dir / "folder.jpg"
+    if folder_jpg.exists() and folder_jpg.is_file():
+        return folder_jpg
     
-    for name in standard_names:
-        candidate = artist_dir / name
-        if candidate.exists() and candidate.is_file():
-            return candidate
+    # Priority 2: Check for artist.jpg (secondary standard name)
+    artist_jpg = artist_dir / "artist.jpg"
+    if artist_jpg.exists() and artist_jpg.is_file():
+        return artist_jpg
     
-    # Also look for any image files in artist folder (might be pattern-matched)
+    # Priority 3: Look for any image files in artist folder (normalized - any name/type)
     image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
     candidates = []
     
     for img_file in artist_dir.iterdir():
         if img_file.is_file() and img_file.suffix.lower() in image_extensions:
-            # Skip album cover files (they're in subdirectories)
-            if img_file.name.lower() not in {"cover.jpg", "folder.jpg"}:
+            # Skip standard album cover files (cover.jpg is for albums, not artists)
+            # But folder.jpg and artist.jpg are already checked above
+            if img_file.name.lower() != "cover.jpg":
                 size_info = get_image_size(img_file)
                 if size_info:
                     candidates.append((img_file, size_info))
@@ -188,89 +195,143 @@ def fetch_artist_image_from_web(artist: str, artist_dir: Path, dry_run: bool = F
 def ensure_artist_images(artist_dir: Path, artist: str, dry_run: bool = False) -> None:
     """
     Ensure folder.jpg and artist.jpg exist in the artist folder.
-    Uses (in order):
-      1. Existing images in artist folder (image_large.png, image_medium.png, folder.jpg, artist.jpg, etc.)
-      2. Web lookup via MusicBrainz (if enabled)
     
-    Creates both folder.jpg and artist.jpg from the best available source.
+    Logic:
+      - If folder.jpg exists, copy it to artist.jpg (if missing) - don't overwrite folder.jpg
+      - If artist.jpg exists, copy it to folder.jpg (if missing) - don't overwrite artist.jpg
+      - If neither exists, search for sources and create both:
+        1. Existing images in artist folder (MUSIC_ROOT/Artist/)
+        2. Artist images from downloads folder (DOWNLOADS_DIR/Artist/)
+        3. Artist images from overlay folder (UPDATE_ROOT/Artist/)
+      - Select best/largest image and create both folder.jpg and artist.jpg
+      - Convert/normalize any image file found (any name/type)
+      - No web lookup (don't add missing artist art)
     """
+    from config import DOWNLOADS_DIR, UPDATE_ROOT, MUSIC_ROOT
+    
     if not artist_dir.exists():
         return
     
     folder_path = artist_dir / "folder.jpg"
     artist_path = artist_dir / "artist.jpg"
     
-    # Check if we already have both
+    # If both exist, nothing to do
     if folder_path.exists() and artist_path.exists():
         return
     
-    # Find existing artist images in folder
-    source_image = find_artist_images_in_folder(artist_dir)
-    
-    if source_image:
-        log(f"  [ARTIST ART] Found existing image: {source_image.name}")
-        
-        if not dry_run:
-            # Convert to JPEG if needed and create both folder.jpg and artist.jpg
-            if source_image.suffix.lower() in {".png", ".gif", ".webp"}:
-                try:
-                    from PIL import Image
-                    with Image.open(source_image) as img:
-                        # Convert RGBA to RGB if needed
-                        if img.mode in ("RGBA", "LA", "P"):
-                            rgb_img = Image.new("RGB", img.size, (255, 255, 255))
-                            if img.mode == "P":
-                                img = img.convert("RGBA")
-                            rgb_img.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
-                            img = rgb_img
-                        
-                        # Save as folder.jpg and artist.jpg
-                        img.save(folder_path, "JPEG", quality=95, optimize=True)
-                        img.save(artist_path, "JPEG", quality=95, optimize=True)
-                        log(f"    Created folder.jpg and artist.jpg from {source_image.name}")
-                except Exception as e:
-                    log(f"    [WARN] Could not convert {source_image.name} to JPEG: {e}")
-                    # Fallback: copy as-is
-                    if not folder_path.exists():
-                        shutil.copy2(source_image, folder_path)
-                    if not artist_path.exists():
-                        shutil.copy2(source_image, artist_path)
-            else:
-                # Already JPEG - optimize only if large, otherwise preserve original
-                if not folder_path.exists() or not artist_path.exists():
-                    src_size = source_image.stat().st_size
-                    # Only optimize if file is unusually large (likely has metadata)
-                    if src_size > 1_000_000:  # 1MB threshold
-                        try:
-                            from PIL import Image
-                            with Image.open(source_image) as img:
-                                if not folder_path.exists():
-                                    img.save(folder_path, "JPEG", quality=95, optimize=True)
-                                if not artist_path.exists():
-                                    img.save(artist_path, "JPEG", quality=95, optimize=True)
-                            opt_size = folder_path.stat().st_size if folder_path.exists() else artist_path.stat().st_size
-                            log(f"    Optimized {source_image.name} ({src_size} -> {opt_size} bytes)")
-                        except Exception as e:
-                            log(f"    [WARN] Could not optimize {source_image.name}, copying as-is: {e}")
-                            if not folder_path.exists():
-                                shutil.copy2(source_image, folder_path)
-                            if not artist_path.exists():
-                                shutil.copy2(source_image, artist_path)
-                    else:
-                        # Small file, preserve original
-                        if not folder_path.exists():
-                            shutil.copy2(source_image, folder_path)
-                        if not artist_path.exists():
-                            shutil.copy2(source_image, artist_path)
-                        log(f"    Preserved original {source_image.name} (already optimized)")
+    # If folder.jpg exists, copy it to artist.jpg (don't overwrite folder.jpg)
+    if folder_path.exists():
+        if not artist_path.exists():
+            log(f"  [ARTIST ART] folder.jpg exists, creating artist.jpg from it")
+            if not dry_run:
+                shutil.copy2(folder_path, artist_path)
         return
     
-    # Try web lookup if no local image found
-    if ENABLE_WEB_ART_LOOKUP:
-        log(f"  [ARTIST ART] No local image found, attempting web lookup for {artist}...")
-        # For now, web lookup is not fully implemented - would need to use external service
-        # fetch_artist_image_from_web(artist, artist_dir, dry_run)
-        log(f"  [ARTIST ART] Web lookup not yet implemented (would use MusicBrainz/external service)")
+    # If artist.jpg exists, copy it to folder.jpg (don't overwrite artist.jpg)
+    if artist_path.exists():
+        if not folder_path.exists():
+            log(f"  [ARTIST ART] artist.jpg exists, creating folder.jpg from it")
+            if not dry_run:
+                shutil.copy2(artist_path, folder_path)
+        return
+    
+    # Find best artist image from multiple sources
+    candidates = []
+    
+    # 1. Check existing images in artist folder (MUSIC_ROOT/Artist/)
+    source_image = find_artist_images_in_folder(artist_dir)
+    if source_image:
+        size_info = get_image_size(source_image)
+        if size_info:
+            candidates.append((source_image, size_info, "existing"))
+    
+    # 2. Check downloads artist folder (DOWNLOADS_DIR/Artist/)
+    downloads_artist_dir = DOWNLOADS_DIR / artist_dir.name if DOWNLOADS_DIR.exists() else None
+    if downloads_artist_dir and downloads_artist_dir.exists():
+        downloads_image = find_artist_images_in_folder(downloads_artist_dir)
+        if downloads_image:
+            size_info = get_image_size(downloads_image)
+            if size_info:
+                candidates.append((downloads_image, size_info, "downloads"))
+    
+    # 3. Check overlay artist folder (UPDATE_ROOT/Artist/)
+    overlay_artist_dir = None
+    if UPDATE_ROOT.exists():
+        try:
+            rel = artist_dir.relative_to(MUSIC_ROOT)
+            overlay_artist_dir = UPDATE_ROOT / rel
+        except ValueError:
+            # artist_dir is not under MUSIC_ROOT, skip overlay check
+            pass
+    if overlay_artist_dir and overlay_artist_dir.exists():
+        overlay_image = find_artist_images_in_folder(overlay_artist_dir)
+        if overlay_image:
+            size_info = get_image_size(overlay_image)
+            if size_info:
+                candidates.append((overlay_image, size_info, "overlay"))
+    
+    # Select best (largest by pixel dimensions)
+    if candidates:
+        candidates.sort(key=lambda x: (x[1][0] * x[1][1], x[1][2]), reverse=True)
+        best_image, best_size, source = candidates[0]
+        best_pixels = best_size[0] * best_size[1]
+        
+        # Check if we should upgrade existing artist.jpg
+        should_upgrade = True
+        if artist_path.exists():
+            existing_size = get_image_size(artist_path)
+            if existing_size:
+                existing_pixels = existing_size[0] * existing_size[1]
+                if best_pixels <= existing_pixels:
+                    should_upgrade = False
+                    log(f"  [ARTIST ART] Keeping existing artist.jpg (existing: {existing_pixels}px, new: {best_pixels}px - same or smaller dimensions)")
+        
+        if should_upgrade:
+            log(f"  [ARTIST ART] Found image in {source}: {best_image.name} ({best_size[0]}x{best_size[1]}, {best_size[2]} bytes)")
+            if artist_path.exists() and existing_size:
+                existing_pixels = existing_size[0] * existing_size[1]
+                log(f"    Upgrading artist.jpg (new: {best_pixels}px, previous: {existing_pixels}px)")
+            else:
+                log(f"    Creating artist.jpg from {best_image.name}")
+            
+            if not dry_run:
+                # Convert to JPEG if needed
+                if best_image.suffix.lower() in {".png", ".gif", ".webp"}:
+                    try:
+                        from PIL import Image
+                        with Image.open(best_image) as img:
+                            # Convert RGBA to RGB if needed
+                            if img.mode in ("RGBA", "LA", "P"):
+                                rgb_img = Image.new("RGB", img.size, (255, 255, 255))
+                                if img.mode == "P":
+                                    img = img.convert("RGBA")
+                                rgb_img.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+                                img = rgb_img
+                            artist_path.parent.mkdir(parents=True, exist_ok=True)
+                            img.save(artist_path, "JPEG", quality=95, optimize=True)
+                    except Exception as e:
+                        log(f"    [WARN] Could not convert {best_image.name} to JPEG: {e}")
+                        artist_path.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(best_image, artist_path)
+                else:
+                    # Already JPEG - copy it
+                    artist_path.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(best_image, artist_path)
+                
+                # Also create folder.jpg from same source (use artist.jpg, not cover.jpg)
+                if not folder_path.exists():
+                    shutil.copy2(artist_path, folder_path)
+                
+                # Clean up source file if it's from downloads or overlay (not from existing artist folder)
+                if source in ("downloads", "overlay"):
+                    try:
+                        best_image.unlink()
+                        log(f"    Cleaned up source file: {best_image.name}")
+                    except Exception as e:
+                        log(f"    [WARN] Could not delete source file {best_image.name}: {e}")
+        return
+    
+    # No artist images found - don't try web lookup (user preference: don't add missing)
 
 
 def normalize_for_filename(text: str) -> str:
@@ -505,6 +566,27 @@ def ensure_cover_and_folder(
     cover_path = album_dir / "cover.jpg"
     folder_path = album_dir / "folder.jpg"
 
+    # If both exist, nothing to do
+    if cover_path.exists() and folder_path.exists():
+        return
+
+    # If folder.jpg exists, copy it to cover.jpg (don't overwrite folder.jpg)
+    if folder_path.exists():
+        if not cover_path.exists():
+            log("  folder.jpg exists, creating cover.jpg from it")
+            if not dry_run:
+                shutil.copy2(folder_path, cover_path)
+        return
+
+    # If cover.jpg exists, copy it to folder.jpg (don't overwrite cover.jpg)
+    if cover_path.exists():
+        if not folder_path.exists():
+            log("  cover.jpg exists, creating folder.jpg from it")
+            if not dry_run:
+                shutil.copy2(cover_path, folder_path)
+        return
+
+    # Neither exists - try to create cover.jpg from embedded art or web
     if not skip_cover_creation:
         if not cover_path.exists():
             log("  No cover.jpg; attempting to export embedded art…")
@@ -524,21 +606,12 @@ def ensure_cover_and_folder(
                     log(f"  {msg}")
                     if label:
                         add_album_warning_label(label, msg)
-        else:
-            log("  cover.jpg already exists.")
-    else:
-        if cover_path.exists():
-            log("  cover.jpg already exists (pre-downloaded art).")
-        else:
-            log("  (DRY RUN) Skipping cover.jpg creation because pre-downloaded art is found.")
-
-    if cover_path.exists():
-        if not folder_path.exists():
-            # Create folder.jpg from cover.jpg if it doesn't exist
-            # Note: move_album_from_downloads() already handles copying folder.jpg from downloads
-            log("  Creating folder.jpg from cover.jpg")
-            if not dry_run:
-                shutil.copy2(cover_path, folder_path)
+    
+    # After creating/finding cover.jpg, ensure folder.jpg exists
+    if cover_path.exists() and not folder_path.exists():
+        log("  Creating folder.jpg from cover.jpg")
+        if not dry_run:
+            shutil.copy2(cover_path, folder_path)
 
 
 def embed_art_into_flacs(album_dir: Path, dry_run: bool = False, backup_enabled: bool = True) -> None:

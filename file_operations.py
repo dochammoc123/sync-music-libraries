@@ -268,6 +268,9 @@ def move_album_from_downloads(
     # These should be cleaned up from downloads
     processed_audio_files = []
     
+    # Track destination files for use after moving (for artwork export, etc.)
+    dest_items = []
+    
     # Get album metadata from files that have tags (for filling in missing tags)
     album_metadata = None
     for _, t in items:
@@ -405,9 +408,13 @@ def move_album_from_downloads(
             if not dry_run:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(src), str(dest))
+            # Track destination file for use after moving (for artwork export, etc.)
+            dest_items.append((dest, tags_to_use))
             # Track that this file was processed (moved)
             processed_audio_files.append(src)
         else:
+            # File was skipped (better version exists) - use existing destination
+            dest_items.append((dest, tags_to_use))
             # File was skipped (better version exists) - still mark as processed for cleanup
             processed_audio_files.append(src)
 
@@ -590,9 +597,13 @@ def move_album_from_downloads(
     else:
         log("  No pre-downloaded art files found.")
 
+    # Use destination files (after moving) for artwork extraction
+    # Only use dest_items if files were actually moved (not dry-run)
+    # In dry-run mode, files still exist at source paths, so use items_sorted
+    files_for_artwork = dest_items if (dest_items and not dry_run) else items_sorted
     ensure_cover_and_folder(
         album_dir,
-        items_sorted,
+        files_for_artwork,
         artist,
         album,
         label,
@@ -697,9 +708,28 @@ def process_downloads(dry_run: bool = False) -> None:
     albums = group_by_album(audio_files, downloads_root=DOWNLOADS_DIR)
     log(f"Found {len(albums)} album(s) in downloads.")
 
+    skipped_count = 0
     for idx, (album_key, items) in enumerate(albums.items(), start=1):
         artist, album = album_key
         year = choose_album_year(items)
+
+        # Skip albums we can't reliably determine (prevents incorrect folder creation)
+        # This happens when:
+        #   1. All files are corrupt/missing tags AND path fallback returns "Unknown Artist/Album"
+        #   2. Files are directly in downloads root with no folder structure
+        if artist == "Unknown Artist" or album == "Unknown Album":
+            skipped_count += 1
+            file_paths = [str(item[0]) for item in items]
+            log(f"\n[WARN] Skipping album {idx}/{len(albums)}: Cannot determine artist/album from tags or path structure")
+            log(f"[WARN] Files will remain in downloads folder for manual processing:")
+            for file_path in file_paths[:5]:  # Show first 5 files
+                log(f"[WARN]   - {file_path}")
+            if len(file_paths) > 5:
+                log(f"[WARN]   ... and {len(file_paths) - 5} more file(s)")
+            log(f"[WARN] Please add tags or organize files in Artist/Album folder structure, then re-run script.")
+            from logging_utils import add_global_warning
+            add_global_warning(f"Skipped {len(file_paths)} file(s) in downloads - cannot determine artist/album (files: {', '.join([Path(f).name for f in file_paths[:3]])}...)")
+            continue
 
         if year:
             log(f"[DOWNLOAD] Album {idx}/{len(albums)}: {artist} - {album} ({year})")
@@ -707,6 +737,12 @@ def process_downloads(dry_run: bool = False) -> None:
             log(f"[DOWNLOAD] Album {idx}/{len(albums)}: {artist} - {album}")
 
         move_album_from_downloads(album_key, items, MUSIC_ROOT, dry_run, extracted_archives)
+    
+    if skipped_count > 0:
+        log(f"\n[WARN] Skipped {skipped_count} album(s) that could not be reliably determined. Files remain in downloads for manual processing.")
+    
+    # Match leftover artwork in downloads root to existing albums in library
+    match_root_artwork_to_existing_albums(dry_run)
     
     # Final cleanup: Remove cleanup extension files directly in downloads root
     # (ZIP files, partial downloads, etc. that weren't associated with any album)
@@ -729,6 +765,187 @@ def process_downloads(dry_run: bool = False) -> None:
                             f.unlink()
                         except Exception as e:
                             log(f"[CLEANUP WARN] Could not delete {f}: {e}")
+
+
+def match_root_artwork_to_existing_albums(dry_run: bool = False) -> None:
+    """
+    Match leftover artwork files in downloads root to existing albums in the library.
+    This handles cases where artwork was downloaded separately (e.g., browser download)
+    after the album was already processed.
+    
+    For each artwork file in downloads root:
+      1. Try to match it to an existing album by pattern matching (artist/album in filename)
+      2. If matched, check if it's better than existing artwork (larger pixel dimensions)
+      3. If better, upgrade the album artwork and remove the root file
+      4. If not better but matched, just remove the root file (already have better)
+    """
+    if not DOWNLOADS_DIR.exists() or not MUSIC_ROOT.exists():
+        return
+    
+    import re
+    from artwork import find_art_by_pattern, get_image_size, normalize_for_filename
+    
+    # Find all artwork files in downloads root
+    image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+    root_artwork_files = []
+    for f in DOWNLOADS_DIR.iterdir():
+        if not f.is_file():
+            continue
+        if f.suffix.lower() not in image_extensions:
+            continue
+        # Skip standard art filenames (not pattern-matched)
+        if f.name.lower() in {"large_cover.jpg", "cover.jpg", "folder.jpg"}:
+            continue
+        root_artwork_files.append(f)
+    
+    if not root_artwork_files:
+        return
+    
+    log(f"\n[ROOT ART] Checking {len(root_artwork_files)} artwork file(s) in downloads root for existing albums...")
+    
+    # Get all album directories from MUSIC_ROOT
+    # Structure: MUSIC_ROOT/Artist/(Year) Album/
+    album_dirs = []
+    if MUSIC_ROOT.exists():
+        for artist_dir in MUSIC_ROOT.iterdir():
+            if not artist_dir.is_dir():
+                continue
+            for item in artist_dir.iterdir():
+                if item.is_dir():
+                    # This is an album directory
+                    album_dirs.append(item)
+                elif item.name.upper().startswith("CD"):
+                    # Multi-disc album - the parent is the album directory
+                    pass
+    
+    if not album_dirs:
+        log(f"[ROOT ART] No existing albums found in library to match against.")
+        return
+    
+    # Build a list of (artist, album, album_dir) tuples for matching
+    albums_to_match = []
+    for album_dir in album_dirs:
+        try:
+            rel = album_dir.relative_to(MUSIC_ROOT)
+            parts = list(rel.parts)
+            
+            # Skip CD subdirectories
+            if parts and parts[-1].upper().startswith("CD") and len(parts) >= 2:
+                parts = parts[:-1]
+                album_dir = album_dir.parent
+            
+            if len(parts) >= 2:
+                artist = parts[0]
+                album_folder = parts[1]
+                # Extract album name (remove year prefix like "(2012) Album Name")
+                year_match = re.match(r'^\((\d{4})\)\s*(.+)$', album_folder)
+                if year_match:
+                    album = year_match.group(2).strip()
+                else:
+                    album = album_folder
+                albums_to_match.append((artist, album, album_dir))
+        except Exception:
+            continue
+    
+    matched_count = 0
+    for art_file in root_artwork_files:
+        art_file_stem = art_file.stem.lower()
+        
+        # Try to match this artwork to an album
+        best_match = None
+        best_match_score = 0
+        
+        for artist, album, album_dir in albums_to_match:
+            norm_artist = normalize_for_filename(artist)
+            norm_album = normalize_for_filename(album)
+            
+            # Check if filename contains both normalized artist and album
+            if norm_album in art_file_stem and norm_artist in art_file_stem:
+                # Calculate a simple match score (prefer longer matches)
+                score = len(norm_album) + len(norm_artist)
+                if score > best_match_score:
+                    best_match_score = score
+                    best_match = (artist, album, album_dir)
+        
+        if not best_match:
+            continue
+        
+        artist, album, album_dir = best_match
+        cover_path = album_dir / "cover.jpg"
+        
+        # Get size info for the root artwork
+        root_art_size = get_image_size(art_file)
+        if not root_art_size:
+            log(f"[ROOT ART] Could not read image size for {art_file.name}, skipping")
+            continue
+        
+        root_pixels = root_art_size[0] * root_art_size[1]
+        
+        # Check existing artwork
+        existing_better = False
+        if cover_path.exists():
+            existing_size = get_image_size(cover_path)
+            if existing_size:
+                existing_pixels = existing_size[0] * existing_size[1]
+                if existing_pixels >= root_pixels:
+                    existing_better = True
+                    log(f"[ROOT ART] Matched {art_file.name} to {artist} - {album}, but existing artwork is same or better (existing: {existing_pixels}px, root: {root_pixels}px)")
+                    # Remove root file since we already have better/same
+                    log(f"[ROOT ART] Removing matched artwork from downloads root: {art_file.name}")
+                    if not dry_run:
+                        try:
+                            art_file.unlink()
+                            matched_count += 1
+                        except Exception as e:
+                            log(f"[ROOT ART WARN] Could not delete {art_file.name}: {e}")
+                    continue
+        
+        # Root artwork is better (or no existing artwork) - upgrade
+        log(f"[ROOT ART] Matched {art_file.name} to {artist} - {album}, upgrading artwork (root: {root_pixels}px)")
+        from logging_utils import album_label_from_dir, add_album_event_label
+        label = album_label_from_dir(album_dir)
+        add_album_event_label(label, f"Upgraded artwork from downloads root: {art_file.name}")
+        
+        if not dry_run:
+            # Copy artwork to cover.jpg
+            try:
+                cover_path.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Convert format if needed (PNG/GIF to JPG)
+                if art_file.suffix.lower() in {".png", ".gif", ".webp"}:
+                    try:
+                        from PIL import Image
+                        with Image.open(art_file) as img:
+                            # Convert RGBA to RGB if needed (for PNG with transparency)
+                            if img.mode in ("RGBA", "LA", "P"):
+                                rgb_img = Image.new("RGB", img.size, (255, 255, 255))
+                                if img.mode == "P":
+                                    img = img.convert("RGBA")
+                                rgb_img.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+                                img = rgb_img
+                            img.save(cover_path, "JPEG", quality=95, optimize=True)
+                    except Exception as e:
+                        log(f"[ROOT ART WARN] Could not convert {art_file.name} to JPEG, copying as-is: {e}")
+                        shutil.copy2(art_file, cover_path)
+                else:
+                    shutil.copy2(art_file, cover_path)
+                
+                # Also update folder.jpg if it doesn't exist or is the same
+                folder_path = album_dir / "folder.jpg"
+                if not folder_path.exists() or (folder_path.exists() and folder_path.stat().st_size == cover_path.stat().st_size):
+                    shutil.copy2(cover_path, folder_path)
+                
+                # Remove the root artwork file
+                art_file.unlink()
+                matched_count += 1
+            except Exception as e:
+                log(f"[ROOT ART WARN] Could not upgrade artwork for {artist} - {album}: {e}")
+        else:
+            log(f"[ROOT ART] DRY RUN: Would upgrade artwork and remove {art_file.name}")
+            matched_count += 1
+    
+    if matched_count > 0:
+        log(f"[ROOT ART] Matched and processed {matched_count} artwork file(s) from downloads root")
 
 
 def upgrade_albums_to_flac_only(dry_run: bool = False) -> None:

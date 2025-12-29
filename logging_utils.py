@@ -16,21 +16,102 @@ from config import LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, SUMMARY_LOG_FILE, 
 
 logger = logging.getLogger("library_sync")
 
+# ANSI color codes for console output
+class Colors:
+    """ANSI color codes for terminal output."""
+    # Reset
+    RESET = '\033[0m'
+    
+    # Text colors
+    BLACK = '\033[30m'
+    RED = '\033[31m'
+    GREEN = '\033[32m'
+    YELLOW = '\033[33m'
+    BLUE = '\033[34m'
+    MAGENTA = '\033[35m'
+    CYAN = '\033[36m'
+    WHITE = '\033[37m'
+    
+    # Background colors
+    BG_BLACK = '\033[40m'
+    BG_RED = '\033[41m'
+    BG_YELLOW = '\033[43m'
+    BG_WHITE = '\033[47m'
+    
+    # Warning: black on yellow
+    WARNING = BLACK + BG_YELLOW
+    # Error: white on red
+    ERROR = WHITE + BG_RED
+
+# Icons for summary lines
+ICONS = {
+    'info': 'ℹ',
+    'warning': '⚠',
+    'error': '✗',
+    'success': '✓',
+    'step': '▶',
+}
+
 # Album + global summary structures
 # label -> {"events": [...], "warnings": [...]}
 ALBUM_SUMMARY: Dict[str, Dict[str, List[str]]] = {}
 GLOBAL_WARNINGS: List[str] = []
 
 
+def _enable_windows_ansi_colors() -> None:
+    """Enable ANSI color support on Windows 10+."""
+    if SYSTEM == "Windows":
+        try:
+            # Enable ANSI escape sequences in Windows console
+            import ctypes
+            kernel32 = ctypes.windll.kernel32
+            kernel32.SetConsoleMode(kernel32.GetStdHandle(-11), 7)  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+        except Exception:
+            # If it fails, colors just won't work - not critical
+            pass
+
+
+class ColoredFormatter(logging.Formatter):
+    """Custom formatter that adds colors to warnings and errors for console output."""
+    
+    def format(self, record: logging.LogRecord) -> str:
+        # Get the base formatted message
+        msg = super().format(record)
+        
+        # Check if message contains warning or error indicators
+        msg_upper = msg.upper()
+        if '[WARN]' in msg_upper or 'WARNING' in msg_upper:
+            msg = f"{Colors.WARNING}{msg}{Colors.RESET}"
+        elif '[ERROR]' in msg_upper or 'ERROR' in msg_upper or 'EXCEPTION' in msg_upper or 'FAILED' in msg_upper:
+            msg = f"{Colors.ERROR}{msg}{Colors.RESET}"
+        
+        return msg
+
+
+class PlainFormatter(logging.Formatter):
+    """Plain formatter for file output (no colors)."""
+    pass
+
+
 def setup_logging() -> None:
     """Configure logging with both console and file handlers."""
     logger.setLevel(logging.INFO)
-    fmt = logging.Formatter("[%(asctime)s] %(message)s", "%Y-%m-%d %H:%M:%S")
+    
+    # Enable Windows ANSI colors
+    _enable_windows_ansi_colors()
+    
+    # Plain formatter for file (no colors)
+    file_fmt = PlainFormatter("[%(asctime)s] %(message)s", "%Y-%m-%d %H:%M:%S")
+    
+    # Colored formatter for console
+    console_fmt = ColoredFormatter("[%(asctime)s] %(message)s", "%Y-%m-%d %H:%M:%S")
 
+    # Console handler with colors
     ch = logging.StreamHandler()
-    ch.setFormatter(fmt)
+    ch.setFormatter(console_fmt)
     logger.addHandler(ch)
 
+    # File handler without colors
     if LOG_FILE is not None:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         fh = RotatingFileHandler(
@@ -39,7 +120,7 @@ def setup_logging() -> None:
             backupCount=LOG_BACKUP_COUNT,
             encoding="utf-8"
         )
-        fh.setFormatter(fmt)
+        fh.setFormatter(file_fmt)
         logger.addHandler(fh)
 
 
@@ -220,6 +301,7 @@ def print_summary_log_to_stdout() -> None:
     """
     Print the summary log contents to stdout at the end of the run.
     Safe no-op if file doesn't exist.
+    Adds icons and colors to the summary output.
     """
     try:
         if not SUMMARY_LOG_FILE.exists():
@@ -228,7 +310,30 @@ def print_summary_log_to_stdout() -> None:
 
         print("\n================ SUMMARY ================")
         with SUMMARY_LOG_FILE.open("r", encoding="utf-8") as f:
-            print(f.read())
+            lines = f.readlines()
+            for line in lines:
+                line = line.rstrip('\n\r')
+                if not line:
+                    print()
+                    continue
+                
+                # Add icons and colors based on content
+                line_upper = line.upper()
+                if 'WARNING' in line_upper or 'WARN' in line_upper:
+                    # Warning line - black on yellow
+                    print(f"{Colors.WARNING}{ICONS['warning']} {line}{Colors.RESET}")
+                elif 'ERROR' in line_upper or 'FAILED' in line_upper:
+                    # Error line - white on red
+                    print(f"{Colors.ERROR}{ICONS['error']} {line}{Colors.RESET}")
+                elif line.startswith("  ") or line.startswith("\t"):
+                    # Indented line (album details) - add info icon
+                    print(f"{ICONS['info']} {line}")
+                elif ':' in line and not line.startswith("  "):
+                    # Section header (like "Albums processed:")
+                    print(f"{ICONS['step']} {line}")
+                else:
+                    # Regular line
+                    print(line)
         print("=========================================\n")
     except Exception as e:
         log(f"[WARN] Could not print summary log: {e}")

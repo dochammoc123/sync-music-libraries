@@ -265,6 +265,13 @@ def main() -> None:
             restore_flacs_from_backups(DRY_RUN)
             sync_music_to_t8(DRY_RUN, use_checksums=args.t8_checksums)
             log("Restore mode complete.")
+            
+            log("\nRefresh ROON library...")
+            from roon_refresh import refresh_roon_library
+            roon_refresh_success = refresh_roon_library(DRY_RUN)
+            if not roon_refresh_success:
+                add_global_warning("ROON library refresh failed - you may need to manually restart ROON to see new files")
+            
             write_summary_log(args.mode, DRY_RUN)
             notify_run_summary(args.mode)
             
@@ -366,10 +373,16 @@ def main() -> None:
         log("\nStep 9: Final missing-art fixup...")
         fixup_missing_art(DRY_RUN)
 
-        log("\nStep 10: Writing summary log...")
+        log("\nStep 10: Refresh ROON library...")
+        from roon_refresh import refresh_roon_library
+        roon_refresh_success = refresh_roon_library(DRY_RUN)
+        if not roon_refresh_success:
+            add_global_warning("ROON library refresh failed - you may need to manually restart ROON to see new files")
+
+        log("\nStep 11: Writing summary log...")
         write_summary_log(args.mode, DRY_RUN)
 
-        log("\nStep 11: Run summary notification...")
+        log("\nStep 12: Run summary notification...")
         notify_run_summary(args.mode)
                
         log("\nRun complete.")

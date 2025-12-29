@@ -101,6 +101,27 @@ MIN_DISK_CAPACITY_BYTES = 1_000_000_000_000  # 1TB
 # True: Accurate mode - uses MD5 checksums (slower but more reliable)
 T8_SYNC_USE_CHECKSUMS = False
 
+# ROON library refresh configuration
+# ROON needs to rescan its library after files are added/modified.
+# Set ENABLE_ROON_REFRESH to True to enable automatic ROON refresh after sync operations.
+ENABLE_ROON_REFRESH = True
+
+# ROON refresh method (always uses ROCK API for remote ROCK server)
+# "rock_api" - Restart ROON software via ROCK server REST API (default)
+# "none" - Disable ROON refresh (for testing or if using manual refresh)
+ROON_REFRESH_METHOD = "rock_api"
+
+# ROCK server configuration
+ROCK_SERVER_IP = "10.0.1.22"  # IP address or hostname of your ROCK server (e.g., "10.0.1.22" or "rock.local")
+
+# ROCK API endpoint configuration
+# Based on ROCK web UI JavaScript: POST to /1/restartsoftware with empty JSON body
+ROCK_API_ENDPOINT = "/1/restartsoftware"  # Relative path (will be appended to http://{ROCK_SERVER_IP})
+ROCK_API_METHOD = "POST"  # "GET" or "POST"
+ROCK_API_HEADERS = {"Content-Type": "application/json"}  # JSON content type for POST request
+ROCK_API_DATA = {}  # Empty JSON object (as sent by web UI)
+ROCK_API_COOKIES = None  # Optional: Cookies dict if authentication required
+
 
 def get_disk_root_path(path: Path) -> Path:
     """
