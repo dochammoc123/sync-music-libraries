@@ -6,11 +6,13 @@ writing to both detail logs and summary logs. Headers are only included in summa
 if they have at least one detail item (total_count > 0).
 
 Key concepts:
-- Headers: Summary-level messages with counts (e.g., "Step 1: Process downloads (%count% albums)")
-- Details: Item-level messages (e.g., "MOVE: %item% -> dest/file1.flac")
-- Album context: Current album being processed (set once, used for all subsequent logs)
-- Item context: Current item being processed (affects automatic counting)
-- Header stack: Nested headers with independent counts
+- Step-level headers: Top-level headers set first (e.g., "Step 1: Process downloads (%count% albums)")
+- Albums: Main headers/titles (set with set_album) - all warnings, errors, and nested headers go under albums
+- Nested headers: Sub-headers pushed under albums (e.g., "Organizing (%count% songs)")
+- Details: Item-level messages (e.g., "MOVE: %item% -> dest/file1.flac") - leaf level only
+- Album context: Current album being processed (set once, all subsequent logs associated until unset)
+- Item context: Current item being processed (leaf-level only, affects automatic counting)
+- Header stack: Nested headers with independent counts (step -> album -> nested headers)
 - Count tracking: Each header tracks direct items + children's items (propagated up)
 
 Placeholders:
@@ -22,37 +24,51 @@ Placeholders:
 Usage:
     from structured_logging import logmsg
     
-    # Set album context
-    logmsg.set_album("Lorde", "Pure Heroine", "2013")
+    # Step 1: Set step-level header (top level, logged to detail immediately)
+    header_key = logmsg.set_header("Step 1: Process new downloads (%count% albums)")
     
-    # Set header
-    logmsg.set_header("Step 1: Process new downloads (%count% albums)")
+    # Step 2: Set album context (main header/title - all warnings, errors, nested headers go under albums)
+    album_key = logmsg.set_album("Lorde", "Pure Heroine", "2013")
     
-    # Push album header (increases level)
-    key = logmsg.push_header("DOWNLOAD", f"Organizing: {artist} - {album} ({year})", "%count% songs")
+    # Step 3: Push nested header under album (increases level)
+    nested_key = logmsg.push_header("DOWNLOAD", "Organizing (%count% songs)", "Organizing")
     
     try:
-        # Set item context
-        logmsg.set_item(str(src))
+        # Step 4: Set item context (leaf-level only - must unset before next item)
+        item_key = logmsg.set_item(str(src))
         
-        # Log details (item automatically counted on first encounter)
+        # Step 5: Log details (item automatically counted on first encounter)
         logmsg.info("MOVE: %item% -> {dest}", dest=str(dest))
         logmsg.info("Tags: artist={artist}, title={title}", artist=tags['artist'], title=tags['title'])
         # Multiple logs per item, but only counted once
         
+        # Step 6: Unset item context (required before next item)
+        logmsg.unset_item(item_key)
+        
     finally:
-        logmsg.pop_header(key)  # Writes header if count > 0, propagates to step
-        logmsg.set_item("")  # Clear item context
+        # Step 7: Pop nested header (writes to summary if count > 0, propagates count to album)
+        logmsg.pop_header(nested_key)
+        
+        # Step 8: Unset album context (required before next album)
+        logmsg.unset_album(album_key)
+    
+    # Step 9: Headers are only written to summary if at least one detail item was logged
+    # Albums are the main headers - all warnings, errors, and nested headers appear under albums
 """
 import logging
+import logging.handlers
 import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from logging_utils import logger, ALBUM_SUMMARY, add_album_event_label, add_album_warning_label, album_label_from_tags
+from logging_utils import logger, ALBUM_SUMMARY, add_album_event_label, add_album_warning_label, album_label_from_tags, Colors, ColoredFormatter, PlainFormatter
+from config import DETAIL_LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, SYSTEM
 
-# Detail log writer (separate from summary)
+# Detail log writer (separate from summary) - file handler only
 _detail_logger = logging.getLogger("library_sync_detail")
+
+# Console logger for structured logging (console output only, new API only)
+_console_logger = logging.getLogger("library_sync_console")
 
 
 @dataclass
@@ -96,74 +112,131 @@ class StructuredLogger:
         self.header_stack: List[HeaderContext] = []
         self.current_album_label: Optional[str] = None
         self.current_album_info: Optional[Tuple[str, str, Optional[str]]] = None  # (artist, album, year)
+        self._current_album_key: Optional[str] = None  # Key for current album (for sanity checking)
         self.current_item_id: Optional[str] = None  # Current item context
+        self._current_item_key: Optional[str] = None  # Key for current item (for sanity checking)
         
-    def set_album(self, artist: Optional[str] = None, album: Optional[str] = None, year: Optional[str] = None) -> None:
+    def set_album(self, artist: str, album: str, year: Optional[str] = None) -> str:
         """
         Set the current album context.
+        Must call unset_album(key) before calling set_album again (except first call).
         All subsequent logs will be associated with this album until changed.
         
         Args:
-            artist: Artist name (or None/"" to clear album context)
-            album: Album name (or None/"" to clear)
+            artist: Artist name
+            album: Album name
             year: Year (optional, can be None or "")
         
-        Examples:
-            logmsg.set_album("Lorde", "Pure Heroine", "2013")  # Set album
-            logmsg.set_album("")  # Clear album context (global)
-            logmsg.set_album(None, None, None)  # Also clears
-        """
-        if not artist or artist == "" or not album or album == "":
-            # Clear album context
-            self.current_album_info = None
-            self.current_album_label = None
-        else:
-            self.current_album_info = (artist, album, year)
-            self.current_album_label = album_label_from_tags(artist, album, year or "")
-    
-    def set_item(self, item_id: Optional[str] = None) -> None:
-        """
-        Set the current item context.
-        All subsequent logs with item_id will use this item for counting.
+        Returns:
+            str: Key to use with unset_album() (for sanity check)
         
-        Args:
-            item_id: Item identifier (e.g., file path, song number) or None/"" to clear
+        Raises:
+            ValueError: If album is already set (must call unset_album(key) first)
         
         Examples:
-            logmsg.set_item(str(src_path))  # Set current item
-            logmsg.set_item("")  # Clear item context
+            album_key = logmsg.set_album("Lorde", "Pure Heroine", "2013")  # Set album
+            logmsg.unset_album(album_key)  # Clear album context (global)
         """
-        if not item_id or item_id == "":
-            self.current_item_id = None
-        else:
-            self.current_item_id = item_id
+        # If an album is currently set, must unset it first
+        if self.current_album_info is not None:
+            raise ValueError(f"Cannot set_album when album is already set ({self.current_album_label}). "
+                           f"Must call unset_album(key) first.")
+        
+        # Generate a unique key for this album session
+        album_key = str(uuid.uuid4())
+        
+        # Set album context
+        self.current_album_info = (artist, album, year)
+        self.current_album_label = album_label_from_tags(artist, album, year or "")
+        self._current_album_key = album_key
+        
+        return album_key
     
-    def push_item(self, item_id: str) -> None:
+    def unset_album(self, key: str) -> None:
         """
-        Push an item onto an item stack (for nested item processing).
-        Currently same as set_item, but allows future expansion.
+        Unset the current album context (makes it global).
+        Must provide the key returned from set_album().
         
         Args:
-            item_id: Item identifier
+            key: Key returned from set_album() (sanity check)
+        
+        Raises:
+            ValueError: If key doesn't match current album key, or if no album is currently set
         """
-        self.current_item_id = item_id
+        if self.current_album_info is None:
+            raise ValueError("Cannot unset_album: no album is currently set")
+        
+        if self._current_album_key != key:
+            raise ValueError(f"Album key mismatch: expected {self._current_album_key}, got {key}")
+        
+        # Clear album context
+        self.current_album_info = None
+        self.current_album_label = None
+        self._current_album_key = None
     
-    def pop_item(self) -> None:
+    def set_item(self, item: str) -> str:
         """
-        Pop an item from the item stack.
-        Currently clears item, but allows future expansion.
+        Set the current item context (leaf-level only - no nested items).
+        Must call unset_item(key) before calling set_item again (except first call).
+        All subsequent logs will use this item for counting.
+        
+        Args:
+            item: Item identifier (e.g., file path, song number)
+        
+        Returns:
+            str: Key to use with unset_item() (for sanity check)
+        
+        Raises:
+            ValueError: If item is already set (must call unset_item(key) first)
+        
+        Note: Items can only be set at the lowest level (no nested items). This helps ensure
+        headers are only written if at least one detail item is logged.
         """
+        # If an item is currently set, must unset it first
+        if self.current_item_id is not None:
+            raise ValueError(f"Cannot set_item when item is already set ({self.current_item_id}). "
+                           f"Must call unset_item(key) first.")
+        
+        # Generate a unique key for this item session
+        item_key = str(uuid.uuid4())
+        
+        # Set new item
+        self.current_item_id = item
+        self._current_item_key = item_key
+        
+        return item_key
+    
+    def unset_item(self, key: str) -> None:
+        """
+        Unset the current item context.
+        Must provide the key returned from set_item().
+        
+        Args:
+            key: Key returned from set_item() (sanity check)
+        
+        Raises:
+            ValueError: If key doesn't match current item key, or if no item is currently set
+        """
+        if self.current_item_id is None:
+            raise ValueError("Cannot unset_item: no item is currently set")
+        
+        if self._current_item_key != key:
+            raise ValueError(f"Item key mismatch: expected {self._current_item_key}, got {key}")
+        
+        # Clear item
         self.current_item_id = None
+        self._current_item_key = None
     
     def set_header(
         self, 
         msg: str,
         message_template: Optional[str] = None,
-        count_placeholder: str = "%count%"
-    ) -> None:
+        count_placeholder: str = "%count%",
+        key: Optional[str] = None
+    ) -> str:
         """
         Set/replace the current header at the current level.
-        Shortcut for: pop_header() (if exists) + push_header() at same level.
+        Shortcut for: pop_header(key) (if key provided) + push_header() at same level.
         
         Use for headers like "Step 1: Process downloads (%count% albums)"
         
@@ -178,17 +251,33 @@ class StructuredLogger:
                 - {var} for immediate replacement from album context (e.g., {artist}, {album}, {year})
                 If None, msg is used as the template.
             count_placeholder: Placeholder for count (default: "%count%")
+            key: Optional key from previous set_header() call. If provided and header stack is not empty,
+                must match the current header's key (sanity check). Use None for first call.
+        
+        Returns:
+            str: Key to use with next set_header() call (for sanity check)
+        
+        Raises:
+            ValueError: If key is provided but doesn't match current header, or if key is provided but stack is empty
         
         Examples:
-            set_header("H1") -> detail: "H1", summary: "H1"
+            key = set_header("H1") -> detail: "H1", summary: "H1" (first call, key=None)
+            key2 = set_header("H2", key=key) -> detail: "H2", summary: "H2" (replaces previous)
             set_header("H1", "H1 .. %count%") -> detail: "H1", summary: "H1 .. 2"
             set_header("H1", "%msg% (count = %count%)") -> detail: "H1", summary: "H1 (count = 2)"
         
         Note: %item% placeholder is only for detail logs (info/warn/error), not headers.
         """
-        # Shortcut: pop current header (if exists) then push new one at same level
-        # Pop current header if exists (but don't write summary - we're replacing it)
-        if self.header_stack:
+        # If key provided, pop current header (sanity check)
+        if key is not None:
+            if not self.header_stack:
+                raise ValueError(f"Cannot set_header with key {key}: header stack is empty")
+            
+            current_header = self.header_stack[-1]
+            if current_header.key != key:
+                raise ValueError(f"Header key mismatch: expected {current_header.key}, got {key}")
+            
+            # Pop current header (but don't write summary - we're replacing it)
             self.header_stack.pop()
         
         # Use msg as template if message_template not provided
@@ -196,8 +285,8 @@ class StructuredLogger:
         
         # Push new header at same level (or level 0 if was empty)
         # push_header will handle %msg% replacement and immediate replacements
-        key = self.push_header(None, template, msg, count_placeholder, None)
-        return key
+        new_key = self.push_header(None, template, msg, count_placeholder, None)
+        return new_key
     
     def _format_immediate_replacements(self, message: str) -> str:
         """
@@ -337,6 +426,7 @@ class StructuredLogger:
         """
         Log a header to the detail log immediately (without %count% placeholder).
         Used when header is first set/pushed.
+        Headers are written to both detail file and console (new API only).
         """
         # Use detail_message (always set - either from msg parameter or derived from template)
         message = header.detail_message
@@ -347,8 +437,9 @@ class StructuredLogger:
         
         formatted = f"{indent}{prefix}{message}"
         
-        # Write to detail log
-        logger.info(formatted)
+        # Write to both detail file and console (new API)
+        _detail_logger.info(formatted)
+        _console_logger.info(formatted)
     
     def _write_header_to_summary(self, header: HeaderContext) -> None:
         """
@@ -365,12 +456,12 @@ class StructuredLogger:
             message = message.replace("%count%", str(total))
         
         if header.album_label:
-            # Write to album summary
+            # Write to album summary (old API summary structure)
             add_album_event_label(header.album_label, message)
         else:
-            # Global headers: write to detail log for now
-            # TODO: Could add to global summary structure if needed
-            logger.info(message)
+            # Global headers: write to detail log and console (new API)
+            _detail_logger.info(message)
+            _console_logger.info(message)
     
     def _get_indent_for_level(self, level: int) -> str:
         """Get indentation string for a given header level."""
@@ -410,17 +501,19 @@ class StructuredLogger:
         message: str,
         level: str,
         album: Optional[str] = None,
-        item: Optional[str] = None
+        item: Optional[str] = None,
+        console: bool = True
     ) -> None:
         """
         Internal method to log a detail message at the specified level.
-        Shared logic for info, warn, and error methods.
+        Shared logic for info, warn, error, and verbose methods.
         
         Args:
             message: Message to log (can contain %item% placeholder)
-            level: Log level ("info", "warn", or "error")
+            level: Log level ("info", "warn", "error", or "verbose")
             album: Optional album label (overrides current album context, "" = global)
             item: Optional item identifier (overrides current item context, "" = no item)
+            console: If True, write to console logger; if False, write to detail logger only
         """
         # Determine album and item to use (parameter overrides context)
         use_album = album if album is not None else self.current_album_label
@@ -443,6 +536,7 @@ class StructuredLogger:
         # Build prefix based on level
         level_prefix = {
             "info": "",
+            "verbose": "",
             "warn": "[WARN] ",
             "error": "[ERROR] "
         }.get(level, "")
@@ -451,13 +545,21 @@ class StructuredLogger:
         prefix = self._get_prefix()
         formatted = f"{indent}{prefix}{level_prefix}{formatted_message}"
         
-        # Write to detail log
-        log_method = {
-            "info": logger.info,
-            "warn": logger.warning,
-            "error": logger.error
-        }.get(level, logger.info)
-        log_method(formatted)
+        # Write to appropriate logger(s)
+        if console:
+            # Write to console logger (new API console output only)
+            log_method = {
+                "info": _console_logger.info,
+                "verbose": _console_logger.info,  # Same as info level
+                "warn": _console_logger.warning,
+                "error": _console_logger.error
+            }.get(level, _console_logger.info)
+            log_method(formatted)
+            # Also write to detail file
+            _detail_logger.info(formatted)
+        else:
+            # Write to detail logger only (file only, no console)
+            _detail_logger.info(formatted)
         
         # Add to album/global warnings for warn/error
         if level in ("warn", "error"):
@@ -511,6 +613,24 @@ class StructuredLogger:
             item: Optional item identifier (overrides current item context, "" = no item)
         """
         self._log_detail(message, "error", album, item)
+    
+    def verbose(self, message: str, album: Optional[str] = None, item: Optional[str] = None) -> None:
+        """
+        Log a verbose/trace-level detail message (file only, not console).
+        Identical to info() in all respects (counting, header messages, etc.) except console output.
+        Useful for detailed tracing that's available in logs but doesn't clutter console output.
+        
+        Args:
+            message: Message to log (can contain %item% placeholder)
+            album: Optional album label (overrides current album context, "" = global)
+            item: Optional item identifier (overrides current item context, "" = no item)
+                 If provided and first encounter, automatically increments count (same as info)
+        
+        Note: Verbose messages are written to the detail log file only, not to console.
+        They are useful for tracing code execution without cluttering console output.
+        Items are counted and messages are added to headers just like info() calls.
+        """
+        self._log_detail(message, "verbose", album, item, console=False)
     
     def _increment_current_count(self, item_id: str) -> None:
         """

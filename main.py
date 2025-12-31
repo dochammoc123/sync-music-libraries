@@ -97,7 +97,10 @@ def main() -> None:
         EMBED_IF_MISSING = False
         EMBED_FROM_UPDATES = False
 
-    setup_logging()
+    setup_logging()  # Old API: file only (no console)
+    from structured_logging import setup_detail_logging
+    setup_detail_logging()  # New API: detail file + console
+    
     log(f"Starting script in mode: {args.mode}")
     log(f"DRY_RUN = {DRY_RUN}")
     log(f"EMBED_ALL = {EMBED_ALL}")

@@ -12,7 +12,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from config import LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, SUMMARY_LOG_FILE, SYSTEM
+from config import LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, SUMMARY_LOG_FILE, SYSTEM, DETAIL_LOG_FILE
 
 logger = logging.getLogger("library_sync")
 
@@ -94,24 +94,13 @@ class PlainFormatter(logging.Formatter):
 
 
 def setup_logging() -> None:
-    """Configure logging with both console and file handlers."""
+    """Configure old logging API: file handler only (no console)."""
     logger.setLevel(logging.INFO)
-    
-    # Enable Windows ANSI colors
-    _enable_windows_ansi_colors()
     
     # Plain formatter for file (no colors)
     file_fmt = PlainFormatter("[%(asctime)s] %(message)s", "%Y-%m-%d %H:%M:%S")
-    
-    # Colored formatter for console
-    console_fmt = ColoredFormatter("[%(asctime)s] %(message)s", "%Y-%m-%d %H:%M:%S")
 
-    # Console handler with colors
-    ch = logging.StreamHandler()
-    ch.setFormatter(console_fmt)
-    logger.addHandler(ch)
-
-    # File handler without colors
+    # File handler without colors (old API writes to old log file only, no console)
     if LOG_FILE is not None:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         fh = RotatingFileHandler(

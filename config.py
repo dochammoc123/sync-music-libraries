@@ -37,6 +37,7 @@ if SYSTEM == "Windows":
     T8_ROOT = Path("//10.0.1.27/Share/EB5E-E9D3/Music")
     LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_windows.log"
     SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_windows_summary.log"
+    DETAIL_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_detail_windows.log"
 
 elif SYSTEM == "Darwin":
     DOWNLOADS_DIR = Path.home() / "Downloads" / "Music"
@@ -44,6 +45,7 @@ elif SYSTEM == "Darwin":
     T8_ROOT = "SMB:" / "TestMusicLibrary" / "T8" / "Music"
     LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_macos.log"
     SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_macos_summary.log"
+    DETAIL_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_detail_macos.log"
 
 else:
     DOWNLOADS_DIR = Path.home() / "Downloads" / "Music"
@@ -51,6 +53,7 @@ else:
     T8_ROOT = None
     LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_other.log"
     SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_other_summary.log"
+    DETAIL_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_detail_other.log"
 
 # ===================== CONFIG =====================
 
