@@ -285,7 +285,7 @@ class StructuredLogger:
         
         # Push new header at same level (or level 0 if was empty)
         # push_header will handle %msg% replacement and immediate replacements
-        new_key = self.push_header(None, template, msg, count_placeholder, None)
+        new_key = self.push_header(msg, template, None, count_placeholder, None)
         return new_key
     
     def _format_immediate_replacements(self, message: str) -> str:
@@ -331,9 +331,9 @@ class StructuredLogger:
     
     def push_header(
         self, 
-        category: Optional[str], 
-        message_template: str, 
         msg: str,
+        message_template: Optional[str] = None,
+        category: Optional[str] = None,
         count_placeholder: str = "%count%",
         album_label: Optional[str] = None
     ) -> str:
@@ -343,19 +343,21 @@ class StructuredLogger:
         Returns a key that must be used when popping.
         
         Args:
-            category: Header category (e.g., "DOWNLOAD", "UPDATE"), or None
-            message_template: Header message template for summary log with placeholders:
+            msg: Message for detail log. Also used as template if message_template is None.
+            message_template: Optional header message template for summary log with placeholders:
                 - %msg% for template replacement (replaced with msg parameter)
                 - %count% for deferred count replacement (replaced when header written to summary)
                 - {var} for immediate replacement from album context (e.g., {artist}, {album}, {year})
-            msg: Message for detail log. Replaces %msg% in template.
+                If None, msg is used as the template.
+            category: Header category (e.g., "DOWNLOAD", "UPDATE"), or None
             count_placeholder: Placeholder for count (default: "%count%")
             album_label: Optional album label (uses current album if None)
         
         Examples:
-            push_header("DOWNLOAD", "S1", "S1") -> detail: "S1", summary: "S1"
-            push_header("DOWNLOAD", "S1 .. %count%", "S1") -> detail: "S1", summary: "S1 .. 2"
-            push_header("DOWNLOAD", "%msg% (count = %count%)", "S1") -> detail: "S1", summary: "S1 (count = 2)"
+            push_header("S1") -> detail: "S1", summary: "S1"
+            push_header("S1", "S1 .. %count%") -> detail: "S1", summary: "S1 .. 2"
+            push_header("S1", "%msg% (count = %count%)") -> detail: "S1", summary: "S1 (count = 2)"
+            push_header("Organizing tracks", "%msg% (%count% tracks)", "DOWNLOAD") -> detail: "Organizing tracks", summary: "Organizing tracks (5 tracks)"
         
         Note: %item% placeholder is only for detail logs (info/warn/error), not headers.
         
@@ -365,8 +367,11 @@ class StructuredLogger:
         key = str(uuid.uuid4())
         level = len(self.header_stack)
         
+        # Use msg as template if message_template not provided
+        template = message_template if message_template is not None else msg
+        
         # Replace %msg% in template with msg
-        formatted_template = message_template.replace("%msg%", msg)
+        formatted_template = template.replace("%msg%", msg)
         formatted_template = formatted_template.replace("%Msg%", msg)  # Case variation
         
         # Format immediate replacements ({vars}) for template
@@ -502,18 +507,20 @@ class StructuredLogger:
         level: str,
         album: Optional[str] = None,
         item: Optional[str] = None,
-        console: bool = True
+        console: bool = True,
+        **kwargs
     ) -> None:
         """
         Internal method to log a detail message at the specified level.
         Shared logic for info, warn, error, and verbose methods.
         
         Args:
-            message: Message to log (can contain %item% placeholder)
+            message: Message to log (can contain %item% placeholder and {var} placeholders)
             level: Log level ("info", "warn", "error", or "verbose")
             album: Optional album label (overrides current album context, "" = global)
             item: Optional item identifier (overrides current item context, "" = no item)
             console: If True, write to console logger; if False, write to detail logger only
+            **kwargs: Additional named parameters for {var} placeholder replacement
         """
         # Determine album and item to use (parameter overrides context)
         use_album = album if album is not None else self.current_album_label
@@ -524,8 +531,29 @@ class StructuredLogger:
         if item == "":  # Explicitly clear
             use_item = None
         
-        # Format message with item placeholder
+        # Format message with immediate replacements ({var}) first, then item placeholder
+        # Build format dict from album context and kwargs
+        format_dict = {}
+        if self.current_album_info:
+            artist, album_name, year = self.current_album_info
+            format_dict.update({
+                "artist": artist,
+                "album": album_name,
+                "year": year or ""
+            })
+        # Add any kwargs (like album_dir=str(album_dir))
+        format_dict.update(kwargs)
+        
+        # Format {var} placeholders using str.format()
         formatted_message = message
+        if format_dict:
+            try:
+                formatted_message = formatted_message.format(**format_dict)
+            except (KeyError, ValueError):
+                # If format fails (missing key or syntax error), leave as-is
+                pass
+        
+        # Then format %item% placeholder
         if use_item:
             formatted_message = formatted_message.replace("%item%", str(use_item))
             formatted_message = formatted_message.replace("%Item%", str(use_item))  # Case variations
@@ -577,42 +605,45 @@ class StructuredLogger:
         if use_item:
             self._increment_current_count(use_item)
     
-    def info(self, message: str, album: Optional[str] = None, item: Optional[str] = None) -> None:
+    def info(self, message: str, album: Optional[str] = None, item: Optional[str] = None, **kwargs) -> None:
         """
         Log an info-level detail message.
         Automatically counts item if item is provided (first encounter per header).
         
         Args:
-            message: Message to log (can contain %item% placeholder)
+            message: Message to log (can contain %item% placeholder and {var} placeholders)
             album: Optional album label (overrides current album context, "" = global)
             item: Optional item identifier (overrides current item context, "" = no item)
                  If provided and first encounter, automatically increments count
+            **kwargs: Additional named parameters for {var} placeholder replacement
         """
-        self._log_detail(message, "info", album, item)
+        self._log_detail(message, "info", album, item, **kwargs)
     
-    def warn(self, message: str, album: Optional[str] = None, item: Optional[str] = None) -> None:
+    def warn(self, message: str, album: Optional[str] = None, item: Optional[str] = None, **kwargs) -> None:
         """
         Log a warning-level detail message.
         Automatically counts item if item is provided (first encounter per header).
         
         Args:
-            message: Message to log (can contain %item% placeholder)
+            message: Message to log (can contain %item% placeholder and {var} placeholders)
             album: Optional album label (overrides current album context, "" = global)
             item: Optional item identifier (overrides current item context, "" = no item)
+            **kwargs: Additional named parameters for {var} placeholder replacement
         """
-        self._log_detail(message, "warn", album, item)
+        self._log_detail(message, "warn", album, item, **kwargs)
     
-    def error(self, message: str, album: Optional[str] = None, item: Optional[str] = None) -> None:
+    def error(self, message: str, album: Optional[str] = None, item: Optional[str] = None, **kwargs) -> None:
         """
         Log an error-level detail message.
         Automatically counts item if item is provided (first encounter per header).
         
         Args:
-            message: Message to log (can contain %item% placeholder)
+            message: Message to log (can contain %item% placeholder and {var} placeholders)
             album: Optional album label (overrides current album context, "" = global)
             item: Optional item identifier (overrides current item context, "" = no item)
+            **kwargs: Additional named parameters for {var} placeholder replacement
         """
-        self._log_detail(message, "error", album, item)
+        self._log_detail(message, "error", album, item, **kwargs)
     
     def verbose(self, message: str, album: Optional[str] = None, item: Optional[str] = None) -> None:
         """

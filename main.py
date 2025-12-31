@@ -307,7 +307,10 @@ def main() -> None:
             
             sys.exit(exit_code)
 
+        # Step 1: Process new downloads (organize + art)
         log("\nStep 1: Process new downloads (organize + art)...")
+        from structured_logging import logmsg
+        header_key = logmsg.set_header("Step 1: Process new downloads", "%msg% (%count% albums)")
         process_downloads(DRY_RUN)
 
         log("\nStep 2: Apply UPDATE overlay (files from Update -> Music)...")
