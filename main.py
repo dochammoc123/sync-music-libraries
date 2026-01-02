@@ -320,12 +320,15 @@ def main() -> None:
         process_downloads(DRY_RUN)
 
         log("\nStep 2: Apply UPDATE overlay (files from Update -> Music)...")
+        header_key = logmsg.set_header("Step 2: Apply UPDATE overlay", "%msg% (%count% items)", key=header_key)
         updated_album_dirs, albums_with_new_cover = apply_updates_from_overlay(DRY_RUN)
 
         log("\nStep 3: Upgrade albums to FLAC-only where FLAC exists...")
+        header_key = logmsg.set_header("Step 3: Upgrade albums to FLAC-only", "%msg% (%count% items)", key=header_key)
         upgrade_albums_to_flac_only(DRY_RUN)
 
         log("\nStep 4: Embed missing artwork (only FLACs with no embedded art)...")
+        header_key = logmsg.set_header("Step 4: Embed missing artwork", "%msg% (%count% items)", key=header_key)
         embed_missing_art_global(DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED, EMBED_IF_MISSING)
 
         if EMBED_ALL:
@@ -345,12 +348,15 @@ def main() -> None:
                 add_album_event_label(label, "Embedded new art from overlay.")
 
         log("\nStep 5: Sync master library to T8...")
+        header_key = logmsg.set_header("Step 5: Sync master library to T8", "%msg% (%count% items)", key=header_key)
         sync_music_to_t8(DRY_RUN, use_checksums=args.t8_checksums)
 
         log("\nStep 6: Sync empty UPDATE overlay directory structure...")
+        header_key = logmsg.set_header("Step 6: Sync empty UPDATE overlay directory structure", "%msg%", key=header_key)
         sync_update_root_structure(DRY_RUN)
 
         log("\nStep 7: Ensure artist images (folder.jpg and artist.jpg) in artist folders...")
+        header_key = logmsg.set_header("Step 7: Ensure artist images", "%msg% (%count% artists)", key=header_key)
         from artwork import ensure_artist_images
         from pathlib import Path
         import os
@@ -379,13 +385,16 @@ def main() -> None:
                     artist_dirs_processed.add(dir_path)
 
         log("\nStep 8: Sync backup folder (remove identical backups, restore missing files)...")
+        header_key = logmsg.set_header("Step 8: Sync backup folder", "%msg% (%count% items)", key=header_key)
         from sync_operations import sync_backups
         sync_backups(DRY_RUN)
 
         log("\nStep 9: Final missing-art fixup...")
+        header_key = logmsg.set_header("Step 9: Final missing-art fixup", "%msg% (%count% items)", key=header_key)
         fixup_missing_art(DRY_RUN)
 
         log("\nStep 10: Refresh ROON library...")
+        header_key = logmsg.set_header("Step 10: Refresh ROON library", "%msg%", key=header_key)
         from roon_refresh import refresh_roon_library
         roon_refresh_success = refresh_roon_library(DRY_RUN)
         if not roon_refresh_success:

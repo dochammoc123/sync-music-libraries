@@ -229,9 +229,12 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
             except Exception as e:
                 log(f"  [UPDATE WARN] Could not delete applied update file {src}: {e}")
 
+    # Add structured logging for updated albums
+    from structured_logging import logmsg
     for album_dir in updated_album_dirs:
         label = album_label_from_dir(album_dir)
-        add_album_event_label(label, "Updated from overlay.")
+        add_album_event_label(label, "Updated from overlay.")  # Old API
+        logmsg.info("Updated from overlay.")  # New API - will associate with album if context set
 
     return updated_album_dirs, albums_with_new_cover
 
