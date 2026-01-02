@@ -27,6 +27,7 @@ echo Copying Python modules...
 copy /Y "%SOURCE_DIR%main.py" "%DEPLOY_FOLDER%\main.py"
 copy /Y "%SOURCE_DIR%config.py" "%DEPLOY_FOLDER%\config.py"
 copy /Y "%SOURCE_DIR%logging_utils.py" "%DEPLOY_FOLDER%\logging_utils.py"
+copy /Y "%SOURCE_DIR%structured_logging.py" "%DEPLOY_FOLDER%\structured_logging.py"
 copy /Y "%SOURCE_DIR%tag_operations.py" "%DEPLOY_FOLDER%\tag_operations.py"
 copy /Y "%SOURCE_DIR%artwork.py" "%DEPLOY_FOLDER%\artwork.py"
 copy /Y "%SOURCE_DIR%file_operations.py" "%DEPLOY_FOLDER%\file_operations.py"

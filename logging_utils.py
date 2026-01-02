@@ -130,15 +130,55 @@ def add_album_event_label(label: str, text: str) -> None:
     entry["events"].append(text)
 
 
-def add_album_warning_label(label: str, text: str) -> None:
-    """Add a warning message to an album's summary."""
+def add_album_warning_label(label: str, text: str, level: str = "warn") -> None:
+    """Add a warning or error message to an album's summary.
+    
+    The text will be written with a tab prefix in the summary file, so format is:
+    \t[WARN] {message} or \t[ERROR] {message}
+    """
     entry = _get_album_entry(label)
-    entry["warnings"].append(text)
+    # Determine prefix based on level parameter (takes precedence)
+    prefix = "[WARN]" if level == "warn" else "[ERROR]"
+    
+    # Strip any existing level prefix from text, then add the correct one
+    text_stripped = text.lstrip()
+    if text_stripped.startswith("[WARN]") or text_stripped.startswith("[ERROR]"):
+        # Remove existing prefix (in case caller already added it)
+        if text_stripped.startswith("[WARN]"):
+            text_clean = text_stripped[6:].lstrip()  # Remove "[WARN] " and any space after
+        elif text_stripped.startswith("[ERROR]"):
+            text_clean = text_stripped[7:].lstrip()  # Remove "[ERROR] " and any space after
+        else:
+            text_clean = text_stripped
+        entry["warnings"].append(f"{prefix} {text_clean}")
+    else:
+        # Add level prefix: [WARN] or [ERROR]
+        entry["warnings"].append(f"{prefix} {text}")
 
 
-def add_global_warning(text: str) -> None:
-    """Add a global warning message."""
-    GLOBAL_WARNINGS.append(text)
+def add_global_warning(text: str, level: str = "warn") -> None:
+    """Add a global warning or error message.
+    
+    The text will be written with two spaces prefix in the summary file, so format is:
+      [WARN] {message} or   [ERROR] {message}
+    """
+    # Determine prefix based on level parameter (takes precedence)
+    prefix = "[WARN]" if level == "warn" else "[ERROR]"
+    
+    # Strip any existing level prefix from text, then add the correct one
+    text_stripped = text.lstrip()
+    if text_stripped.startswith("[WARN]") or text_stripped.startswith("[ERROR]"):
+        # Remove existing prefix (in case caller already added it)
+        if text_stripped.startswith("[WARN]"):
+            text_clean = text_stripped[6:].lstrip()  # Remove "[WARN] " and any space after
+        elif text_stripped.startswith("[ERROR]"):
+            text_clean = text_stripped[7:].lstrip()  # Remove "[ERROR] " and any space after
+        else:
+            text_clean = text_stripped
+        GLOBAL_WARNINGS.append(f"{prefix} {text_clean}")
+    else:
+        # Add level prefix: [WARN] or [ERROR]
+        GLOBAL_WARNINGS.append(f"{prefix} {text}")
 
 
 def album_label_from_tags(artist: str, album: str, year: str) -> str:
@@ -205,10 +245,11 @@ def write_summary_log(mode: str, dry_run: bool = False) -> None:
         lines.append("Albums processed:")
         for label in sorted(ALBUM_SUMMARY.keys()):
             entry = ALBUM_SUMMARY[label]
-            lines.append(f"  {label}")
+            lines.append(f"* {label}")  # Albums start with *
             for e in entry["events"]:
-                lines.append(f"\t- {e}")
+                lines.append(f"\t- {e}")  # Headers: tab(s) + dash
             for w in entry["warnings"]:
+                # Warnings already have [WARN] or [ERROR] prefix from add_album_warning_label
                 lines.append(f"\t{w}")
     else:
         lines.append("Albums processed: (none)")
@@ -306,20 +347,32 @@ def print_summary_log_to_stdout() -> None:
                     print()
                     continue
                 
-                # Add icons and colors based on content
-                line_upper = line.upper()
-                if 'WARNING' in line_upper or 'WARN' in line_upper:
-                    # Warning line - black on yellow
-                    print(f"{Colors.WARNING}{ICONS['warning']} {line}{Colors.RESET}")
-                elif 'ERROR' in line_upper or 'FAILED' in line_upper:
+                # Detect format:
+                # - Albums: start with "* "
+                # - Headers: start with one or more tabs followed by "- "
+                # - Warnings/Errors: start with "[WARN]" or "[ERROR]" (may have leading tabs)
+                # - Section headers: contain ":" and no leading tabs (like "Albums processed:")
+                
+                line_stripped = line.lstrip(" \t")  # Remove leading whitespace for prefix detection
+                
+                if line_stripped.startswith("[ERROR]"):
                     # Error line - white on red
                     print(f"{Colors.ERROR}{ICONS['error']} {line}{Colors.RESET}")
-                elif line.startswith("  ") or line.startswith("\t"):
-                    # Indented line (album details) - add info icon
-                    print(f"{ICONS['info']} {line}")
-                elif ':' in line and not line.startswith("  "):
+                elif line_stripped.startswith("[WARN]"):
+                    # Warning line - black on yellow
+                    print(f"{Colors.WARNING}{ICONS['warning']} {line}{Colors.RESET}")
+                elif line.startswith("* "):
+                    # Album line - highlight differently (cyan/blue, or bold)
+                    print(f"{Colors.CYAN}{ICONS['step']} {line}{Colors.RESET}")
+                elif '\t' in line and line.lstrip('\t').startswith("- "):
+                    # Header line (tab(s) + dash) - add > icon
+                    print(f"{ICONS['step']} {line}")
+                elif ':' in line and not line.startswith("  ") and not line.startswith("\t") and not line.startswith("*"):
                     # Section header (like "Albums processed:")
                     print(f"{ICONS['step']} {line}")
+                elif line.startswith("  ") or line.startswith("\t"):
+                    # Other indented lines (legacy format) - add info icon
+                    print(f"{ICONS['info']} {line}")
                 else:
                     # Regular line
                     print(line)

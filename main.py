@@ -197,18 +197,23 @@ def main() -> None:
                             log(f"  Allowing operation (network shares may not report capacity reliably).")
                             add_global_warning(f"T8 drive capacity check inconclusive - path accessible but capacity unknown")
                         else:
-                            # Path not accessible
-                            error_msg = (
-                                f"ERROR: Could not verify disk capacity for T8 drive ({checked_path}).\n"
-                                f"  The drive appears to be inaccessible.\n"
-                                f"  Required: {min_tb:.2f} TB minimum total capacity.\n"
-                                f"This check protects system drives on the server. Exiting."
-                            )
-                            log(error_msg)
-                            add_global_warning(error_msg)
-                            write_summary_log(args.mode, DRY_RUN)
-                            notify_run_summary(args.mode)
-                            sys.exit(1)
+                            # Path not accessible - in dry-run, allow with warning (for testing when T8 is offline)
+                            if DRY_RUN:
+                                log(f"  WARNING: T8 drive ({checked_path}) appears to be inaccessible.")
+                                log(f"  DRY RUN: Continuing with warning (drive may be offline or IP changed).")
+                                add_global_warning(f"T8 drive inaccessible in DRY RUN - continuing with warning (drive may be offline)")
+                            else:
+                                error_msg = (
+                                    f"ERROR: Could not verify disk capacity for T8 drive ({checked_path}).\n"
+                                    f"  The drive appears to be inaccessible.\n"
+                                    f"  Required: {min_tb:.2f} TB minimum total capacity.\n"
+                                    f"This check protects system drives on the server. Exiting."
+                                )
+                                log(error_msg)
+                                add_global_warning(error_msg)
+                                write_summary_log(args.mode, DRY_RUN)
+                                notify_run_summary(args.mode)
+                                sys.exit(1)
                     except Exception as e:
                         # In dry-run, allow it to continue with warning (might be a temporary network issue)
                         if DRY_RUN:
@@ -310,7 +315,8 @@ def main() -> None:
         # Step 1: Process new downloads (organize + art)
         log("\nStep 1: Process new downloads (organize + art)...")
         from structured_logging import logmsg
-        header_key = logmsg.set_header("Step 1: Process new downloads", "%msg% (%count% albums)")
+        # Step header processes MULTIPLE albums (each album gets its own instance)
+        header_key = logmsg.set_header("Step 1: Process new downloads", "%msg% (%count% items)")
         process_downloads(DRY_RUN)
 
         log("\nStep 2: Apply UPDATE overlay (files from Update -> Music)...")
