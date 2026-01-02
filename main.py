@@ -392,7 +392,11 @@ def main() -> None:
             add_global_warning("ROON library refresh failed - you may need to manually restart ROON to see new files")
 
         log("\nStep 11: Writing summary log...")
+        # Write old API summary (for compatibility during migration)
         write_summary_log(args.mode, DRY_RUN)
+        # Write new structured summary
+        from structured_logging import logmsg
+        logmsg.write_summary(args.mode, DRY_RUN)
 
         log("\nStep 12: Run summary notification...")
         notify_run_summary(args.mode)
@@ -406,11 +410,8 @@ def main() -> None:
         total_warnings = sum(len(v["warnings"]) for v in ALBUM_SUMMARY.values()) + len(GLOBAL_WARNINGS)
         exit_code = 2 if total_warnings > 0 else 0
         
-        # Print summary to console (before "Press Enter" prompt so user can review it)
-        try:
-            print_summary_log_to_stdout()
-        except Exception as e:
-            log(f"[WARN] Could not print summary log: {e}")
+        # Summary is already printed by logmsg.write_summary() (new API)
+        # Old summary printing is now redundant but kept for compatibility
         
         # Log exit status before prompt
         log(f"Exit status: {total_warnings} warning(s) found")
@@ -440,14 +441,14 @@ def main() -> None:
         from logging_utils import logger
         logger.exception("Fatal error during run")
         add_global_warning(f"Fatal error during run: {e}")
+        # Write old API summary (for compatibility during migration)
         write_summary_log(args.mode, DRY_RUN)
+        # Write new structured summary
+        from structured_logging import logmsg
+        logmsg.write_summary(args.mode, DRY_RUN)
         notify_run_summary(args.mode)
         
-        # Print summary to console even on error (before "Press Enter" prompt)
-        try:
-            print_summary_log_to_stdout()
-        except Exception as print_error:
-            log(f"[WARN] Could not print summary log: {print_error}")
+        # Summary is already printed by logmsg.write_summary() (new API)
         
         # Keep console open for user to review
         if sys.platform == "win32":

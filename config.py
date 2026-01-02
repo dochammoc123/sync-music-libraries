@@ -38,6 +38,7 @@ if SYSTEM == "Windows":
     LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_windows.log"
     SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_windows_summary.log"
     DETAIL_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_detail_windows.log"
+    STRUCTURED_SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_summary_windows.log"
 
 elif SYSTEM == "Darwin":
     DOWNLOADS_DIR = Path.home() / "Downloads" / "Music"
@@ -46,6 +47,7 @@ elif SYSTEM == "Darwin":
     LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_macos.log"
     SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_macos_summary.log"
     DETAIL_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_detail_macos.log"
+    STRUCTURED_SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_summary_macos.log"
 
 else:
     DOWNLOADS_DIR = Path.home() / "Downloads" / "Music"
@@ -54,6 +56,7 @@ else:
     LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_other.log"
     SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_other_summary.log"
     DETAIL_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_detail_other.log"
+    STRUCTURED_SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_summary_other.log"
 
 # ===================== CONFIG =====================
 

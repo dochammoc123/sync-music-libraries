@@ -175,10 +175,26 @@ def add_global_warning(text: str, level: str = "warn") -> None:
             text_clean = text_stripped[7:].lstrip()  # Remove "[ERROR] " and any space after
         else:
             text_clean = text_stripped
-        GLOBAL_WARNINGS.append(f"{prefix} {text_clean}")
+        warning_text = f"{prefix} {text_clean}"
+        GLOBAL_WARNINGS.append(warning_text)
     else:
         # Add level prefix: [WARN] or [ERROR]
-        GLOBAL_WARNINGS.append(f"{prefix} {text}")
+        warning_text = f"{prefix} {text}"
+        GLOBAL_WARNINGS.append(warning_text)
+    
+    # Also track in new structured logging API (for compatibility during migration)
+    try:
+        from structured_logging import logmsg
+        # Extract clean message (without prefix) for structured logger
+        clean_message = text_stripped
+        if text_stripped.startswith("[WARN]") or text_stripped.startswith("[ERROR]"):
+            if text_stripped.startswith("[WARN]"):
+                clean_message = text_stripped[6:].lstrip()
+            elif text_stripped.startswith("[ERROR]"):
+                clean_message = text_stripped[7:].lstrip()
+        logmsg.global_warnings.append((level, clean_message))
+    except Exception:
+        pass  # If structured logging not initialized yet, just skip
 
 
 def album_label_from_tags(artist: str, album: str, year: str) -> str:

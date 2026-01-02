@@ -61,8 +61,8 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from logging_utils import logger, ALBUM_SUMMARY, add_album_event_label, add_album_warning_label, album_label_from_tags, Colors, ColoredFormatter, PlainFormatter
-from config import DETAIL_LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, SYSTEM
+from logging_utils import logger, ALBUM_SUMMARY, add_album_event_label, add_album_warning_label, album_label_from_tags, Colors, ColoredFormatter, PlainFormatter, ICONS
+from config import DETAIL_LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, SYSTEM, STRUCTURED_SUMMARY_LOG_FILE
 
 # Detail log writer (separate from summary) - file handler only
 _detail_logger = logging.getLogger("library_sync_detail")
@@ -182,6 +182,10 @@ class StructuredLogger:
         # Item context
         self.current_item_id: Optional[str] = None  # Current item context
         self._current_item_key: Optional[str] = None  # Key for current item (for sanity checking)
+        
+        # Track warnings and errors for summary (album -> list of messages)
+        self.album_warnings: Dict[str, List[Tuple[str, str]]] = {}  # album_label -> [(level, message), ...]
+        self.global_warnings: List[Tuple[str, str]] = []  # [(level, message), ...]
     
     def _get_or_create_instance(self, header_key: str, album_label: Optional[str]) -> HeaderInstance:
         """Get or create a header instance for the given header_key and album_label."""
@@ -543,9 +547,8 @@ class StructuredLogger:
         definition = self.header_definitions[header_key]
         instance = self.active_instance_stack[-1]
         
-        # Write instance to summary if it should be logged
-        if instance.should_log():
-            self._write_header_to_summary(definition, instance)
+        # DON'T write to summary immediately - defer until write_summary() is called
+        # Instances remain in header_instances registry for later organization
         
         # Pop from both stacks
         self.active_definition_stack.pop()
@@ -570,10 +573,10 @@ class StructuredLogger:
         _detail_logger.info(formatted)
         _console_logger.info(formatted)
     
-    def _write_header_to_summary(self, definition: HeaderDefinition, instance: HeaderInstance) -> None:
+    def _format_header_message(self, definition: HeaderDefinition, instance: HeaderInstance) -> str:
         """
-        Write a header instance to the summary log (album summary or global).
-        Only called if instance.should_log() is True.
+        Format a header instance message with count placeholder replaced.
+        Used for both summary file and console output.
         """
         # Replace count placeholder with instance count
         message = definition.message_template.replace(definition.count_placeholder, str(instance.count))
@@ -582,15 +585,7 @@ class StructuredLogger:
             message = message.replace("%Count%", str(instance.count))
         elif definition.count_placeholder == "%Count%":
             message = message.replace("%count%", str(instance.count))
-        
-        if instance.album_label:
-            # Write to album summary (old API summary structure)
-            add_album_event_label(instance.album_label, message)
-        else:
-            # Global headers: write to detail log and console (new API)
-            # Note: Already has [INFO] prefix from above
-            _detail_logger.info(message)
-            _console_logger.info(message)
+        return message
     
     def _get_indent_for_level(self, level: int) -> str:
         """Get indentation string for a given header level."""
@@ -720,11 +715,19 @@ class StructuredLogger:
             # Write to detail logger only (file only, no console)
             _detail_logger.info(formatted)
         
-        # Add to album/global warnings for warn/error
+        # Track warnings/errors for summary (new API tracking)
         if level in ("warn", "error"):
             if use_album:
+                # Track in new API structure
+                if use_album not in self.album_warnings:
+                    self.album_warnings[use_album] = []
+                self.album_warnings[use_album].append((level, formatted_message))
+                # Also add to old API for now (during migration)
                 add_album_warning_label(use_album, formatted_message, level=level)
             else:
+                # Track in new API structure
+                self.global_warnings.append((level, formatted_message))
+                # Also add to old API for now (during migration)
                 from logging_utils import add_global_warning
                 add_global_warning(formatted_message, level=level)
         
@@ -813,6 +816,129 @@ class StructuredLogger:
                 instance.count += 1
                 instance.counted_items.add(item_id)
     
+    def write_summary(self, mode: str, dry_run: bool = False) -> None:
+        """
+        Write the complete summary at the end of execution.
+        Organizes all header instances by album (or global), sorts them, and writes to file + console.
+        Console output is colored on-the-fly.
+        """
+        from datetime import datetime
+        
+        if STRUCTURED_SUMMARY_LOG_FILE is None:
+            return
+        
+        # Ensure directory exists
+        STRUCTURED_SUMMARY_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Organize instances by album_label
+        album_groups: Dict[Optional[str], List[Tuple[HeaderDefinition, HeaderInstance]]] = {}
+        global_instances: List[Tuple[HeaderDefinition, HeaderInstance]] = []
+        
+        for (header_key, album_label), instance in self.header_instances.items():
+            if not instance.should_log():
+                continue
+            
+            definition = self.header_definitions[header_key]
+            if album_label:
+                if album_label not in album_groups:
+                    album_groups[album_label] = []
+                album_groups[album_label].append((definition, instance))
+            else:
+                global_instances.append((definition, instance))
+        
+        # Build summary lines
+        lines: List[str] = []
+        lines.append(f"Library sync summary - {datetime.now():%Y-%m-%d %H:%M:%S}")
+        lines.append(f"Mode: {mode}, DRY_RUN={dry_run}")
+        lines.append("")
+        
+        # Write albums section
+        if album_groups:
+            lines.append("Albums processed:")
+            # Sort albums for consistent output
+            for album_label in sorted(album_groups.keys()):
+                lines.append(f"* {album_label}")  # Album header with *
+                
+                # Get instances for this album (sort by level and header_key for chronological order)
+                instances = album_groups[album_label]
+                instances.sort(key=lambda x: (x[0].level, x[0].header_key))
+                
+                for definition, instance in instances:
+                    message = self._format_header_message(definition, instance)
+                    # Format: 2 spaces per level, dashes for subheadings
+                    # Level 1 (first nested): "  - message" (2 spaces, 1 dash)
+                    # Level 2: "    -- message" (4 spaces, 2 dashes)
+                    # Level 3: "      --- message" (6 spaces, 3 dashes)
+                    # Note: definition.level is 0-based, but under albums it starts at 1
+                    indent_spaces = "  " * (definition.level + 1)  # 2 spaces per level, +1 for album
+                    num_dashes = definition.level + 1  # Number of dashes = level + 1
+                    dashes = "-" * num_dashes
+                    lines.append(f"{indent_spaces}{dashes} {message}")
+                
+                # Add warnings for this album
+                if album_label in self.album_warnings:
+                    for level, warning_msg in self.album_warnings[album_label]:
+                        prefix = "[WARN]" if level == "warn" else "[ERROR]"
+                        lines.append(f"    {prefix} {warning_msg}")  # 4 spaces for warnings (level 2)
+        else:
+            lines.append("Albums processed: (none)")
+        
+        lines.append("")
+        
+        # Write global warnings section
+        lines.append("Global warnings:")
+        if self.global_warnings or global_instances:
+            # Add global header instances first
+            global_instances.sort(key=lambda x: (x[0].level, x[0].header_key))
+            for definition, instance in global_instances:
+                message = self._format_header_message(definition, instance)
+                lines.append(f"  {message}")
+            
+            # Then add global warnings/errors
+            for level, warning_msg in self.global_warnings:
+                prefix = "[WARN]" if level == "warn" else "[ERROR]"
+                lines.append(f"  {prefix} {warning_msg}")
+        else:
+            lines.append("  (none)")
+        
+        # Write to file
+        try:
+            with STRUCTURED_SUMMARY_LOG_FILE.open("w", encoding="utf-8") as f:
+                f.write("\n".join(lines) + "\n")
+        except Exception as e:
+            logger.error(f"Could not write structured summary log: {e}")
+        
+        # Print to console with colors (on-the-fly)
+        print("\n================ SUMMARY ================")
+        for line in lines:
+            if not line:
+                print()
+                continue
+            
+            line_stripped = line.lstrip(" \t")
+            
+            # Apply colors and icons based on format
+            if line_stripped.startswith("[ERROR]"):
+                print(f"{Colors.ERROR}{ICONS['error']} {line}{Colors.RESET}")
+            elif line_stripped.startswith("[WARN]"):
+                print(f"{Colors.WARNING}{ICONS['warning']} {line}{Colors.RESET}")
+            elif line.startswith("* "):
+                # Album header - cyan
+                print(f"{Colors.CYAN}{ICONS['step']} {line}{Colors.RESET}")
+            elif line.startswith("  ") and any(c == '-' for c in line[:10]) and not line.startswith("  [WARN]") and not line.startswith("  [ERROR]"):
+                # Header line (spaces + dashes) - step icon
+                print(f"{ICONS['step']} {line}")
+            elif ':' in line and not line.startswith("  ") and not line.startswith("\t") and not line.startswith("*"):
+                # Section header
+                print(f"{ICONS['step']} {line}")
+            elif line.startswith("  ") or line.startswith("\t"):
+                # Other indented lines
+                print(f"{ICONS['info']} {line}")
+            else:
+                # Regular line
+                print(line)
+        print("=========================================\n")
+    
     def clear(self) -> None:
         """Clear the header stacks and album context. Useful for testing."""
         self.header_definitions.clear()
@@ -822,6 +948,8 @@ class StructuredLogger:
         self.current_album_label = None
         self.current_album_info = None
         self._current_album_key = None
+        self.album_warnings.clear()
+        self.global_warnings.clear()
 
 
 # Global singleton instance
