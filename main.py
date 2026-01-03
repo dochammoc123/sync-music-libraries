@@ -101,6 +101,14 @@ def main() -> None:
     from structured_logging import setup_detail_logging
     setup_detail_logging()  # New API: detail file + console
     
+    # Add run divider to detail log file (use public API)
+    from structured_logging import logmsg
+    from datetime import datetime
+    divider = "=" * 80
+    logmsg.verbose(divider)
+    logmsg.verbose(f"New run started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logmsg.verbose(divider)
+    
     def exit_with_error(error_msg: str, exit_code: int = 1, is_error: bool = True) -> None:
         """Common handler for early exits: log, write summary, notify, prompt, exit.
         
@@ -140,6 +148,15 @@ def main() -> None:
     log(f"DRY_RUN = {DRY_RUN}")
     log(f"EMBED_ALL = {EMBED_ALL}")
     log(f"T8_SYNC_USE_CHECKSUMS = {args.t8_checksums}")
+    
+    # Log startup info as always_show headers (appears in both detail log and summary)
+    from structured_logging import logmsg
+    header_key = logmsg.set_header(f"Starting script in mode: {args.mode}", always_show=True, key=None)
+    header_key = logmsg.set_header(f"DRY_RUN = {DRY_RUN}", always_show=True, key=header_key)
+    header_key = logmsg.set_header(f"EMBED_ALL = {EMBED_ALL}", always_show=True, key=header_key)
+    header_key = logmsg.set_header(f"T8_SYNC_USE_CHECKSUMS = {args.t8_checksums}", always_show=True, key=header_key)
+    # Clear header stack so Step 1 can start fresh with key=None (prevents wrong header context for any logs between)
+    logmsg.set_header(None, key=header_key)
 
     # Safety check: Verify both ROON and T8 drives have at least 1TB total capacity
     log("\nSafety check: Verifying disk capacity on target drives...")
@@ -158,9 +175,11 @@ def main() -> None:
                 try:
                     test_access = MUSIC_ROOT if MUSIC_ROOT.exists() else MUSIC_ROOT.parent
                     if test_access.exists():
-                        log(f"  WARNING: ROON drive ({checked_path}) capacity could not be determined, but path is accessible.")
+                        log(f"  INFO: ROON drive ({checked_path}) capacity could not be determined, but path is accessible.")
                         log(f"  Allowing operation (network shares may not report capacity reliably).")
-                        add_global_warning(f"ROON drive capacity check inconclusive - path accessible but capacity unknown")
+                        # Use verbose for new API (network shares often can't report capacity - this is normal)
+                        from structured_logging import logmsg
+                        logmsg.verbose("ROON drive capacity check inconclusive - path accessible but capacity unknown (network shares may not report capacity reliably)")
                     else:
                         # Path not accessible
                         error_msg = (
@@ -216,9 +235,11 @@ def main() -> None:
                     try:
                         test_access = T8_ROOT if T8_ROOT.exists() else T8_ROOT.parent
                         if test_access.exists():
-                            log(f"  WARNING: T8 drive ({checked_path}) capacity could not be determined, but path is accessible.")
+                            log(f"  INFO: T8 drive ({checked_path}) capacity could not be determined, but path is accessible.")
                             log(f"  Allowing operation (network shares may not report capacity reliably).")
-                            add_global_warning(f"T8 drive capacity check inconclusive - path accessible but capacity unknown")
+                            # Use verbose for new API (network shares often can't report capacity - this is normal)
+                            from structured_logging import logmsg
+                            logmsg.verbose("T8 drive capacity check inconclusive - path accessible but capacity unknown (network shares may not report capacity reliably)")
                         else:
                             # Path not accessible - in dry-run, allow with warning (for testing when T8 is offline)
                             if DRY_RUN:
@@ -293,9 +314,24 @@ def main() -> None:
             notify_run_summary(args.mode)
             
             # Calculate exit code
+            # Exit codes: 0 = clean (idle icon), 2 = warnings (yellow icon), 1 = errors (red icon)
             from logging_utils import ALBUM_SUMMARY, GLOBAL_WARNINGS
-            total_warnings = sum(len(v["warnings"]) for v in ALBUM_SUMMARY.values()) + len(GLOBAL_WARNINGS)
-            exit_code = 2 if total_warnings > 0 else 0
+            from structured_logging import logmsg
+            
+            # Count warnings from old API (old API doesn't distinguish errors from warnings)
+            old_total_warnings = sum(len(v["warnings"]) for v in ALBUM_SUMMARY.values()) + len(GLOBAL_WARNINGS)
+            
+            # Get counts from new structured logging API (consolidated)
+            new_errors = logmsg.count_errors
+            new_warnings = logmsg.count_warnings
+            
+            # Determine exit code: errors = 1 (red), warnings only = 2 (yellow), clean = 0 (green)
+            if new_errors > 0:
+                exit_code = 1
+            elif new_warnings > 0 or old_total_warnings > 0:
+                exit_code = 2
+            else:
+                exit_code = 0
             
             # Print summary to console (before "Press Enter" prompt so user can review it)
             try:
@@ -304,9 +340,11 @@ def main() -> None:
                 log(f"[WARN] Could not print summary log: {e}")
             
             # Log exit status before prompt
-            log(f"Exit status: {total_warnings} warning(s) found")
-            if exit_code == 2:
-                log("Exiting with code 2 (warnings) - systray will show yellow warning icon")
+            total_warnings_count = new_errors + new_warnings + old_total_warnings
+            if exit_code == 1:
+                log(f"Exiting with code 1 ({new_errors} error(s)) - systray will show red error icon")
+            elif exit_code == 2:
+                log(f"Exiting with code 2 ({total_warnings_count} warning(s)) - systray will show yellow warning icon")
             else:
                 log("Exiting with code 0 (success) - systray will show idle icon")
             
@@ -425,16 +463,32 @@ def main() -> None:
         # Exit codes: 0 = clean (idle icon), 2 = warnings (yellow icon), 1 = errors (red icon)
         # Calculate exit code FIRST before doing any operations that might fail
         from logging_utils import ALBUM_SUMMARY, GLOBAL_WARNINGS
-        total_warnings = sum(len(v["warnings"]) for v in ALBUM_SUMMARY.values()) + len(GLOBAL_WARNINGS)
-        exit_code = 2 if total_warnings > 0 else 0
+        from structured_logging import logmsg
+        
+        # Count warnings/errors from old API
+        old_total_warnings = sum(len(v["warnings"]) for v in ALBUM_SUMMARY.values()) + len(GLOBAL_WARNINGS)
+        
+        # Get counts from new structured logging API (consolidated)
+        new_errors = logmsg.count_errors
+        new_warnings = logmsg.count_warnings
+        
+        # Determine exit code: errors = 1 (red), warnings only = 2 (yellow), clean = 0 (green)
+        if new_errors > 0:
+            exit_code = 1
+        elif new_warnings > 0 or old_total_warnings > 0:
+            exit_code = 2
+        else:
+            exit_code = 0
         
         # Summary is already printed by logmsg.write_summary() (new API)
         # Old summary printing is now redundant but kept for compatibility
         
         # Log exit status before prompt
-        log(f"Exit status: {total_warnings} warning(s) found")
-        if exit_code == 2:
-            log("Exiting with code 2 (warnings) - systray will show yellow warning icon")
+        total_warnings_count = new_errors + new_warnings + old_total_warnings
+        if exit_code == 1:
+            log(f"Exiting with code 1 ({new_errors} error(s)) - systray will show red error icon")
+        elif exit_code == 2:
+            log(f"Exiting with code 2 ({total_warnings_count} warning(s)) - systray will show yellow warning icon")
         else:
             log("Exiting with code 0 (success) - systray will show idle icon")
         

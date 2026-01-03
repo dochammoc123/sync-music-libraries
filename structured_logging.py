@@ -123,6 +123,7 @@ class HeaderDefinition:
     count_placeholder: str  # Default: "%count%" (deferred replacement)
     detail_message: str  # Message for detail log (without %count% placeholder)
     level: int  # Nesting level (0 = step, 1 = sub-album, etc.)
+    always_show: bool = False  # If True, header appears in summary even if count is 0
 
 
 @dataclass
@@ -134,25 +135,32 @@ class HeaderInstance:
     count: int = 0  # Number of unique items logged under this header instance
     counted_items: set = field(default_factory=set)  # Track item IDs to prevent double-counting
     detail_messages: List[str] = field(default_factory=list)  # Accumulated detail messages
+    always_show: bool = False  # If True, header appears in summary even if count is 0
+    creation_order: int = 0  # Order in which instance was created (for chronological sorting)
     
     def should_log(self) -> bool:
         """
-        Should this header instance be logged? (has counted items)
+        Should this header instance be logged?
         
-        Headers only appear in summary if count > 0 (items were logged with item IDs).
+        Headers appear in summary if:
+        - count > 0 (items were logged with item IDs), OR
+        - always_show is True (header should always appear regardless of count)
         
-        Design: To make a header appear in summary, log at least one message with an item ID.
+        Design:
         - If header counts items: Include %count% in template (e.g., "%msg% (%count% files)")
         - If header is informational (no items counted): Don't include %count% (e.g., "%msg%")
+        - If header should always appear: Set always_show=True when creating the header.
+          Note: With always_show=True, items are redundant (header appears regardless).
+          Detail messages appear in detail log only; summary shows only the header line.
+          For multiple lines in summary, use separate headers.
+        - Conditional headers: Headers with a single conditional item are fine - header appears
+          if/when that item is logged (e.g., "Processing artwork" header with item logged only if art found)
         
         IMPORTANT - Item Homogeneity:
         Items under the same header MUST be homogeneous (all files, all albums, etc.).
-        Currently ALL log levels (info/warn/error/verbose) count items if an item ID is provided.
-        For informational headers that should always appear, consider logging a dummy item,
-        but be aware this breaks homogeneity if the header is counting specific item types.
-        We'll refine dummy item handling with real use cases.
+        All log levels (info/warn/error/verbose) count items if an item ID is provided.
         """
-        return self.count > 0
+        return self.count > 0 or self.always_show
 
 
 class StructuredLogger:
@@ -176,6 +184,9 @@ class StructuredLogger:
         
         # Header instances (runtime objects) - keyed by (header_key, album_label)
         self.header_instances: Dict[Tuple[str, Optional[str]], HeaderInstance] = {}
+        
+        # Counter for tracking creation order of header instances (for chronological sorting)
+        self._instance_creation_counter = 0
         
         # Active header definitions stack (the hierarchy/template)
         # Represents which header definitions are currently in the processing hierarchy
@@ -201,16 +212,30 @@ class StructuredLogger:
         # Track warnings and errors for summary (album -> list of messages)
         self.album_warnings: Dict[str, List[Tuple[str, str]]] = {}  # album_label -> [(level, message), ...]
         self.global_warnings: List[Tuple[str, str]] = []  # [(level, message), ...]
+        
+        # Cached counts (updated whenever warnings/errors are added)
+        self._count_errors: int = 0
+        self._count_warnings: int = 0
+        
+        # Cached counts (updated whenever warnings/errors are added)
+        self._count_errors: int = 0
+        self._count_warnings: int = 0
     
     def _get_or_create_instance(self, header_key: str, album_label: Optional[str]) -> HeaderInstance:
         """Get or create a header instance for the given header_key and album_label."""
         instance_key = (header_key, album_label)
         if instance_key not in self.header_instances:
-            # Create new instance
+            # Get always_show from definition
+            definition = self.header_definitions.get(header_key)
+            always_show = definition.always_show if definition else False
+            # Create new instance with creation order
+            self._instance_creation_counter += 1
             instance = HeaderInstance(
                 header_key=header_key,
                 album_label=album_label,
-                instance_key=str(uuid.uuid4())
+                instance_key=str(uuid.uuid4()),
+                always_show=always_show,
+                creation_order=self._instance_creation_counter
             )
             self.header_instances[instance_key] = instance
         return self.header_instances[instance_key]
@@ -446,77 +471,45 @@ class StructuredLogger:
         msg: str,
         message_template: Optional[str] = None,
         count_placeholder: str = "%count%",
-        key: Optional[str] = None
-    ) -> str:
+        key: Optional[str] = None,
+        always_show: bool = False
+    ) -> Optional[str]:
         """
         Set/replace the current header at the current level.
         Shortcut for: pop_header(key) (if key provided) + push_header() at same level.
         
-        Use for headers like "Step 1: Process downloads (%count% items)"
-        
-        Note: %count% is replaced LATER when header is written to summary.
-        Use {var} for IMMEDIATE replacement (Python str.format() style, e.g., {artist}, {album}, {year}).
+        Special case: If msg is None, this is syntactic sugar for pop_header(key).
+        - set_header(None, key=header_key) - pops the specified header
+        - set_header(None, key=None) - only allowed if stack is empty (no-op)
         
         Args:
             msg: Message for detail log. Also used as template if message_template is None.
-            message_template: Optional header message template for summary log with:
-                - %msg% for template replacement (replaced with msg parameter)
-                - %count% for deferred count replacement (replaced when header written to summary)
-                - {var} for immediate replacement from album context (e.g., {artist}, {album}, {year})
+                If None, performs pop_header(key) instead.
+            message_template: Optional header message template for summary log.
                 If None, msg is used as the template.
             count_placeholder: Placeholder for count (default: "%count%")
-            key: Optional header_key from previous set_header() call. If provided and stack is not empty,
-                must match the current header's key (sanity check). Use None for first call.
+            key: Optional header_key from previous set_header() call.
+                If None and stack not empty, raises error (bug prevention).
+            always_show: If True, header appears in summary even if count is 0 (default: False)
         
         Returns:
-            str: header_key to use with next set_header() call (for sanity check)
-        
-        Raises:
-            ValueError: If key is provided but doesn't match current header, or if key is provided but stack is empty
-        
-        Examples:
-            key = set_header("H1") -> detail: "H1", summary: "H1" (first call, key=None)
-            key2 = set_header("H2", key=key) -> detail: "H2", summary: "H2" (replaces previous)
-            set_header("H1", "H1 .. %count%") -> detail: "H1", summary: "H1 .. 2"
-            set_header("H1", "%msg% (count = %count%)") -> detail: "H1", summary: "H1 (count = 2)"
-        
-        Note: %item% placeholder is only for detail logs (info/warn/error), not headers.
+            str: header_key to use with next set_header() call, or None if msg is None
         """
-        # SAFEGUARD: Headers should not use %item% placeholder (items are for detail logs only)
-        if "%item%" in msg or "%Item%" in msg:
-            raise ValueError(
-                f"FATAL: Header message contains %item% placeholder, which is not allowed.\n"
-                f"Header message: {msg!r}\n"
-                f"Headers cannot use %item% - use item context in detail log messages only (info/warn/error)."
-            )
-        template_to_check = message_template if message_template is not None else msg
-        if "%item%" in template_to_check or "%Item%" in template_to_check:
-            raise ValueError(
-                f"FATAL: Header template contains %item% placeholder, which is not allowed.\n"
-                f"Header template: {template_to_check!r}\n"
-                f"Headers cannot use %item% - use item context in detail log messages only (info/warn/error)."
-            )
-        
-        # If key provided, pop current header (sanity check)
+        # If key provided, pop current header (pop_header does all error checking)
+        # This works for both msg=None (pop only) and msg!=None (pop then push)
         if key is not None:
-            if not self.active_definition_stack:
-                raise ValueError(f"Cannot set_header with key {key}: definition stack is empty")
-            
-            current_key = self.active_definition_stack[-1]
-            if current_key != key:
-                raise ValueError(f"Header key mismatch: expected {current_key}, got {key}")
-            
-            # Pop current header from stacks (but don't write summary - we're replacing it)
-            self.active_definition_stack.pop()
-            self.active_instance_stack.pop()
+            self.pop_header(key)
+        else:
+            # Bug prevention: If stack is not empty, key must have been provided
+            if self.active_definition_stack:
+                raise ValueError("Cannot set_header without key when header already exists on stack. Provide key from previous set_header() call.")
         
-        # Use msg as template if message_template not provided
-        template = message_template if message_template is not None else msg
-        
-        # Push new header at same level (or level 0 if was empty)
-        # push_header will handle %msg% replacement and immediate replacements
-        new_key = self.push_header(msg, template, None, count_placeholder)
-        return new_key
+        if msg is not None:
+            # Push new header (push_header does all error checking including %item% safeguard)
+            template = message_template if message_template is not None else msg
+            return self.push_header(msg, template, None, count_placeholder, always_show=always_show)
+        # msg is None: return None (no header to push, already popped if key provided)
+        return None
     
     def _format_immediate_replacements(self, message: str) -> str:
         """
@@ -564,7 +557,8 @@ class StructuredLogger:
         msg: str,
         message_template: Optional[str] = None,
         category: Optional[str] = None,
-        count_placeholder: str = "%count%"
+        count_placeholder: str = "%count%",
+        always_show: bool = False
     ) -> str:
         """
         Push a nested header onto the stack (increases level).
@@ -579,18 +573,18 @@ class StructuredLogger:
                 - %count% for deferred count replacement (replaced when header written to summary)
                   Only include %count% if the header will count items (via logmsg.info/warn/error with item IDs).
                   Omit %count% for informational headers that don't count items.
-                  For informational headers that should always appear, log a dummy item (e.g., item="done").
                 - {var} for immediate replacement from album context (e.g., {artist}, {album}, {year})
                 If None, msg is used as the template.
             category: Header category (e.g., "DOWNLOAD", "UPDATE"), or None
             count_placeholder: Placeholder for count (default: "%count%")
         
         Important Design Note:
-            Headers only appear in summary if they have detail messages OR counted items.
-            - Always ensure at least one log message (info/warn/error/verbose) is logged under the header
-              if you want it to appear in the summary.
+            Headers appear in summary if:
+            - count > 0 (items were logged with item IDs), OR
+            - always_show is True
             - If header counts items: Include %count% in template (e.g., "%msg% (%count% files)")
             - If header is informational: Don't include %count% (e.g., "%msg%")
+            - If header should always appear: Set always_show=True
         
         Returns:
             str: header_key to use with pop_header() (for sanity check)
@@ -634,7 +628,8 @@ class StructuredLogger:
             message_template=formatted_template,
             count_placeholder=count_placeholder,
             detail_message=formatted_detail,
-            level=level
+            level=level,
+            always_show=always_show
         )
         self.header_definitions[header_key] = definition
         
@@ -879,11 +874,21 @@ class StructuredLogger:
                 if use_album not in self.album_warnings:
                     self.album_warnings[use_album] = []
                 self.album_warnings[use_album].append((level, formatted_message))
+                # Update counts
+                if level == "error":
+                    self._count_errors += 1
+                elif level == "warn":
+                    self._count_warnings += 1
                 # Also add to old API for now (during migration)
                 add_album_warning_label(use_album, formatted_message, level=level)
             else:
                 # Track in new API structure - store the original message (before ".." formatting)
                 self.global_warnings.append((level, formatted_message))
+                # Update counts
+                if level == "error":
+                    self._count_errors += 1
+                elif level == "warn":
+                    self._count_warnings += 1
                 # DO NOT call add_global_warning() here - it would duplicate
                 # The old API summary is written separately via write_summary_log()
         
@@ -894,8 +899,8 @@ class StructuredLogger:
         # Automatically count item if item provided (first encounter)
         # NOTE: Items are counted regardless of log level (info/warn/error/verbose all count)
         # IMPORTANT: Items under the same header should be HOMOGENEOUS (all files, all albums, etc.)
-        # If you need a header to appear even when no items are processed, consider using a dummy item,
-        # but be aware this breaks homogeneity. We may need special handling for dummy items in the future.
+        # Conditional headers with a single item are fine - header appears if/when that item is logged.
+        # If you need a header to always appear regardless of items, use always_show=True when creating the header.
         if use_item:
             self._increment_current_count(use_item)
     
@@ -992,7 +997,8 @@ class StructuredLogger:
         
         # Organize instances by album_label
         album_groups: Dict[Optional[str], List[Tuple[HeaderDefinition, HeaderInstance]]] = {}
-        global_instances: List[Tuple[HeaderDefinition, HeaderInstance]] = []
+        global_info_instances: List[Tuple[HeaderDefinition, HeaderInstance]] = []  # Informational (always_show=True)
+        global_instances: List[Tuple[HeaderDefinition, HeaderInstance]] = []  # Regular global headers
         
         for (header_key, album_label), instance in self.header_instances.items():
             if not instance.should_log():
@@ -1004,13 +1010,26 @@ class StructuredLogger:
                     album_groups[album_label] = []
                 album_groups[album_label].append((definition, instance))
             else:
-                global_instances.append((definition, instance))
+                # Separate informational headers (always_show=True) from regular headers
+                if definition.always_show and instance.count == 0:
+                    global_info_instances.append((definition, instance))
+                else:
+                    global_instances.append((definition, instance))
         
         # Build summary lines
         lines: List[str] = []
         lines.append(f"Library sync summary - {datetime.now():%Y-%m-%d %H:%M:%S}")
-        lines.append(f"Mode: {mode}, DRY_RUN={dry_run}")
         lines.append("")
+        
+        # Write informational global headers first (if any)
+        # Sort by level first (to maintain nesting), then by creation order (chronological)
+        if global_info_instances:
+            global_info_instances.sort(key=lambda x: (x[0].level, x[1].creation_order))
+            for definition, instance in global_info_instances:
+                message = self._format_header_message(definition, instance)
+                # Format with dash prefix (like step headers) to distinguish from simple summary output
+                lines.append(f"  - {message}")
+            lines.append("")
         
         # Write albums section
         if album_groups:
@@ -1019,9 +1038,9 @@ class StructuredLogger:
             for album_label in sorted(album_groups.keys()):
                 lines.append(f"* {album_label}")  # Album header with *
                 
-                # Get instances for this album (sort by level and header_key for chronological order)
+                # Get instances for this album (sort by level and creation_order for chronological order)
                 instances = album_groups[album_label]
-                instances.sort(key=lambda x: (x[0].level, x[0].header_key))
+                instances.sort(key=lambda x: (x[0].level, x[1].creation_order))
                 
                 for definition, instance in instances:
                     message = self._format_header_message(definition, instance)
@@ -1049,7 +1068,8 @@ class StructuredLogger:
         lines.append("Global errors/warnings:")
         if self.global_warnings or global_instances:
             # Add global header instances first
-            global_instances.sort(key=lambda x: (x[0].level, x[0].header_key))
+            # Sort by level first (to maintain nesting), then by creation order (chronological)
+            global_instances.sort(key=lambda x: (x[0].level, x[1].creation_order))
             for definition, instance in global_instances:
                 message = self._format_header_message(definition, instance)
                 lines.append(f"  {message}")
@@ -1118,17 +1138,20 @@ class StructuredLogger:
                 else:
                     print(f"  {line}", flush=True)  # Default formatting for continuation lines
             elif line.startswith("* "):
-                # Album header - cyan
-                print(f"{Colors.CYAN}{ICONS['step']} {line}{Colors.RESET}", flush=True)
+                # Album header - cyan with info icon
+                print(f"{Colors.CYAN}{ICONS['info']}  {line}{Colors.RESET}", flush=True)
             elif line.startswith("  ") and any(c == '-' for c in line[:10]) and not line.startswith("  [WARN]") and not line.startswith("  [ERROR]"):
-                # Header line (spaces + dashes) - step icon
-                print(f"{ICONS['step']} {line}", flush=True)
+                # Header line (spaces + dashes) - info icon
+                print(f"{ICONS['info']}  {line}", flush=True)
+            elif "(none)" in line:
+                # Summary text like "(none)" - no icon, just plain text
+                print(line, flush=True)
             elif ':' in line and not line.startswith("  ") and not line.startswith("\t") and not line.startswith("*"):
-                # Section header
+                # Section header (like "Global errors/warnings:", "Albums processed:") - step icon
                 print(f"{ICONS['step']} {line}", flush=True)
             elif line.startswith("  ") or line.startswith("\t"):
                 # Other indented lines
-                print(f"{ICONS['info']} {line}", flush=True)
+                print(f"{ICONS['info']}  {line}", flush=True)
             else:
                 # Regular line
                 print(line, flush=True)
@@ -1146,6 +1169,18 @@ class StructuredLogger:
         self._current_album_key = None
         self.album_warnings.clear()
         self.global_warnings.clear()
+        self._count_errors = 0
+        self._count_warnings = 0
+    
+    @property
+    def count_errors(self) -> int:
+        """Return the total count of errors (global + album-specific)."""
+        return self._count_errors
+    
+    @property
+    def count_warnings(self) -> int:
+        """Return the total count of warnings (global + album-specific)."""
+        return self._count_warnings
 
 
 # Global singleton instance
