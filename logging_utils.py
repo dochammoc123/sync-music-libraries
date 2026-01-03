@@ -114,7 +114,7 @@ def setup_logging() -> None:
 
 
 def log(msg: str) -> None:
-    """Main log function: always goes to the rotating log and console."""
+    """Main log function: writes to rotating log file only (no console)."""
     logger.info(msg)
 
 
@@ -182,19 +182,9 @@ def add_global_warning(text: str, level: str = "warn") -> None:
         warning_text = f"{prefix} {text}"
         GLOBAL_WARNINGS.append(warning_text)
     
-    # Also track in new structured logging API (for compatibility during migration)
-    try:
-        from structured_logging import logmsg
-        # Extract clean message (without prefix) for structured logger
-        clean_message = text_stripped
-        if text_stripped.startswith("[WARN]") or text_stripped.startswith("[ERROR]"):
-            if text_stripped.startswith("[WARN]"):
-                clean_message = text_stripped[6:].lstrip()
-            elif text_stripped.startswith("[ERROR]"):
-                clean_message = text_stripped[7:].lstrip()
-        logmsg.global_warnings.append((level, clean_message))
-    except Exception:
-        pass  # If structured logging not initialized yet, just skip
+    # NOTE: Do NOT add to new structured logging API's global_warnings here
+    # The new API should be called explicitly via logmsg.error() or logmsg.warn()
+    # Adding here would cause duplicates when both old and new APIs are used
 
 
 def album_label_from_tags(artist: str, album: str, year: str) -> str:

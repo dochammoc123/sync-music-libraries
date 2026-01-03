@@ -101,6 +101,41 @@ def main() -> None:
     from structured_logging import setup_detail_logging
     setup_detail_logging()  # New API: detail file + console
     
+    def exit_with_error(error_msg: str, exit_code: int = 1, is_error: bool = True) -> None:
+        """Common handler for early exits: log, write summary, notify, prompt, exit.
+        
+        Args:
+            error_msg: Error message (may contain "ERROR:" prefix which will be stripped)
+            exit_code: Exit code (default 1)
+            is_error: If True, log as error; if False, log as warning (e.g., for DRY_RUN scenarios)
+        """
+        log(error_msg)
+        # Strip "ERROR:" or "WARNING:" prefix if present
+        clean_msg = error_msg
+        if clean_msg.startswith("ERROR:") or clean_msg.startswith("WARNING:"):
+            clean_msg = clean_msg.split(":", 1)[1].lstrip()
+        # Log to structured logging detail log
+        from structured_logging import logmsg
+        if is_error:
+            logmsg.error(clean_msg)
+        else:
+            logmsg.warn(clean_msg)
+        # Also add to old API global warnings for old summary file
+        level = "error" if is_error else "warn"
+        add_global_warning(clean_msg, level=level)
+        write_summary_log(args.mode, DRY_RUN)
+        logmsg.write_summary(args.mode, DRY_RUN)
+        notify_run_summary(args.mode)
+        # Keep console open for user to review
+        if sys.platform == "win32":
+            try:
+                print()  # Add blank line before prompt
+                print("Press Enter to close this window...")  # Use print() not log() - log() doesn't write to console
+                input()
+            except (EOFError, KeyboardInterrupt, OSError, AttributeError):
+                pass  # stdin not available - likely running from tray launcher
+        sys.exit(exit_code)
+    
     log(f"Starting script in mode: {args.mode}")
     log(f"DRY_RUN = {DRY_RUN}")
     log(f"EMBED_ALL = {EMBED_ALL}")
@@ -134,11 +169,7 @@ def main() -> None:
                             f"  Required: {min_tb:.2f} TB minimum total capacity.\n"
                             f"This check protects system drives on the server. Exiting."
                         )
-                        log(error_msg)
-                        add_global_warning(error_msg)
-                        write_summary_log(args.mode, DRY_RUN)
-                        notify_run_summary(args.mode)
-                        sys.exit(1)
+                        exit_with_error(error_msg)
                 except Exception as e:
                     # In dry-run, allow it to continue with warning (might be a temporary network issue)
                     if DRY_RUN:
@@ -151,11 +182,7 @@ def main() -> None:
                             f"  Required: {min_tb:.2f} TB minimum total capacity.\n"
                             f"This check protects system drives on the server. Exiting."
                         )
-                        log(error_msg)
-                        add_global_warning(error_msg)
-                        write_summary_log(args.mode, DRY_RUN)
-                        notify_run_summary(args.mode)
-                        sys.exit(1)
+                        exit_with_error(error_msg)
             else:
                 # Drive too small (likely a system drive) - only fail if > 1GB (real capacity, not unknown)
                 # In dry-run mode, allow it to continue with warning (no changes will be made anyway)
@@ -172,11 +199,7 @@ def main() -> None:
                         f"  Actual: {capacity_gb:.2f} GB ({capacity_gb / 1024:.2f} TB)\n"
                         f"This check protects system drives on the server. Exiting."
                     )
-                    log(error_msg)
-                    add_global_warning(error_msg)
-                    write_summary_log(args.mode, DRY_RUN)
-                    notify_run_summary(args.mode)
-                    sys.exit(1)
+                    exit_with_error(error_msg)
         else:
             log(f"  ROON drive ({checked_path}): {capacity_gb:.2f} GB capacity ({capacity_gb / 1024:.2f} TB) - OK")
         
@@ -209,11 +232,7 @@ def main() -> None:
                                     f"  Required: {min_tb:.2f} TB minimum total capacity.\n"
                                     f"This check protects system drives on the server. Exiting."
                                 )
-                                log(error_msg)
-                                add_global_warning(error_msg)
-                                write_summary_log(args.mode, DRY_RUN)
-                                notify_run_summary(args.mode)
-                                sys.exit(1)
+                                exit_with_error(error_msg)
                     except Exception as e:
                         # In dry-run, allow it to continue with warning (might be a temporary network issue)
                         if DRY_RUN:
@@ -226,11 +245,7 @@ def main() -> None:
                                 f"  Required: {min_tb:.2f} TB minimum total capacity.\n"
                                 f"This check protects system drives on the server. Exiting."
                             )
-                            log(error_msg)
-                            add_global_warning(error_msg)
-                            write_summary_log(args.mode, DRY_RUN)
-                            notify_run_summary(args.mode)
-                            sys.exit(1)
+                            exit_with_error(error_msg)
                 else:
                     # Drive too small (likely a system drive) - only fail if > 1GB (real capacity, not unknown)
                     # In dry-run mode, allow it to continue with warning (no changes will be made anyway)
@@ -247,24 +262,16 @@ def main() -> None:
                             f"  Actual: {capacity_gb:.2f} GB ({capacity_gb / 1024:.2f} TB)\n"
                             f"This check protects system drives on the server. Exiting."
                         )
-                        log(error_msg)
-                        add_global_warning(error_msg)
-                        write_summary_log(args.mode, DRY_RUN)
-                        notify_run_summary(args.mode)
-                        sys.exit(1)
+                        exit_with_error(error_msg)
             else:
                 log(f"  T8 drive ({checked_path}): {capacity_gb:.2f} GB capacity ({capacity_gb / 1024:.2f} TB) - OK")
         
         log("Disk capacity check passed.\n")
     except Exception as e:
         error_msg = f"ERROR: Exception during disk capacity check: {e}"
-        log(error_msg)
         from logging_utils import logger
         logger.exception("Disk capacity check failed")
-        add_global_warning(error_msg)
-        write_summary_log(args.mode, DRY_RUN)
-        notify_run_summary(args.mode)
-        sys.exit(1)
+        exit_with_error(error_msg)
 
     init_musicbrainz()
 
@@ -281,6 +288,8 @@ def main() -> None:
                 add_global_warning("ROON library refresh failed - you may need to manually restart ROON to see new files")
             
             write_summary_log(args.mode, DRY_RUN)
+            from structured_logging import logmsg
+            logmsg.write_summary(args.mode, DRY_RUN)
             notify_run_summary(args.mode)
             
             # Calculate exit code
@@ -305,7 +314,7 @@ def main() -> None:
             if sys.platform == "win32":
                 try:
                     print()  # Add blank line before prompt
-                    log("Press Enter to close this window...")
+                    print("Press Enter to close this window...")  # Use print() not log() - log() doesn't write to console
                     input()
                 except (EOFError, KeyboardInterrupt, OSError, AttributeError):
                     pass
@@ -437,7 +446,7 @@ def main() -> None:
                 # Try to wait for user input - this keeps console open
                 # If stdin is not available (tray launcher), this will raise an exception
                 print()  # Add blank line before prompt
-                log("Press Enter to close this window...")
+                print("Press Enter to close this window...")  # Use print() not log() - log() doesn't write to console
                 input()
             except (EOFError, KeyboardInterrupt, OSError, AttributeError):
                 # stdin not available or interrupted - likely running from tray launcher
@@ -449,26 +458,8 @@ def main() -> None:
     except Exception as e:
         from logging_utils import logger
         logger.exception("Fatal error during run")
-        add_global_warning(f"Fatal error during run: {e}")
-        # Write old API summary (for compatibility during migration)
-        write_summary_log(args.mode, DRY_RUN)
-        # Write new structured summary
-        from structured_logging import logmsg
-        logmsg.write_summary(args.mode, DRY_RUN)
-        notify_run_summary(args.mode)
-        
-        # Summary is already printed by logmsg.write_summary() (new API)
-        
-        # Keep console open for user to review
-        if sys.platform == "win32":
-            try:
-                print()  # Add blank line before prompt
-                log("Press Enter to close this window...")
-                input()
-            except (EOFError, KeyboardInterrupt, OSError, AttributeError):
-                pass
-        
-        sys.exit(1)
+        error_msg = f"Fatal error during run: {e}"
+        exit_with_error(error_msg)
 
 
 if __name__ == "__main__":

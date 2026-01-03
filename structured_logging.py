@@ -136,7 +136,22 @@ class HeaderInstance:
     detail_messages: List[str] = field(default_factory=list)  # Accumulated detail messages
     
     def should_log(self) -> bool:
-        """Should this header instance be logged? (has items)"""
+        """
+        Should this header instance be logged? (has counted items)
+        
+        Headers only appear in summary if count > 0 (items were logged with item IDs).
+        
+        Design: To make a header appear in summary, log at least one message with an item ID.
+        - If header counts items: Include %count% in template (e.g., "%msg% (%count% files)")
+        - If header is informational (no items counted): Don't include %count% (e.g., "%msg%")
+        
+        IMPORTANT - Item Homogeneity:
+        Items under the same header MUST be homogeneous (all files, all albums, etc.).
+        Currently ALL log levels (info/warn/error/verbose) count items if an item ID is provided.
+        For informational headers that should always appear, consider logging a dummy item,
+        but be aware this breaks homogeneity if the header is counting specific item types.
+        We'll refine dummy item handling with real use cases.
+        """
         return self.count > 0
 
 
@@ -472,10 +487,20 @@ class StructuredLogger:
             message_template: Optional header message template for summary log with placeholders:
                 - %msg% for template replacement (replaced with msg parameter)
                 - %count% for deferred count replacement (replaced when header written to summary)
+                  Only include %count% if the header will count items (via logmsg.info/warn/error with item IDs).
+                  Omit %count% for informational headers that don't count items.
+                  For informational headers that should always appear, log a dummy item (e.g., item="done").
                 - {var} for immediate replacement from album context (e.g., {artist}, {album}, {year})
                 If None, msg is used as the template.
             category: Header category (e.g., "DOWNLOAD", "UPDATE"), or None
             count_placeholder: Placeholder for count (default: "%count%")
+        
+        Important Design Note:
+            Headers only appear in summary if they have detail messages OR counted items.
+            - Always ensure at least one log message (info/warn/error/verbose) is logged under the header
+              if you want it to appear in the summary.
+            - If header counts items: Include %count% in template (e.g., "%msg% (%count% files)")
+            - If header is informational: Don't include %count% (e.g., "%msg%")
         
         Returns:
             str: header_key to use with pop_header() (for sanity check)
@@ -697,23 +722,41 @@ class StructuredLogger:
         
         indent = self._get_indent()
         prefix = self._get_prefix()
-        formatted = f"{indent}{prefix}{level_prefix}{formatted_message}"
+        
+        # Format multi-line messages: first line normal, continuation lines with ".." prefix (no extra spaces)
+        # Both detail log and console use the same formatting
+        msg_lines = formatted_message.split("\n")
+        formatted_lines = []
+        for i, line in enumerate(msg_lines):
+            line = line.rstrip()  # Remove trailing whitespace
+            if i == 0:
+                # First line: normal formatting
+                formatted_lines.append(f"{indent}{prefix}{level_prefix}{line}")
+            else:
+                # Continuation line: ".." prefix with no extra spaces (strip leading whitespace first)
+                if line.strip() or i < len(msg_lines) - 1:  # Include blank lines except trailing
+                    # Strip leading whitespace from continuation lines before adding ".." prefix
+                    line_stripped = line.lstrip()
+                    formatted_lines.append(f"{indent}{prefix}..{line_stripped}")
+        
+        formatted_output = "\n".join(formatted_lines)
         
         # Write to appropriate logger(s)
         if console:
-            # Write to console logger (new API console output only)
+            # Write to console logger (new API console output only) - with ".." prefix on continuation lines
             log_method = {
                 "info": _console_logger.info,
                 "verbose": _console_logger.info,  # Same as info level
                 "warn": _console_logger.warning,
                 "error": _console_logger.error
             }.get(level, _console_logger.info)
-            log_method(formatted)
-            # Also write to detail file
-            _detail_logger.info(formatted)
+            # Console output: same formatting as detail log (with ".." prefix on continuation lines)
+            log_method(formatted_output)
+            # Detail file: same formatting
+            _detail_logger.info(formatted_output)
         else:
-            # Write to detail logger only (file only, no console)
-            _detail_logger.info(formatted)
+            # Write to detail logger only (file only, no console) - with ".." prefix on continuation lines
+            _detail_logger.info(formatted_output)
         
         # Track warnings/errors for summary (new API tracking)
         if level in ("warn", "error"):
@@ -725,17 +768,20 @@ class StructuredLogger:
                 # Also add to old API for now (during migration)
                 add_album_warning_label(use_album, formatted_message, level=level)
             else:
-                # Track in new API structure
+                # Track in new API structure - store the original message (before ".." formatting)
                 self.global_warnings.append((level, formatted_message))
-                # Also add to old API for now (during migration)
-                from logging_utils import add_global_warning
-                add_global_warning(formatted_message, level=level)
+                # DO NOT call add_global_warning() here - it would duplicate
+                # The old API summary is written separately via write_summary_log()
         
         # Add to current header instance's detail messages
         if self.active_instance_stack:
-            self.active_instance_stack[-1].detail_messages.append(formatted)
+            self.active_instance_stack[-1].detail_messages.append(formatted_output)
         
         # Automatically count item if item provided (first encounter)
+        # NOTE: Items are counted regardless of log level (info/warn/error/verbose all count)
+        # IMPORTANT: Items under the same header should be HOMOGENEOUS (all files, all albums, etc.)
+        # If you need a header to appear even when no items are processed, consider using a dummy item,
+        # but be aware this breaks homogeneity. We may need special handling for dummy items in the future.
         if use_item:
             self._increment_current_count(use_item)
     
@@ -886,7 +932,7 @@ class StructuredLogger:
         lines.append("")
         
         # Write global warnings section
-        lines.append("Global warnings:")
+        lines.append("Global errors/warnings:")
         if self.global_warnings or global_instances:
             # Add global header instances first
             global_instances.sort(key=lambda x: (x[0].level, x[0].header_key))
@@ -897,7 +943,17 @@ class StructuredLogger:
             # Then add global warnings/errors
             for level, warning_msg in self.global_warnings:
                 prefix = "[WARN]" if level == "warn" else "[ERROR]"
-                lines.append(f"  {prefix} {warning_msg}")
+                # Format multi-line messages: first line has prefix, continuation lines have ".." prefix
+                msg_lines = warning_msg.split("\n")
+                for i, msg_line in enumerate(msg_lines):
+                    msg_line = msg_line.rstrip()  # Remove trailing whitespace
+                    if i == 0:
+                        # First line: prefix + message (no ".." prefix)
+                        lines.append(f"  {prefix} {msg_line}")
+                    elif msg_line.strip() or i < len(msg_lines) - 1:
+                        # Continuation lines: ".." prefix with no extra spaces (strip leading whitespace first)
+                        msg_line_stripped = msg_line.lstrip()
+                        lines.append(f"  ..{msg_line_stripped}")
         else:
             lines.append("  (none)")
         
@@ -909,35 +965,61 @@ class StructuredLogger:
             logger.error(f"Could not write structured summary log: {e}")
         
         # Print to console with colors (on-the-fly)
-        print("\n================ SUMMARY ================")
+        import sys
+        print("\n================ SUMMARY ================", flush=True)
         for line in lines:
             if not line:
-                print()
+                print(flush=True)
                 continue
             
             line_stripped = line.lstrip(" \t")
             
             # Apply colors and icons based on format
             if line_stripped.startswith("[ERROR]"):
-                print(f"{Colors.ERROR}{ICONS['error']} {line}{Colors.RESET}")
+                print(f"{Colors.ERROR}{ICONS['error']} {line}{Colors.RESET}", flush=True)
             elif line_stripped.startswith("[WARN]"):
-                print(f"{Colors.WARNING}{ICONS['warning']} {line}{Colors.RESET}")
+                print(f"{Colors.WARNING}{ICONS['warning']} {line}{Colors.RESET}", flush=True)
+            elif line_stripped.startswith("..") and not line_stripped.startswith("[ERROR]") and not line_stripped.startswith("[WARN]"):
+                # Continuation line with ".." prefix - keep ".." prefix for console (same as file)
+                # Find the most recent [ERROR] or [WARN] line for color context
+                prev_was_error = False
+                prev_was_warn = False
+                current_index = lines.index(line)
+                for prev_line in reversed(lines[:current_index]):
+                    prev_stripped = prev_line.lstrip(" \t")
+                    if prev_stripped.startswith("[ERROR]"):
+                        prev_was_error = True
+                        break
+                    elif prev_stripped.startswith("[WARN]"):
+                        prev_was_warn = True
+                        break
+                    elif prev_line.strip() and not prev_stripped.startswith(".."):
+                        # Hit a non-continuation, non-error/warn line, stop looking
+                        break
+                
+                if prev_was_error:
+                    print(f"{Colors.ERROR}{ICONS['error']} {line}{Colors.RESET}", flush=True)
+                elif prev_was_warn:
+                    print(f"{Colors.WARNING}{ICONS['warning']} {line}{Colors.RESET}", flush=True)
+                else:
+                    print(f"  {line}", flush=True)  # Default formatting for continuation lines
             elif line.startswith("* "):
                 # Album header - cyan
-                print(f"{Colors.CYAN}{ICONS['step']} {line}{Colors.RESET}")
+                print(f"{Colors.CYAN}{ICONS['step']} {line}{Colors.RESET}", flush=True)
             elif line.startswith("  ") and any(c == '-' for c in line[:10]) and not line.startswith("  [WARN]") and not line.startswith("  [ERROR]"):
                 # Header line (spaces + dashes) - step icon
-                print(f"{ICONS['step']} {line}")
+                print(f"{ICONS['step']} {line}", flush=True)
             elif ':' in line and not line.startswith("  ") and not line.startswith("\t") and not line.startswith("*"):
                 # Section header
-                print(f"{ICONS['step']} {line}")
+                print(f"{ICONS['step']} {line}", flush=True)
             elif line.startswith("  ") or line.startswith("\t"):
                 # Other indented lines
-                print(f"{ICONS['info']} {line}")
+                print(f"{ICONS['info']} {line}", flush=True)
             else:
                 # Regular line
-                print(line)
-        print("=========================================\n")
+                print(line, flush=True)
+        print("=========================================\n", flush=True)
+        sys.stdout.flush()  # Ensure all output is flushed
     
     def clear(self) -> None:
         """Clear the header stacks and album context. Useful for testing."""
