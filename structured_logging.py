@@ -225,10 +225,13 @@ class StructuredLogger:
             instance = self._get_or_create_instance(header_key, self.current_album_label)
             self.active_instance_stack.append(instance)
         
-    def set_album(self, artist: str, album: str, year: Optional[str] = None) -> str:
+    def set_album(self, artist_or_path, album: Optional[str] = None, year: Optional[str] = None) -> str:
         """
         Set the current album context.
-        Must call unset_album(key) before calling set_album again (except first call).
+        
+        Supports two signatures:
+        1. set_album(artist: str, album: str, year: Optional[str] = None)
+        2. set_album(album_dir: Path)
         
         When set_album() is called, it creates/reuses header instances for all currently active
         header definitions for this album. This allows the same header definition (e.g., "Step 1")
@@ -243,44 +246,116 @@ class StructuredLogger:
         If no album is set (global), the warning/error is added to the global summary.
         
         Args:
-            artist: Artist name
-            album: Album name
+            artist_or_path: Either artist name (str) or album directory path (Path)
+            album: Album name (required if artist_or_path is str, ignored if Path)
             year: Year (optional, can be None or "")
         
         Returns:
-            str: Key to use with unset_album() (for sanity check)
-        
-        Raises:
-            ValueError: If album is already set (must call unset_album(key) first)
+            str: Key to use with unset_album() (for explicit unset when going to global context)
         
         Examples:
-            # In main() - step header that processes MULTIPLE albums:
-            header_key = logmsg.set_header("Step 1", "%msg% (%count% items)")
-            # This header definition will have separate instances for each album
+            # Signature 1: Direct artist/album/year
+            album_key = logmsg.set_album("Artist", "Album", "2023")
             
-            # In process_downloads() - loop through albums:
-            for album in albums:
-                album_key = logmsg.set_album("Artist", "Album", "2023")  # Creates/reuses instances for this album
-                # All active header definitions now have instances for this album
-                # Logs with item_id will increment counts on these instances
-                # ... process album ...
-                logmsg.unset_album(album_key)  # REQUIRED: must unset before processing next album
+            # Signature 2: From album directory path (simpler!)
+            album_key = logmsg.set_album(album_dir)
             
-            # Each album will have its own "Step 1" instance with its own count in the summary
+            # Must unset before setting different album (strict pairing)
+            logmsg.unset_album(album_key)
+            album_key2 = logmsg.set_album(album_dir2)
+            
+            # Explicit unset when going to global context
+            logmsg.unset_album(album_key2)
         """
-        # If an album is currently set, must unset it first
+        # Check if first argument is a Path (polymorphism)
+        from pathlib import Path
+        if isinstance(artist_or_path, Path):
+            # Signature 2: Extract artist/album/year from Path
+            album_dir = artist_or_path
+            try:
+                from config import MUSIC_ROOT
+                rel = album_dir.relative_to(MUSIC_ROOT)
+                parts = list(rel.parts)
+                
+                # Collapse CD1/CD2 etc to album folder
+                if parts and parts[-1].upper().startswith("CD") and len(parts) >= 2:
+                    parts = parts[:-1]
+                
+                if len(parts) >= 2:
+                    artist = parts[0]
+                    album_folder = parts[1]
+                    
+                    # Extract year from album folder if it's at the beginning: "(2012) Album Name"
+                    import re
+                    year_match = re.match(r'^\((\d{4})\)\s*(.+)$', album_folder)
+                    if year_match:
+                        year = year_match.group(1)
+                        album = year_match.group(2).strip()
+                    else:
+                        # No year prefix, use as-is
+                        album = album_folder
+                        year = None
+                else:
+                    # Can't extract from path, use fallback
+                    from logging_utils import album_label_from_dir
+                    label = album_label_from_dir(album_dir)
+                    if " - " in label:
+                        parts = label.split(" - ", 1)
+                        artist = parts[0]
+                        album_part = parts[1]
+                        if " (" in album_part:
+                            album, year_part = album_part.rsplit(" (", 1)
+                            year = year_part.rstrip(")")
+                        else:
+                            album = album_part
+                            year = None
+                    else:
+                        artist = "Unknown Artist"
+                        album = "Unknown Album"
+                        year = None
+            except Exception:
+                # Fallback if path extraction fails
+                from logging_utils import album_label_from_dir
+                label = album_label_from_dir(album_dir)
+                if " - " in label:
+                    parts = label.split(" - ", 1)
+                    artist = parts[0]
+                    album_part = parts[1]
+                    if " (" in album_part:
+                        album, year_part = album_part.rsplit(" (", 1)
+                        year = year_part.rstrip(")")
+                    else:
+                        album = album_part
+                        year = None
+                else:
+                    artist = "Unknown Artist"
+                    album = "Unknown Album"
+                    year = None
+        else:
+            # Signature 1: Direct artist/album/year
+            if album is None:
+                raise ValueError("set_album() requires album parameter when artist is provided as string")
+            artist = artist_or_path
+        
+        # Build album label for comparison
+        new_album_label = album_label_from_tags(artist, album, year or "")
+        
+        # Strict enforcement: if an album is already set, must call unset_album(key) first
+        # This catches bugs where developer forgot to pair set_album with unset_album
         if self.current_album_info is not None:
             raise ValueError(f"Cannot set_album when album is already set ({self.current_album_label}). "
-                           f"Must call unset_album(key) first.")
+                           f"Must call unset_album(key) first to properly pair set/unset operations.")
         
         # Generate a unique key for this album session
         album_key = str(uuid.uuid4())
         
         # Set album context
         self.current_album_info = (artist, album, year)
-        album_label = album_label_from_tags(artist, album, year or "")
-        self.current_album_label = album_label
+        self.current_album_label = new_album_label
         self._current_album_key = album_key
+        
+        # Refresh active instances for new album
+        self._refresh_active_instances()
         
         return album_key
     
@@ -407,6 +482,21 @@ class StructuredLogger:
         
         Note: %item% placeholder is only for detail logs (info/warn/error), not headers.
         """
+        # SAFEGUARD: Headers should not use %item% placeholder (items are for detail logs only)
+        if "%item%" in msg or "%Item%" in msg:
+            raise ValueError(
+                f"FATAL: Header message contains %item% placeholder, which is not allowed.\n"
+                f"Header message: {msg!r}\n"
+                f"Headers cannot use %item% - use item context in detail log messages only (info/warn/error)."
+            )
+        template_to_check = message_template if message_template is not None else msg
+        if "%item%" in template_to_check or "%Item%" in template_to_check:
+            raise ValueError(
+                f"FATAL: Header template contains %item% placeholder, which is not allowed.\n"
+                f"Header template: {template_to_check!r}\n"
+                f"Headers cannot use %item% - use item context in detail log messages only (info/warn/error)."
+            )
+        
         # If key provided, pop current header (sanity check)
         if key is not None:
             if not self.active_definition_stack:
@@ -505,6 +595,21 @@ class StructuredLogger:
         Returns:
             str: header_key to use with pop_header() (for sanity check)
         """
+        # SAFEGUARD: Headers should not use %item% placeholder (items are for detail logs only)
+        if "%item%" in msg or "%Item%" in msg:
+            raise ValueError(
+                f"FATAL: Header message contains %item% placeholder, which is not allowed.\n"
+                f"Header message: {msg!r}\n"
+                f"Headers cannot use %item% - use item context in detail log messages only (info/warn/error)."
+            )
+        template_to_check = message_template if message_template is not None else msg
+        if "%item%" in template_to_check or "%Item%" in template_to_check:
+            raise ValueError(
+                f"FATAL: Header template contains %item% placeholder, which is not allowed.\n"
+                f"Header template: {template_to_check!r}\n"
+                f"Headers cannot use %item% - use item context in detail log messages only (info/warn/error)."
+            )
+        
         # Generate unique header_key for this definition
         header_key = str(uuid.uuid4())
         level = len(self.active_definition_stack)
@@ -681,6 +786,15 @@ class StructuredLogger:
         use_item = item if item is not None else self.current_item_id
         if item == "":  # Explicitly clear
             use_item = None
+        
+        # SAFEGUARD: If message contains %item% placeholder but no item context is set, raise error
+        if "%item%" in message or "%Item%" in message:
+            if use_item is None:
+                raise ValueError(
+                    f"FATAL: Message contains %item% placeholder but no item context is set.\n"
+                    f"Message: {message!r}\n"
+                    f"Call set_item() before logging this message, or remove %item% from the message template."
+                )
         
         # Format message with immediate replacements ({var}) first, then item placeholder
         # Build format dict from album context and kwargs

@@ -14,6 +14,7 @@ from logging_utils import (
     add_album_warning_label,
     log,
 )
+from structured_logging import logmsg
 
 
 def remove_backup_for(rel_path: Path, dry_run: bool = False) -> None:
@@ -65,7 +66,7 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
         return updated_album_dirs, albums_with_new_cover
 
     log(f"\n[UPDATE] Applying overlay from {UPDATE_ROOT} -> {MUSIC_ROOT}")
-
+    
     for src in UPDATE_ROOT.rglob("*"):
         if src.is_dir():
             continue
@@ -94,12 +95,20 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
                 # Update rel to use normalized filename
                 rel = rel.parent / normalized_filename
                 log(f"  [UPDATE AUDIO] Normalized filename: {src.name} -> {normalized_filename}")
+                logmsg.verbose("Normalized filename: %item% -> {normalized}", normalized=normalized_filename)
             else:
                 # No tags or incomplete tags, use original filename (same as downloads fallback)
                 log(f"  [UPDATE AUDIO] No tags found, using original filename: {src.name}")
+                logmsg.verbose("No tags found, using original filename: %item%")
         
         dest = MUSIC_ROOT / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
+        
+        # Set album context unconditionally (will unset at end of iteration, so always ready to set here)
+        current_album_key = logmsg.set_album(dest.parent)
+        
+        # Set item context for this file
+        item_key = logmsg.set_item(str(src.name))
 
         if src.suffix.lower() in AUDIO_EXT:
             # Check if destination exists - compare frequency first, then file size
@@ -113,6 +122,10 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
             if size_warning:
                 level, message = size_warning
                 log(f"  [UPDATE {level}] {src.name}: {message}")
+                if level == "WARN":
+                    logmsg.warn("%item%: {message}", message=message)
+                elif level == "ERROR":
+                    logmsg.error("%item%: {message}", message=message)
             
             if dest.exists():
                 from tag_operations import get_sample_rate
@@ -131,6 +144,7 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
                     elif src_freq < dest_freq:
                         should_copy = False
                         log(f"  [UPDATE SKIP] {dest.name} (existing has higher frequency: {dest_freq}Hz > {src_freq}Hz)")
+                        logmsg.info("SKIP: %item% (existing has higher frequency: {dest_freq}Hz > {src_freq}Hz)", dest_freq=dest_freq, src_freq=src_freq)
                     else:
                         # Same frequency, compare file size
                         if src_size > dest_size:
@@ -139,6 +153,7 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
                         else:
                             should_copy = False
                             log(f"  [UPDATE SKIP] {dest.name} (same frequency {src_freq}Hz, existing file is larger or equal: {dest_size} >= {src_size} bytes)")
+                            logmsg.info("SKIP: %item% (same frequency {freq}Hz, existing file is larger or equal: {dest_size} >= {src_size} bytes)", freq=src_freq, dest_size=dest_size, src_size=src_size)
                 else:
                     # Can't determine frequency, fall back to file size only
                     if src_size > dest_size:
@@ -147,13 +162,16 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
                     else:
                         should_copy = False
                         log(f"  [UPDATE SKIP] {dest.name} (existing file is larger or equal: {dest_size} >= {src_size} bytes)")
+                        logmsg.info("SKIP: %item% (existing file is larger or equal: {dest_size} >= {src_size} bytes)", dest_size=dest_size, src_size=src_size)
                 
                 if should_copy and upgrade_reason:
                     freq_str = f" ({src_freq}Hz vs {dest_freq}Hz)" if src_freq and dest_freq else ""
                     log(f"  [UPDATE UPGRADE] {dest.name}{freq_str} - {', '.join(upgrade_reason)}")
+                    logmsg.info("UPGRADE: %item%{freq_str} - {reasons}", freq_str=freq_str, reasons=', '.join(upgrade_reason))
             
             if should_copy:
                 log(f"  [UPDATE AUDIO] {src} -> {dest}")
+                logmsg.info("COPY: %item% -> {dest}", dest=str(dest))
                 if not dry_run:
                     shutil.copy2(src, dest)
             remove_backup_for(rel, dry_run)
@@ -190,15 +208,18 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
                     # Location is already correct (artist folder), just normalize filename
                     normalized_dest = dest_parent / "folder.jpg"
                     log(f"  [UPDATE ARTIST ART] Normalizing {src.name} -> folder.jpg in artist folder")
+                    logmsg.verbose("Normalizing %item% -> folder.jpg in artist folder")
                     dest = normalized_dest
                 else:
                     # Album artwork: normalize to cover.jpg
                     # Location is already correct (album folder), just normalize filename
                     normalized_dest = dest_parent / "cover.jpg"
                     log(f"  [UPDATE ALBUM ART] Normalizing {src.name} -> cover.jpg in album folder")
+                    logmsg.verbose("Normalizing %item% -> cover.jpg in album folder")
                     dest = normalized_dest
             
             log(f"  [UPDATE ASSET] {src} -> {dest}")
+            logmsg.info("COPY: %item% -> {dest}", dest=str(dest))
             if not dry_run:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 # Convert image format if needed (PNG/GIF → JPG)
@@ -214,27 +235,42 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
                                 rgb_img.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
                                 img = rgb_img
                             img.save(dest, "JPEG", quality=95, optimize=True)
+                        logmsg.verbose("Converted %item% to JPEG (optimized)")
                     except Exception as e:
                         log(f"  [UPDATE WARN] Could not convert {src.name} to JPEG, copying as-is: {e}")
+                        logmsg.warn("Could not convert %item% to JPEG, copying as-is: {error}", error=str(e))
                         shutil.copy2(src, dest)
                 else:
                     shutil.copy2(src, dest)
             updated_album_dirs.add(dest.parent)
             if is_image and not is_artist_folder and dest.name.lower() == "cover.jpg":
                 albums_with_new_cover.add(dest.parent)
+        
+        # Unset item context (common to both audio and non-audio file paths)
+        logmsg.unset_item(item_key)
 
         if not dry_run:
             try:
                 src.unlink()
             except Exception as e:
                 log(f"  [UPDATE WARN] Could not delete applied update file {src}: {e}")
+                logmsg.warn("Could not delete applied update file %item%: {error}", error=str(e))
+        
+        # Unset album context unconditionally (before next iteration or loop end)
+        logmsg.unset_album(current_album_key)
 
     # Add structured logging for updated albums
-    from structured_logging import logmsg
     for album_dir in updated_album_dirs:
         label = album_label_from_dir(album_dir)
         add_album_event_label(label, "Updated from overlay.")  # Old API
-        logmsg.info("Updated from overlay.")  # New API - will associate with album if context set
+        # Set album context temporarily to log the update event (polymorphic: accepts Path directly)
+        try:
+            album_key = logmsg.set_album(album_dir)
+            logmsg.info("Updated from overlay.", item="album_updated")
+            logmsg.unset_album(album_key)
+        except Exception:
+            # If path extraction fails, skip structured logging for this album
+            pass
 
     return updated_album_dirs, albums_with_new_cover
 
