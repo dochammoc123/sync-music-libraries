@@ -43,6 +43,7 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
     """
     from tag_operations import find_root_album_directory
     from config import DOWNLOADS_DIR
+    from structured_logging import logmsg  # Global singleton - always available
     
     # Collect root directories (where files were flattened to)
     all_files = [p for (p, _tags) in items]
@@ -73,72 +74,87 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                 
             name = f.name
             suffix = f.suffix.lower()
-
-            # Handle artwork files in DOWNLOADS_DIR root:
-            # - If the artwork was matched/used for this album, remove it
-            # - If the artwork wasn't matched (no album found), preserve it for future albums
-            is_in_downloads_root = f.parent.resolve() == DOWNLOADS_DIR.resolve()
-            is_artwork_file = suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
             
-            if is_artwork_file and is_in_downloads_root:
-                used_artwork = used_artwork_files or []
-                # Check if this artwork file was used/matched for this album
-                if any(f.resolve() == art.resolve() for art in used_artwork):
-                    # This artwork was matched and used - remove it
-                    log(f"[CLEANUP] Removing matched artwork from download root: {f.name}")
-                    if not dry_run:
-                        try:
-                            f.unlink()
-                        except Exception as e:
-                            log(f"[CLEANUP WARN] Could not delete {f}: {e}")
-                else:
-                    # This artwork wasn't matched - preserve it for future albums
-                    log(f"[CLEANUP] Preserving unmatched artwork in download root (may be for future album): {f.name}")
-                continue
-
-            # Remove processed audio files (moved, upgraded, or skipped)
-            # These files were matched to an album and processed, so they should be cleaned up
-            is_audio_file = suffix in AUDIO_EXT
-            if is_audio_file:
-                processed_audio = processed_audio_files or []
-                # Check if this audio file was processed (moved, upgraded, or skipped)
-                if any(f.resolve() == audio.resolve() for audio in processed_audio):
-                    # This audio file was processed - remove it
-                    log(f"[CLEANUP] Removing processed audio file: {f.name}")
-                    if not dry_run:
-                        try:
-                            f.unlink()
-                        except Exception as e:
-                            log(f"[CLEANUP WARN] Could not delete {f}: {e}")
-                    continue
-
-            # Remove files with cleanup extensions (incomplete downloads, leftover images, archives, etc.)
-            # ZIP files and other cleanup extensions should be removed consistently
-            # Only artwork files in downloads root are special (preserve if unmatched)
-            if suffix in CLEANUP_EXTENSIONS:
-                # Artwork files in downloads root are handled above (preserve if unmatched)
+            # Set item context once per iteration (for all logs in this iteration)
+            item_key = logmsg.set_item(str(f.name))
+            try:
+                # Handle artwork files in DOWNLOADS_DIR root:
+                # - If the artwork was matched/used for this album, remove it
+                # - If the artwork wasn't matched (no album found), preserve it for future albums
+                is_in_downloads_root = f.parent.resolve() == DOWNLOADS_DIR.resolve()
+                is_artwork_file = suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+                
                 if is_artwork_file and is_in_downloads_root:
-                    # Already handled above - skip
+                    used_artwork = used_artwork_files or []
+                    # Check if this artwork file was used/matched for this album
+                    if any(f.resolve() == art.resolve() for art in used_artwork):
+                        # This artwork was matched and used - remove it
+                        logmsg.info("Removing matched artwork from download root: %item%")
+                        log(f"[CLEANUP] Removing matched artwork from download root: {f.name}")
+                        if not dry_run:
+                            try:
+                                f.unlink()
+                            except Exception as e:
+                                logmsg.warn("Could not delete %item%: {error}", error=str(e))
+                                log(f"[CLEANUP WARN] Could not delete {f}: {e}")
+                    else:
+                        # This artwork wasn't matched - preserve it for future albums
+                        logmsg.verbose("Preserving unmatched artwork in download root (may be for future album): %item%")
+                        log(f"[CLEANUP] Preserving unmatched artwork in download root (may be for future album): {f.name}")
                     continue
-                else:
-                    # Remove cleanup extension files (ZIP, partial downloads, etc.)
-                    # No special case needed - just remove them regardless of location
+
+                # Remove processed audio files (moved, upgraded, or skipped)
+                # These files were matched to an album and processed, so they should be cleaned up
+                is_audio_file = suffix in AUDIO_EXT
+                if is_audio_file:
+                    processed_audio = processed_audio_files or []
+                    # Check if this audio file was processed (moved, upgraded, or skipped)
+                    if any(f.resolve() == audio.resolve() for audio in processed_audio):
+                        # This audio file was processed - remove it
+                        logmsg.info("Removing processed audio file: %item%")
+                        log(f"[CLEANUP] Removing processed audio file: {f.name}")
+                        if not dry_run:
+                            try:
+                                f.unlink()
+                            except Exception as e:
+                                logmsg.warn("Could not delete %item%: {error}", error=str(e))
+                                log(f"[CLEANUP WARN] Could not delete {f}: {e}")
+                        continue
+
+                # Remove files with cleanup extensions (incomplete downloads, leftover images, archives, etc.)
+                # ZIP files and other cleanup extensions should be removed consistently
+                # Only artwork files in downloads root are special (preserve if unmatched)
+                if suffix in CLEANUP_EXTENSIONS:
+                    # Artwork files in downloads root are handled above (preserve if unmatched)
+                    if is_artwork_file and is_in_downloads_root:
+                        # Already handled above - skip
+                        continue
+                    else:
+                        # Remove cleanup extension files (ZIP, partial downloads, etc.)
+                        # No special case needed - just remove them regardless of location
+                        logmsg.info("Removing file: %item%")
+                        log(f"[CLEANUP] Removing file: {f}")
+                        if not dry_run:
+                            try:
+                                f.unlink()
+                            except Exception as e:
+                                logmsg.warn("Could not delete %item%: {error}", error=str(e))
+                                log(f"[CLEANUP WARN] Could not delete {f}: {e}")
+                        continue
+
+                # Remove files with cleanup filenames (system junk files)
+                elif name in CLEANUP_FILENAMES:
+                    logmsg.info("Removing file: %item%")
                     log(f"[CLEANUP] Removing file: {f}")
                     if not dry_run:
                         try:
                             f.unlink()
                         except Exception as e:
+                            logmsg.warn("Could not delete %item%: {error}", error=str(e))
                             log(f"[CLEANUP WARN] Could not delete {f}: {e}")
                     continue
-
-            # Remove files with cleanup filenames (system junk files)
-            elif name in CLEANUP_FILENAMES:
-                log(f"[CLEANUP] Removing file: {f}")
-                try:
-                    f.unlink()
-                except Exception as e:
-                    log(f"[CLEANUP WARN] Could not delete {f}: {e}")
-                continue
+            finally:
+                logmsg.unset_item(item_key)
 
         # Remove empty subdirectories first (deepest first)
         try:
@@ -172,7 +188,11 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
             if contents:
                 remaining = []
                 for f in contents:
+                    # Set item context once per iteration (for all logs in this iteration)
+                    item_key = None
                     if f.is_file():
+                        item_key = logmsg.set_item(str(f.name))
+                        
                         # Handle artwork files in DOWNLOADS_DIR root:
                         # - If the artwork was matched/used for this album, remove it
                         # - If the artwork wasn't matched (no album found), preserve it for future albums
@@ -185,39 +205,54 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                             # Check if this artwork file was used/matched for this album
                             if any(f.resolve() == art.resolve() for art in used_artwork):
                                 # This artwork was matched and used - remove it
+                                logmsg.info("Removing matched artwork from download root: %item%")
                                 log(f"[CLEANUP] Removing matched artwork from download root: {f.name}")
                                 if not dry_run:
                                     try:
                                         f.unlink()
                                     except Exception as e:
+                                        logmsg.warn("Could not delete %item%: {error}", error=str(e))
                                         log(f"[CLEANUP WARN] Could not delete {f}: {e}")
+                                logmsg.unset_item(item_key)
                             else:
                                 # This artwork wasn't matched - preserve it for future albums
+                                logmsg.verbose("Preserving unmatched artwork in download root (may be for future album): %item%")
                                 log(f"[CLEANUP] Preserving unmatched artwork in download root (may be for future album): {f.name}")
+                                logmsg.unset_item(item_key)
                                 remaining.append(f)
                         elif is_audio_file and is_in_downloads_root:
                             # Handle processed audio files in DOWNLOADS_DIR root
                             processed_audio = processed_audio_files or []
                             if any(f.resolve() == audio.resolve() for audio in processed_audio):
                                 # This audio file was processed - remove it
+                                logmsg.info("Removing processed audio file from download root: %item%")
                                 log(f"[CLEANUP] Removing processed audio file from download root: {f.name}")
                                 if not dry_run:
                                     try:
                                         f.unlink()
                                     except Exception as e:
+                                        logmsg.warn("Could not delete %item%: {error}", error=str(e))
                                         log(f"[CLEANUP WARN] Could not delete {f}: {e}")
+                                logmsg.unset_item(item_key)
                             else:
                                 # This audio file wasn't processed - preserve it (may be for future album)
+                                logmsg.unset_item(item_key)
                                 remaining.append(f)
                         elif f.name in CLEANUP_FILENAMES or f.suffix.lower() in CLEANUP_EXTENSIONS:
+                            logmsg.info("Removing file: %item%")
+                            log(f"[CLEANUP] Removing file: {f}")
                             try:
-                                log(f"[CLEANUP] Removing file: {f}")
                                 if not dry_run:
                                     f.unlink()
                             except Exception as e:
+                                logmsg.warn("Could not delete %item%: {error}", error=str(e))
                                 log(f"[CLEANUP WARN] Could not delete {f}: {e}")
+                                logmsg.unset_item(item_key)
                                 remaining.append(f)
+                            else:
+                                logmsg.unset_item(item_key)
                         else:
+                            logmsg.unset_item(item_key)
                             remaining.append(f)
                     else:
                         remaining.append(f)
@@ -225,13 +260,18 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                 if remaining:
                     break
 
+            folder_item_key = logmsg.set_item(str(current.name))
+            logmsg.info("Removing empty download folder: %item%")
             log(f"[CLEANUP] Removing empty download folder: {current}")
             try:
                 if not dry_run:
                     current.rmdir()
             except Exception as e:
+                logmsg.warn("Could not remove %item%: {error}", error=str(e))
                 log(f"[CLEANUP WARN] Could not remove {current}: {e}")
+                logmsg.unset_item(folder_item_key)
                 break
+            logmsg.unset_item(folder_item_key)
 
             current = current.parent
 
@@ -265,31 +305,32 @@ def move_album_from_downloads(
 
     # Push organizing header (nested under album)
     organize_key = logmsg.push_header("Organizing tracks", "%msg% (%count% tracks)", "DOWNLOAD")
-    logmsg.verbose("Target directory: {album_dir}", album_dir=str(album_dir))
+    try:
+        logmsg.verbose("Target directory: {album_dir}", album_dir=str(album_dir))
 
-    items_sorted = sorted(items, key=lambda x: (x[1]["discnum"], x[1]["tracknum"]))
-    discs = set(t["discnum"] for _, t in items)
-    
-    # Track which audio files were processed (moved, upgraded, or skipped)
-    # These should be cleaned up from downloads
-    processed_audio_files = []
-    
-    # Track destination files for use after moving (for artwork export, etc.)
-    dest_items = []
-    
-    # Get album metadata from files that have tags (for filling in missing tags)
-    album_metadata = None
-    for _, t in items:
-        if t.get("artist") and t.get("album") and t.get("year"):
-            album_metadata = {
-                "artist": t["artist"],
-                "album": t["album"],
-                "year": t["year"],
-            }
-            break
+        items_sorted = sorted(items, key=lambda x: (x[1]["discnum"], x[1]["tracknum"]))
+        discs = set(t["discnum"] for _, t in items)
+        
+        # Track which audio files were processed (moved, upgraded, or skipped)
+        # These should be cleaned up from downloads
+        processed_audio_files = []
+        
+        # Track destination files for use after moving (for artwork export, etc.)
+        dest_items = []
+        
+        # Get album metadata from files that have tags (for filling in missing tags)
+        album_metadata = None
+        for _, t in items:
+            if t.get("artist") and t.get("album") and t.get("year"):
+                album_metadata = {
+                    "artist": t["artist"],
+                    "album": t["album"],
+                    "year": t["year"],
+                }
+                break
 
-    for src, tags in items_sorted:
-        ext = src.suffix
+        for src, tags in items_sorted:
+            ext = src.suffix
         
         # Try to read tags from source file for filename generation
         # Don't write tags yet - that happens later after backup during embed step
@@ -325,17 +366,17 @@ def move_album_from_downloads(
         
         # Set item context for this track
         item_key = logmsg.set_item(str(src))
-        
-        # Check source file for size warnings (may indicate truncation)
-        from tag_operations import check_file_size_warning
-        size_warning = check_file_size_warning(src)
-        if size_warning:
-            level, message = size_warning
-            log(f"  [{level}] {src.name}: {message}")
-            logmsg.warn("{file}: {message}", file=src.name, message=message)
-        
-        if dest.exists():
-            from tag_operations import get_sample_rate, get_audio_duration, get_tags, check_file_size_warning
+        try:
+            # Check source file for size warnings (may indicate truncation)
+            from tag_operations import check_file_size_warning
+            size_warning = check_file_size_warning(src)
+            if size_warning:
+                level, message = size_warning
+                log(f"  [{level}] {src.name}: {message}")
+                logmsg.warn("{file}: {message}", file=src.name, message=message)
+            
+            if dest.exists():
+                from tag_operations import get_sample_rate, get_audio_duration, get_tags, check_file_size_warning
             
             # First check if existing file is corrupt (can't read tags) or truncated
             # If corrupt, always upgrade (any working file is better than corrupt)
@@ -418,86 +459,100 @@ def move_album_from_downloads(
                 log(f"  UPGRADE: {src.name}{freq_str} - {', '.join(upgrade_reason)}")
                 logmsg.info("UPGRADE: %item%{freq_str} - {reasons}", freq_str=freq_str, reasons=', '.join(upgrade_reason))
 
-        if should_move:
-            log(f"  MOVE: {src} -> {dest}")
-            logmsg.info("MOVE: %item% -> {dest}", dest=str(dest))
-            if not dry_run:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                shutil.move(str(src), str(dest))
-            # Track destination file for use after moving (for artwork export, etc.)
-            dest_items.append((dest, tags_to_use))
-            # Track that this file was processed (moved)
-            processed_audio_files.append(src)
-        else:
-            # File was skipped (better version exists) - use existing destination
-            dest_items.append((dest, tags_to_use))
-            # File was skipped (better version exists) - still mark as processed for cleanup
-            processed_audio_files.append(src)
-        
-        logmsg.unset_item(item_key)
-
-    # Pop organizing header
-    logmsg.pop_header(organize_key)
+            if should_move:
+                log(f"  MOVE: {src} -> {dest}")
+                logmsg.info("MOVE: %item% -> {dest}", dest=str(dest))
+                if not dry_run:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(src), str(dest))
+                # Track destination file for use after moving (for artwork export, etc.)
+                dest_items.append((dest, tags_to_use))
+                # Track that this file was processed (moved)
+                processed_audio_files.append(src)
+            else:
+                # File was skipped (better version exists) - use existing destination
+                dest_items.append((dest, tags_to_use))
+                # File was skipped (better version exists) - still mark as processed for cleanup
+                processed_audio_files.append(src)
+        finally:
+            logmsg.unset_item(item_key)
+    finally:
+        # Pop organizing header
+        logmsg.pop_header(organize_key)
     
     # Push artwork header
-    art_key = logmsg.push_header("Processing album artwork", "%msg% (%count% files)", "ARTWORK")
-    
-    # Find best art file (standard names + pattern-matched, always largest)
-    # This function now handles:
-    # - Standard art files (large_cover.jpg, cover.jpg)
-    # - Pattern-matched art (e.g., "pure-heroine-lorde.jpg")
-    # - Always selects largest by pixel dimensions, then file size
-    # IMPORTANT: Always check for pattern-matched art, even if cover.jpg exists,
-    # to upgrade if the new art is larger (by pixel dimensions, then file size)
-    predownloaded_art = find_predownloaded_art_source_for_album(items)
-    used_predownloaded_art = predownloaded_art is not None
-    
-    # Also check for folder.jpg separately (may be different from cover)
-    from tag_operations import find_root_album_directory
-    from config import DOWNLOADS_DIR
-    all_files = [p for (p, _tags) in items]
-    root_dirs = set()
-    child_dirs = set()
-    for p, _tags in items:
-        root_dir = find_root_album_directory(p, all_files, DOWNLOADS_DIR)
-        root_dirs.add(root_dir)
-        if p.parent != root_dir:
-            child_dirs.add(p.parent)
-    
-    # Check for folder.jpg: prioritize root directories (parent as source of truth)
-    predownloaded_folder = None
-    for d in sorted(root_dirs, key=lambda x: len(str(x))):
-        folder_candidate = d / "folder.jpg"
-        if folder_candidate.exists():
-            predownloaded_folder = folder_candidate
-            break
-    # Then check child directories
-    if not predownloaded_folder:
-        for d in sorted(child_dirs, key=lambda x: len(str(x))):
+    art_key = logmsg.push_header("Processing album artwork", "%msg%", "ARTWORK")
+    try:
+        # Find best art file (standard names + pattern-matched, always largest)
+        # This function now handles:
+        # - Standard art files (large_cover.jpg, cover.jpg)
+        # - Pattern-matched art (e.g., "pure-heroine-lorde.jpg")
+        # - Always selects largest by pixel dimensions, then file size
+        # IMPORTANT: Always check for pattern-matched art, even if cover.jpg exists,
+        # to upgrade if the new art is larger (by pixel dimensions, then file size)
+        predownloaded_art = find_predownloaded_art_source_for_album(items)
+        used_predownloaded_art = predownloaded_art is not None
+        # Log artwork selection (structured logging - detail log only via verbose)
+        if used_predownloaded_art and predownloaded_art:
+            from artwork import get_image_size
+            art_size = get_image_size(predownloaded_art)
+            if art_size:
+                file_size = predownloaded_art.stat().st_size if predownloaded_art.exists() else 0
+                logmsg.verbose("Selected best art: {name} ({width}x{height}, {size} bytes)", name=predownloaded_art.name, width=art_size[0], height=art_size[1], size=file_size)
+        
+        # Also check for folder.jpg separately (may be different from cover)
+        from tag_operations import find_root_album_directory
+        from config import DOWNLOADS_DIR
+        all_files = [p for (p, _tags) in items]
+        root_dirs = set()
+        child_dirs = set()
+        for p, _tags in items:
+            root_dir = find_root_album_directory(p, all_files, DOWNLOADS_DIR)
+            root_dirs.add(root_dir)
+            if p.parent != root_dir:
+                child_dirs.add(p.parent)
+        
+        # Check for folder.jpg: prioritize root directories (parent as source of truth)
+        predownloaded_folder = None
+        for d in sorted(root_dirs, key=lambda x: len(str(x))):
             folder_candidate = d / "folder.jpg"
             if folder_candidate.exists():
                 predownloaded_folder = folder_candidate
                 break
+        # Then check child directories
+        if not predownloaded_folder:
+            for d in sorted(child_dirs, key=lambda x: len(str(x))):
+                folder_candidate = d / "folder.jpg"
+                if folder_candidate.exists():
+                    predownloaded_folder = folder_candidate
+                    break
 
-    # Always check for artwork, even if cover.jpg exists (to upgrade if new art is larger)
-    # This ensures we find pattern-matched artwork like "pure-heroine-lorde.jpg"
-    cover_dest = album_dir / "cover.jpg"
-    folder_dest = album_dir / "folder.jpg"
-    
-    # ALWAYS check for pattern-matched art, even if cover.jpg exists
-    # This handles cases where pattern-matched art is in downloads root and might be larger
-    if not used_predownloaded_art:
-        # Re-check for pattern-matched art (might be in downloads root)
-        predownloaded_art = find_predownloaded_art_source_for_album(items)
-        used_predownloaded_art = predownloaded_art is not None
-    
-    if used_predownloaded_art or predownloaded_folder:
-        if not dry_run:
-            cover_dest.parent.mkdir(parents=True, exist_ok=True)
-            
-            # Copy best art to cover.jpg (convert format if needed, upgrade if larger)
-            if predownloaded_art:
+        # Always check for artwork, even if cover.jpg exists (to upgrade if new art is larger)
+        # This ensures we find pattern-matched artwork like "pure-heroine-lorde.jpg"
+        cover_dest = album_dir / "cover.jpg"
+        folder_dest = album_dir / "folder.jpg"
+        
+        # ALWAYS check for pattern-matched art, even if cover.jpg exists
+        # This handles cases where pattern-matched art is in downloads root and might be larger
+        if not used_predownloaded_art:
+            # Re-check for pattern-matched art (might be in downloads root)
+            predownloaded_art = find_predownloaded_art_source_for_album(items)
+            used_predownloaded_art = predownloaded_art is not None
+            # Log artwork selection (structured logging - detail log only via verbose)
+            if used_predownloaded_art and predownloaded_art:
                 from artwork import get_image_size
+                art_size = get_image_size(predownloaded_art)
+                if art_size:
+                    file_size = predownloaded_art.stat().st_size if predownloaded_art.exists() else 0
+                    logmsg.verbose("Selected best art: {name} ({width}x{height}, {size} bytes)", name=predownloaded_art.name, width=art_size[0], height=art_size[1], size=file_size)
+        
+        if used_predownloaded_art or predownloaded_folder:
+            if not dry_run:
+                cover_dest.parent.mkdir(parents=True, exist_ok=True)
+                
+                # Copy best art to cover.jpg (convert format if needed, upgrade if larger)
+                if predownloaded_art:
+                    from artwork import get_image_size
                 art_size = get_image_size(predownloaded_art)
                 size_str = f" ({art_size[0]}x{art_size[1]})" if art_size else ""
                 
@@ -554,18 +609,18 @@ def move_album_from_downloads(
                                         # Re-save with optimization to reduce file size (strips metadata, ensures consistent quality)
                                         img.save(cover_dest, "JPEG", quality=95, optimize=True)
                                         opt_size = cover_dest.stat().st_size
-                                        log(f"    Optimized {predownloaded_art.name} ({src_size} -> {opt_size} bytes, stripped metadata)")
+                                        logmsg.verbose("Optimized {name} ({src_size} -> {opt_size} bytes, stripped metadata)", name=predownloaded_art.name, src_size=src_size, opt_size=opt_size)
                                 except Exception as e:
-                                    log(f"    [WARN] Could not optimize {predownloaded_art.name}, copying as-is: {e}")
+                                    logmsg.warn("Could not optimize {name}, copying as-is: {error}", name=predownloaded_art.name, error=str(e))
                                     shutil.copy2(predownloaded_art, cover_dest)
                             else:
                                 # Small file, likely already optimized - preserve original
                                 shutil.copy2(predownloaded_art, cover_dest)
-                                log(f"    Preserved original {predownloaded_art.name} (already optimized)")
+                                logmsg.verbose("Preserved original {name} (already optimized)", name=predownloaded_art.name)
                         else:
                             # Non-JPEG format - copy as-is (Roon/T8 can handle PNG)
                             shutil.copy2(predownloaded_art, cover_dest)
-                            log(f"    Preserved original format: {predownloaded_art.suffix}")
+                            logmsg.verbose("Preserved original format: {ext}", ext=predownloaded_art.suffix)
                     
                     if existing_size:
                         new_pixels = art_size[0] * art_size[1] if art_size else 0
@@ -621,25 +676,25 @@ def move_album_from_downloads(
             else:
                 logmsg.verbose("folder.jpg already exists, preserving it (may differ from cover.jpg)")
         
-        add_album_event_label(label, "Art found pre-downloaded.")
-    else:
-        logmsg.verbose("No pre-downloaded art files found")
+            add_album_event_label(label, "Art found pre-downloaded.")
+        else:
+            logmsg.verbose("No pre-downloaded art files found")
 
-    # Use destination files (after moving) for artwork extraction
-    # Only use dest_items if files were actually moved (not dry-run)
-    # In dry-run mode, files still exist at source paths, so use items_sorted
-    files_for_artwork = dest_items if (dest_items and not dry_run) else items_sorted
-    ensure_cover_and_folder(
-        album_dir,
-        files_for_artwork,
-        artist,
-        album,
-        label,
-        dry_run=dry_run,
-        skip_cover_creation=used_predownloaded_art
-    )
-    
-    logmsg.pop_header(art_key)
+        # Use destination files (after moving) for artwork extraction
+        # Only use dest_items if files were actually moved (not dry-run)
+        # In dry-run mode, files still exist at source paths, so use items_sorted
+        files_for_artwork = dest_items if (dest_items and not dry_run) else items_sorted
+        ensure_cover_and_folder(
+            album_dir,
+            files_for_artwork,
+            artist,
+            album,
+            label,
+            dry_run=dry_run,
+            skip_cover_creation=used_predownloaded_art
+        )
+    finally:
+        logmsg.pop_header(art_key)
 
     if CLEAN_EMPTY_DOWNLOAD_FOLDERS:
         # Track which artwork files were used/matched for this album
@@ -649,7 +704,12 @@ def move_album_from_downloads(
         if predownloaded_folder:
             used_artwork_files.append(predownloaded_folder)
         
-        cleanup_download_dirs_for_album(items, dry_run, used_artwork_files, processed_audio_files, extracted_archives or [])
+        # Push cleanup header (nested under album, sibling to artwork header)
+        cleanup_album_key = logmsg.push_header("Cleaning up album download folder", "%msg% (%count% files/folders)", "CLEANUP")
+        try:
+            cleanup_download_dirs_for_album(items, dry_run, used_artwork_files, processed_audio_files, extracted_archives or [])
+        finally:
+            logmsg.pop_header(cleanup_album_key)
 
 
 def extract_archives_in_downloads(dry_run: bool = False) -> List[Path]:
@@ -679,65 +739,60 @@ def extract_archives_in_downloads(dry_run: bool = False) -> List[Path]:
     
     # Push header for archive extraction
     extract_key = logmsg.push_header("Extracting archives from downloads", "%msg% (%count% files)", "EXTRACT")
-    
-    extracted_archives = []
-    for archive_file in archives_found:
-        # Extract to a folder with the same name (without extension)
-        extract_dir = archive_file.parent / archive_file.stem
-        
-        item_key = logmsg.set_item(str(archive_file))
-        
-        if extract_dir.exists():
-            log(f"  [EXTRACT] Skipping {archive_file.name} (extraction folder already exists: {extract_dir.name})")
-            logmsg.info("Skipping (extraction folder already exists: %item%)", item=extract_dir.name)
-            # Still track it for cleanup if it was already extracted
-            extracted_archives.append(archive_file)
-            logmsg.unset_item(item_key)
-            continue
-        
-        log(f"  [EXTRACT] Extracting {archive_file.name} to {extract_dir.name}/")
-        
-        if dry_run:
-            log(f"    [DRY RUN] Would extract {archive_file} to {extract_dir}")
-            logmsg.info("[DRY RUN] Would extract %item% to {extract_dir}", extract_dir=str(extract_dir))
-            extracted_archives.append(archive_file)
-            logmsg.unset_item(item_key)
-            continue
-        
-        try:
-            import zipfile
+    try:
+        extracted_archives = []
+        for archive_file in archives_found:
+            # Extract to a folder with the same name (without extension)
+            extract_dir = archive_file.parent / archive_file.stem
             
-            if archive_file.suffix.lower() == ".zip":
-                extract_dir.mkdir(parents=True, exist_ok=True)
-                with zipfile.ZipFile(archive_file, 'r') as zip_ref:
-                    zip_ref.extractall(extract_dir)
-                log(f"    Extracted {len(zip_ref.namelist())} file(s) from {archive_file.name}")
-                logmsg.info("Extracted {file_count} file(s) from %item%", file_count=len(zip_ref.namelist()))
-                extracted_archives.append(archive_file)
-            # Add other archive formats here as needed:
-            # elif archive_file.suffix.lower() == ".7z":
-            #     # Use py7zr or subprocess to extract 7z files
-            #     pass
-            else:
-                log(f"    [WARN] Unsupported archive format: {archive_file.suffix}")
-                logmsg.warn("Unsupported archive format: %item%", item=archive_file.suffix)
-                logmsg.unset_item(item_key)
-                continue
+            item_key = logmsg.set_item(str(archive_file))
+            try:
+                if extract_dir.exists():
+                    log(f"  [EXTRACT] Skipping {archive_file.name} (extraction folder already exists: {extract_dir.name})")
+                    logmsg.info("Skipping (extraction folder already exists: {extract_dir})", extract_dir=extract_dir.name)
+                    # Still track it for cleanup if it was already extracted
+                    extracted_archives.append(archive_file)
+                    continue
                 
-        except zipfile.BadZipFile:
-            log(f"    [WARN] {archive_file.name} is not a valid ZIP file, skipping")
-            logmsg.warn("%item% is not a valid ZIP file, skipping")
-            logmsg.unset_item(item_key)
-            continue
-        except Exception as e:
-            log(f"    [WARN] Could not extract {archive_file.name}: {e}")
-            logmsg.warn("Could not extract %item%: {error}", error=str(e))
-            logmsg.unset_item(item_key)
-            continue
-        
-        logmsg.unset_item(item_key)
-    
-    logmsg.pop_header(extract_key)
+                log(f"  [EXTRACT] Extracting {archive_file.name} to {extract_dir.name}/")
+                
+                if dry_run:
+                    log(f"    [DRY RUN] Would extract {archive_file} to {extract_dir}")
+                    logmsg.info("[DRY RUN] Would extract %item% to {extract_dir}", extract_dir=str(extract_dir))
+                    extracted_archives.append(archive_file)
+                    continue
+                
+                try:
+                    import zipfile
+                    
+                    if archive_file.suffix.lower() == ".zip":
+                        extract_dir.mkdir(parents=True, exist_ok=True)
+                        with zipfile.ZipFile(archive_file, 'r') as zip_ref:
+                            zip_ref.extractall(extract_dir)
+                        log(f"    Extracted {len(zip_ref.namelist())} file(s) from {archive_file.name}")
+                        logmsg.info("Extracted {file_count} file(s) from %item%", file_count=len(zip_ref.namelist()))
+                        extracted_archives.append(archive_file)
+                    # Add other archive formats here as needed:
+                    # elif archive_file.suffix.lower() == ".7z":
+                    #     # Use py7zr or subprocess to extract 7z files
+                    #     pass
+                    else:
+                        log(f"    [WARN] Unsupported archive format: {archive_file.suffix}")
+                        logmsg.warn("Unsupported archive format: {ext}", ext=archive_file.suffix)
+                        continue
+                        
+                except zipfile.BadZipFile:
+                    log(f"    [WARN] {archive_file.name} is not a valid ZIP file, skipping")
+                    logmsg.warn("%item% is not a valid ZIP file, skipping")
+                    continue
+                except Exception as e:
+                    log(f"    [WARN] Could not extract {archive_file.name}: {e}")
+                    logmsg.warn("Could not extract %item%: {error}", error=str(e))
+                    continue
+            finally:
+                logmsg.unset_item(item_key)
+    finally:
+        logmsg.pop_header(extract_key)
     return extracted_archives
 
 
@@ -798,7 +853,6 @@ def process_downloads(dry_run: bool = False) -> None:
 
         # Process album: set album context and organize
         album_key_val = logmsg.set_album(artist, album, year)
-        
         try:
             move_album_from_downloads(album_key, items, MUSIC_ROOT, dry_run, extracted_archives)
         finally:
@@ -822,6 +876,9 @@ def process_downloads(dry_run: bool = False) -> None:
                 if not f.is_file():
                     continue
                 
+                # Set item context once per iteration (for all logs in this iteration)
+                item_key = logmsg.set_item(str(f.name))
+                
                 suffix = f.suffix.lower()
                 # Remove files with cleanup extensions (ZIP, partial, etc.)
                 # Artwork files are handled separately (preserve if unmatched)
@@ -830,7 +887,6 @@ def process_downloads(dry_run: bool = False) -> None:
                     if not is_artwork_file:
                         # Remove cleanup extension files (ZIP, partial downloads, etc.)
                         log(f"[CLEANUP] Removing file from downloads root: {f.name}")
-                        item_key = logmsg.set_item(str(f))
                         logmsg.info("Removing file: %item%")
                         if not dry_run:
                             try:
@@ -840,6 +896,12 @@ def process_downloads(dry_run: bool = False) -> None:
                                 logmsg.warn("Could not delete %item%: {error}", error=str(e))
                         logmsg.unset_item(item_key)
                         cleanup_count += 1
+                    else:
+                        # Artwork file - skip (handled elsewhere)
+                        logmsg.unset_item(item_key)
+                else:
+                    # Not a cleanup extension file - skip
+                    logmsg.unset_item(item_key)
             if cleanup_count == 0:
                 logmsg.verbose("No cleanup files found")
         finally:
@@ -886,163 +948,160 @@ def match_root_artwork_to_existing_albums(dry_run: bool = False) -> None:
     
     # Push header for root artwork matching
     root_art_key = logmsg.push_header("Matching artwork in downloads root to existing albums", "%msg% (%count% files)", "ROOT_ART")
-    
-    # Get all album directories from MUSIC_ROOT
-    # Structure: MUSIC_ROOT/Artist/(Year) Album/
-    album_dirs = []
-    if MUSIC_ROOT.exists():
-        for artist_dir in MUSIC_ROOT.iterdir():
-            if not artist_dir.is_dir():
-                continue
-            for item in artist_dir.iterdir():
-                if item.is_dir():
-                    # This is an album directory
-                    album_dirs.append(item)
-                elif item.name.upper().startswith("CD"):
-                    # Multi-disc album - the parent is the album directory
-                    pass
-    
-    if not album_dirs:
-        log(f"[ROOT ART] No existing albums found in library to match against.")
-        logmsg.verbose("No existing albums found in library to match against")
-        logmsg.pop_header(root_art_key)
-        return
-    
-    # Build a list of (artist, album, album_dir) tuples for matching
-    albums_to_match = []
-    for album_dir in album_dirs:
-        try:
-            rel = album_dir.relative_to(MUSIC_ROOT)
-            parts = list(rel.parts)
-            
-            # Skip CD subdirectories
-            if parts and parts[-1].upper().startswith("CD") and len(parts) >= 2:
-                parts = parts[:-1]
-                album_dir = album_dir.parent
-            
-            if len(parts) >= 2:
-                artist = parts[0]
-                album_folder = parts[1]
-                # Extract album name (remove year prefix like "(2012) Album Name")
-                year_match = re.match(r'^\((\d{4})\)\s*(.+)$', album_folder)
-                if year_match:
-                    album = year_match.group(2).strip()
-                else:
-                    album = album_folder
-                albums_to_match.append((artist, album, album_dir))
-        except Exception:
-            continue
-    
-    matched_count = 0
-    for art_file in root_artwork_files:
-        art_file_stem = art_file.stem.lower()
+    try:
+        # Get all album directories from MUSIC_ROOT
+        # Structure: MUSIC_ROOT/Artist/(Year) Album/
+        album_dirs = []
+        if MUSIC_ROOT.exists():
+            for artist_dir in MUSIC_ROOT.iterdir():
+                if not artist_dir.is_dir():
+                    continue
+                for item in artist_dir.iterdir():
+                    if item.is_dir():
+                        # This is an album directory
+                        album_dirs.append(item)
+                    elif item.name.upper().startswith("CD"):
+                        # Multi-disc album - the parent is the album directory
+                        pass
         
-        # Try to match this artwork to an album
-        best_match = None
-        best_match_score = 0
+        if not album_dirs:
+            log(f"[ROOT ART] No existing albums found in library to match against.")
+            logmsg.verbose("No existing albums found in library to match against")
+            return
         
-        for artist, album, album_dir in albums_to_match:
-            norm_artist = normalize_for_filename(artist)
-            norm_album = normalize_for_filename(album)
-            
-            # Check if filename contains both normalized artist and album
-            if norm_album in art_file_stem and norm_artist in art_file_stem:
-                # Calculate a simple match score (prefer longer matches)
-                score = len(norm_album) + len(norm_artist)
-                if score > best_match_score:
-                    best_match_score = score
-                    best_match = (artist, album, album_dir)
-        
-        if not best_match:
-            continue
-        
-        artist, album, album_dir = best_match
-        cover_path = album_dir / "cover.jpg"
-        
-        # Set album context and item context
-        album_key_val = logmsg.set_album(artist, album, None)  # Year not needed for matching
-        item_key_val = logmsg.set_item(str(art_file))
-        
-        # Get size info for the root artwork
-        root_art_size = get_image_size(art_file)
-        if not root_art_size:
-            logmsg.warn("Could not read image size, skipping")
-            logmsg.unset_item(item_key_val)
-            logmsg.unset_album(album_key_val)
-            continue
-            
-            root_pixels = root_art_size[0] * root_art_size[1]
-            
-            # Check existing artwork
-            existing_better = False
-            if cover_path.exists():
-                existing_size = get_image_size(cover_path)
-                if existing_size:
-                    existing_pixels = existing_size[0] * existing_size[1]
-                    if existing_pixels >= root_pixels:
-                        existing_better = True
-                        logmsg.info("Matched but existing artwork is same or better (existing: {existing_px}px, root: {root_px}px)", existing_px=existing_pixels, root_px=root_pixels)
-                        # Remove root file since we already have better/same
-                        logmsg.info("Removing matched artwork from downloads root: %item%")
-                        if not dry_run:
-                            try:
-                                art_file.unlink()
-                                matched_count += 1
-                            except Exception as e:
-                                logmsg.warn("Could not delete %item%: {error}", error=str(e))
-                        logmsg.unset_item(item_key_val)
-                        logmsg.unset_album(album_key_val)
-                        continue
-            
-            # Root artwork is better (or no existing artwork) - upgrade
-            logmsg.info("Matched, upgrading artwork (root: {root_px}px)", root_px=root_pixels)
-            from logging_utils import album_label_from_dir, add_album_event_label
-            label = album_label_from_dir(album_dir)
-            add_album_event_label(label, f"Upgraded artwork from downloads root: {art_file.name}")
-        
-        if not dry_run:
-            # Copy artwork to cover.jpg
+        # Build a list of (artist, album, album_dir) tuples for matching
+        albums_to_match = []
+        for album_dir in album_dirs:
             try:
-                cover_path.parent.mkdir(parents=True, exist_ok=True)
+                rel = album_dir.relative_to(MUSIC_ROOT)
+                parts = list(rel.parts)
                 
-                # Convert format if needed (PNG/GIF to JPG)
-                if art_file.suffix.lower() in {".png", ".gif", ".webp"}:
-                    try:
-                        from PIL import Image
-                        with Image.open(art_file) as img:
-                            # Convert RGBA to RGB if needed (for PNG with transparency)
-                            if img.mode in ("RGBA", "LA", "P"):
-                                rgb_img = Image.new("RGB", img.size, (255, 255, 255))
-                                if img.mode == "P":
-                                    img = img.convert("RGBA")
-                                rgb_img.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
-                                img = rgb_img
-                            img.save(cover_path, "JPEG", quality=95, optimize=True)
-                    except Exception as e:
-                        logmsg.warn("Could not convert %item% to JPEG, copying as-is: {error}", error=str(e))
-                        shutil.copy2(art_file, cover_path)
-                else:
-                    shutil.copy2(art_file, cover_path)
+                # Skip CD subdirectories
+                if parts and parts[-1].upper().startswith("CD") and len(parts) >= 2:
+                    parts = parts[:-1]
+                    album_dir = album_dir.parent
                 
-                # Also update folder.jpg if it doesn't exist or is the same
-                folder_path = album_dir / "folder.jpg"
-                if not folder_path.exists() or (folder_path.exists() and folder_path.stat().st_size == cover_path.stat().st_size):
-                    shutil.copy2(cover_path, folder_path)
-                    logmsg.verbose("Updated folder.jpg from upgraded cover.jpg")
-                
-                # Remove the root artwork file
-                art_file.unlink()
-                matched_count += 1
-            except Exception as e:
-                logmsg.warn("Could not upgrade artwork: {error}", error=str(e))
-        else:
-            logmsg.info("[DRY RUN] Would upgrade artwork and remove %item%")
-            matched_count += 1
+                if len(parts) >= 2:
+                    artist = parts[0]
+                    album_folder = parts[1]
+                    # Extract album name (remove year prefix like "(2012) Album Name")
+                    year_match = re.match(r'^\((\d{4})\)\s*(.+)$', album_folder)
+                    if year_match:
+                        album = year_match.group(2).strip()
+                    else:
+                        album = album_folder
+                    albums_to_match.append((artist, album, album_dir))
+            except Exception:
+                continue
         
-        logmsg.unset_item(item_key_val)
-        logmsg.unset_album(album_key_val)
-        
-    logmsg.pop_header(root_art_key)
+        matched_count = 0
+        for art_file in root_artwork_files:
+            art_file_stem = art_file.stem.lower()
+            
+            # Try to match this artwork to an album
+            best_match = None
+            best_match_score = 0
+            
+            for artist, album, album_dir in albums_to_match:
+                norm_artist = normalize_for_filename(artist)
+                norm_album = normalize_for_filename(album)
+                
+                # Check if filename contains both normalized artist and album
+                if norm_album in art_file_stem and norm_artist in art_file_stem:
+                    # Calculate a simple match score (prefer longer matches)
+                    score = len(norm_album) + len(norm_artist)
+                    if score > best_match_score:
+                        best_match_score = score
+                        best_match = (artist, album, album_dir)
+            
+            if not best_match:
+                continue
+            
+            artist, album, album_dir = best_match
+            cover_path = album_dir / "cover.jpg"
+            
+            # Set album context and item context
+            album_key_val = logmsg.set_album(artist, album, None)  # Year not needed for matching
+            try:
+                item_key_val = logmsg.set_item(str(art_file))
+                try:
+                    # Get size info for the root artwork
+                    root_art_size = get_image_size(art_file)
+                    if not root_art_size:
+                        logmsg.warn("Could not read image size, skipping")
+                        continue
+                    
+                    root_pixels = root_art_size[0] * root_art_size[1]
+                    
+                    # Check existing artwork
+                    existing_better = False
+                    if cover_path.exists():
+                        existing_size = get_image_size(cover_path)
+                        if existing_size:
+                            existing_pixels = existing_size[0] * existing_size[1]
+                            if existing_pixels >= root_pixels:
+                                existing_better = True
+                                logmsg.info("Matched but existing artwork is same or better (existing: {existing_px}px, root: {root_px}px)", existing_px=existing_pixels, root_px=root_pixels)
+                                # Remove root file since we already have better/same
+                                logmsg.info("Removing matched artwork from downloads root: %item%")
+                                if not dry_run:
+                                    try:
+                                        art_file.unlink()
+                                        matched_count += 1
+                                    except Exception as e:
+                                        logmsg.warn("Could not delete %item%: {error}", error=str(e))
+                                continue
+                    
+                    # Root artwork is better (or no existing artwork) - upgrade
+                    logmsg.info("Matched, upgrading artwork (root: {root_px}px)", root_px=root_pixels)
+                    from logging_utils import album_label_from_dir, add_album_event_label
+                    label = album_label_from_dir(album_dir)
+                    add_album_event_label(label, f"Upgraded artwork from downloads root: {art_file.name}")
+                    
+                    if not dry_run:
+                        # Copy artwork to cover.jpg
+                        try:
+                            cover_path.parent.mkdir(parents=True, exist_ok=True)
+                            
+                            # Convert format if needed (PNG/GIF to JPG)
+                            if art_file.suffix.lower() in {".png", ".gif", ".webp"}:
+                                try:
+                                    from PIL import Image
+                                    with Image.open(art_file) as img:
+                                        # Convert RGBA to RGB if needed (for PNG with transparency)
+                                        if img.mode in ("RGBA", "LA", "P"):
+                                            rgb_img = Image.new("RGB", img.size, (255, 255, 255))
+                                            if img.mode == "P":
+                                                img = img.convert("RGBA")
+                                            rgb_img.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+                                            img = rgb_img
+                                        img.save(cover_path, "JPEG", quality=95, optimize=True)
+                                except Exception as e:
+                                    logmsg.warn("Could not convert %item% to JPEG, copying as-is: {error}", error=str(e))
+                                    shutil.copy2(art_file, cover_path)
+                            else:
+                                shutil.copy2(art_file, cover_path)
+                            
+                            # Also update folder.jpg if it doesn't exist or is the same
+                            folder_path = album_dir / "folder.jpg"
+                            if not folder_path.exists() or (folder_path.exists() and folder_path.stat().st_size == cover_path.stat().st_size):
+                                shutil.copy2(cover_path, folder_path)
+                                logmsg.verbose("Updated folder.jpg from upgraded cover.jpg")
+                            
+                            # Remove the root artwork file
+                            art_file.unlink()
+                            matched_count += 1
+                        except Exception as e:
+                            logmsg.warn("Could not upgrade artwork: {error}", error=str(e))
+                    else:
+                        logmsg.info("[DRY RUN] Would upgrade artwork and remove %item%")
+                        matched_count += 1
+                finally:
+                    logmsg.unset_item(item_key_val)
+            finally:
+                logmsg.unset_album(album_key_val)
+    finally:
+        logmsg.pop_header(root_art_key)
 
 
 def upgrade_albums_to_flac_only(dry_run: bool = False) -> None:

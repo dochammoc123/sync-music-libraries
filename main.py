@@ -152,11 +152,13 @@ def main() -> None:
     # Log startup info as always_show headers (appears in both detail log and summary)
     from structured_logging import logmsg
     header_key = logmsg.set_header(f"Starting script in mode: {args.mode}", always_show=True, key=None)
-    header_key = logmsg.set_header(f"DRY_RUN = {DRY_RUN}", always_show=True, key=header_key)
-    header_key = logmsg.set_header(f"EMBED_ALL = {EMBED_ALL}", always_show=True, key=header_key)
-    header_key = logmsg.set_header(f"T8_SYNC_USE_CHECKSUMS = {args.t8_checksums}", always_show=True, key=header_key)
-    # Clear header stack so Step 1 can start fresh with key=None (prevents wrong header context for any logs between)
-    logmsg.set_header(None, key=header_key)
+    try:
+        header_key = logmsg.set_header(f"DRY_RUN = {DRY_RUN}", always_show=True, key=header_key)
+        header_key = logmsg.set_header(f"EMBED_ALL = {EMBED_ALL}", always_show=True, key=header_key)
+        header_key = logmsg.set_header(f"T8_SYNC_USE_CHECKSUMS = {args.t8_checksums}", always_show=True, key=header_key)
+    finally:
+        # Clear header stack so Step 1 can start fresh with key=None (prevents wrong header context for any logs between)
+        logmsg.set_header(None, key=header_key)
 
     # Safety check: Verify both ROON and T8 drives have at least 1TB total capacity
     log("\nSafety check: Verifying disk capacity on target drives...")
@@ -363,7 +365,7 @@ def main() -> None:
         log("\nStep 1: Process new downloads (organize + art)...")
         from structured_logging import logmsg
         # Step header processes MULTIPLE albums (each album gets its own instance)
-        header_key = logmsg.set_header("Step 1: Process new downloads", "%msg% (%count% items)")
+        header_key = logmsg.set_header("Step 1: Process new downloads", "%msg%")
         process_downloads(DRY_RUN)
 
         log("\nStep 2: Apply UPDATE overlay (files from Update -> Music)...")

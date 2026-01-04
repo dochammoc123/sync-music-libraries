@@ -750,7 +750,6 @@ class StructuredLogger:
         message: str,
         level: str,
         album: Optional[str] = None,
-        item: Optional[str] = None,
         console: bool = True,
         **kwargs
     ) -> None:
@@ -762,7 +761,6 @@ class StructuredLogger:
             message: Message to log (can contain %item% placeholder and {var} placeholders)
             level: Log level ("info", "warn", "error", or "verbose")
             album: Optional album label (overrides current album context, "" = global)
-            item: Optional item identifier (overrides current item context, "" = no item)
             console: If True, write to console logger; if False, write to detail logger only
             **kwargs: Additional named parameters for {var} placeholder replacement
         """
@@ -777,10 +775,8 @@ class StructuredLogger:
         else:  # Use current album context (or None)
             use_album = self.current_album_label
         
-        # Determine item to use (parameter overrides context)
-        use_item = item if item is not None else self.current_item_id
-        if item == "":  # Explicitly clear
-            use_item = None
+        # Use current item context (from set_item())
+        use_item = self.current_item_id
         
         # SAFEGUARD: If message contains %item% placeholder but no item context is set, raise error
         if "%item%" in message or "%Item%" in message:
@@ -904,47 +900,52 @@ class StructuredLogger:
         if use_item:
             self._increment_current_count(use_item)
     
-    def info(self, message: str, album: Optional[str] = None, item: Optional[str] = None, **kwargs) -> None:
+    def info(self, message: str, album: Optional[str] = None, **kwargs) -> None:
         """
         Log an info-level detail message.
-        Automatically counts item if item is provided (first encounter per header).
+        Automatically counts item if item context is set via set_item() (first encounter per header).
         
         Args:
             message: Message to log (can contain %item% placeholder and {var} placeholders)
             album: Optional album label (overrides current album context, "" = global)
-            item: Optional item identifier (overrides current item context, "" = no item)
-                 If provided and first encounter, automatically increments count
             **kwargs: Additional named parameters for {var} placeholder replacement
+        
+        Note: Item context must be set via set_item() before calling. The item= parameter
+        has been removed to prevent bugs where counting is bypassed.
         """
-        self._log_detail(message, "info", album, item, **kwargs)
+        self._log_detail(message, "info", album, **kwargs)
     
-    def warn(self, message: str, album: Optional[str] = None, item: Optional[str] = None, **kwargs) -> None:
+    def warn(self, message: str, album: Optional[str] = None, **kwargs) -> None:
         """
         Log a warning-level detail message.
-        Automatically counts item if item is provided (first encounter per header).
+        Automatically counts item if item context is set via set_item() (first encounter per header).
         
         Args:
             message: Message to log (can contain %item% placeholder and {var} placeholders)
             album: Optional album label (overrides current album context, "" = global)
-            item: Optional item identifier (overrides current item context, "" = no item)
             **kwargs: Additional named parameters for {var} placeholder replacement
+        
+        Note: Item context must be set via set_item() before calling. The item= parameter
+        has been removed to prevent bugs where counting is bypassed.
         """
-        self._log_detail(message, "warn", album, item, **kwargs)
+        self._log_detail(message, "warn", album, **kwargs)
     
-    def error(self, message: str, album: Optional[str] = None, item: Optional[str] = None, **kwargs) -> None:
+    def error(self, message: str, album: Optional[str] = None, **kwargs) -> None:
         """
         Log an error-level detail message.
-        Automatically counts item if item is provided (first encounter per header).
+        Automatically counts item if item context is set via set_item() (first encounter per header).
         
         Args:
             message: Message to log (can contain %item% placeholder and {var} placeholders)
             album: Optional album label (overrides current album context, "" = global)
-            item: Optional item identifier (overrides current item context, "" = no item)
             **kwargs: Additional named parameters for {var} placeholder replacement
+        
+        Note: Item context must be set via set_item() before calling. The item= parameter
+        has been removed to prevent bugs where counting is bypassed.
         """
-        self._log_detail(message, "error", album, item, **kwargs)
+        self._log_detail(message, "error", album, **kwargs)
     
-    def verbose(self, message: str, album: Optional[str] = None, item: Optional[str] = None, **kwargs) -> None:
+    def verbose(self, message: str, album: Optional[str] = None, **kwargs) -> None:
         """
         Log a verbose/trace-level detail message (file only, not console).
         Identical to info() in all respects (counting, header messages, etc.) except console output.
@@ -953,15 +954,13 @@ class StructuredLogger:
         Args:
             message: Message to log (can contain %item% placeholder and {var} placeholders)
             album: Optional album label (overrides current album context, "" = global)
-            item: Optional item identifier (overrides current item context, "" = no item)
-                 If provided and first encounter, automatically increments count (same as info)
             **kwargs: Additional named parameters for {var} placeholder replacement
         
-        Note: Verbose messages are written to the detail log file only, not to console.
-        They are useful for tracing code execution without cluttering console output.
-        Items are counted and messages are added to headers just like info() calls.
+        Note: Item context must be set via set_item() before calling. The item= parameter
+        has been removed to prevent bugs where counting is bypassed. Verbose messages are
+        written to the detail log file only, not to console.
         """
-        self._log_detail(message, "verbose", album, item, console=False, **kwargs)
+        self._log_detail(message, "verbose", album, console=False, **kwargs)
     
     def _increment_current_count(self, item_id: str) -> None:
         """

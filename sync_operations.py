@@ -106,40 +106,40 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
         
         # Set album context unconditionally (will unset at end of iteration, so always ready to set here)
         current_album_key = logmsg.set_album(dest.parent)
-        
-        # Set item context for this file
-        item_key = logmsg.set_item(str(src.name))
-
-        if src.suffix.lower() in AUDIO_EXT:
-            # Check if destination exists - compare frequency first, then file size
-            # Handles partial/corrupted files and frequency upgrades
-            # We also check for suspiciously small file sizes (heuristic warning)
-            should_copy = True
-            
-            # Check source file for size warnings (may indicate truncation)
-            from tag_operations import check_file_size_warning
-            size_warning = check_file_size_warning(src)
-            if size_warning:
-                level, message = size_warning
-                log(f"  [UPDATE {level}] {src.name}: {message}")
-                if level == "WARN":
-                    logmsg.warn("%item%: {message}", message=message)
-                elif level == "ERROR":
-                    logmsg.error("%item%: {message}", message=message)
-            
-            if dest.exists():
-                from tag_operations import get_sample_rate
-                
-                src_size = src.stat().st_size
-                dest_size = dest.stat().st_size
-                src_freq = get_sample_rate(src)
-                dest_freq = get_sample_rate(dest)
-                
-                # Compare: frequency first, then file size
-                upgrade_reason = []
-                if src_freq and dest_freq:
-                    if src_freq > dest_freq:
-                        upgrade_reason.append(f"frequency: {src_freq}Hz > {dest_freq}Hz")
+        try:
+            # Set item context for this file
+            item_key = logmsg.set_item(str(src.name))
+            try:
+                if src.suffix.lower() in AUDIO_EXT:
+                    # Check if destination exists - compare frequency first, then file size
+                    # Handles partial/corrupted files and frequency upgrades
+                    # We also check for suspiciously small file sizes (heuristic warning)
+                    should_copy = True
+                    
+                    # Check source file for size warnings (may indicate truncation)
+                    from tag_operations import check_file_size_warning
+                    size_warning = check_file_size_warning(src)
+                    if size_warning:
+                        level, message = size_warning
+                        log(f"  [UPDATE {level}] {src.name}: {message}")
+                        if level == "WARN":
+                            logmsg.warn("%item%: {message}", message=message)
+                        elif level == "ERROR":
+                            logmsg.error("%item%: {message}", message=message)
+                    
+                    if dest.exists():
+                        from tag_operations import get_sample_rate
+                        
+                        src_size = src.stat().st_size
+                        dest_size = dest.stat().st_size
+                        src_freq = get_sample_rate(src)
+                        dest_freq = get_sample_rate(dest)
+                        
+                        # Compare: frequency first, then file size
+                        upgrade_reason = []
+                        if src_freq and dest_freq:
+                            if src_freq > dest_freq:
+                                upgrade_reason.append(f"frequency: {src_freq}Hz > {dest_freq}Hz")
                         should_copy = True
                     elif src_freq < dest_freq:
                         should_copy = False
@@ -169,95 +169,95 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
                     log(f"  [UPDATE UPGRADE] {dest.name}{freq_str} - {', '.join(upgrade_reason)}")
                     logmsg.info("UPGRADE: %item%{freq_str} - {reasons}", freq_str=freq_str, reasons=', '.join(upgrade_reason))
             
-            if should_copy:
-                log(f"  [UPDATE AUDIO] {src} -> {dest}")
-                logmsg.info("COPY: %item% -> {dest}", dest=str(dest))
-                if not dry_run:
-                    shutil.copy2(src, dest)
-            remove_backup_for(rel, dry_run)
-            updated_album_dirs.add(dest.parent)
-        else:
-            # Handle non-audio files (artwork, etc.)
-            # Normalize artwork filenames based on location (album vs artist folder)
-            image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
-            is_image = src.suffix.lower() in image_extensions
-            
-            if is_image:
-                # Determine if this is an album folder or artist folder
-                # Album folder: MUSIC_ROOT/Artist/(Year) Album/image.jpg
-                # Artist folder: MUSIC_ROOT/Artist/image.jpg
-                dest_parent = dest.parent
-                dest_grandparent = dest_parent.parent
-                
-                # Check if this is an artist folder (parent's parent is MUSIC_ROOT)
-                is_artist_folder = False
-                try:
-                    if dest_grandparent == MUSIC_ROOT:
-                        # Artist folder: MUSIC_ROOT/Artist/image.jpg
-                        is_artist_folder = True
-                    else:
-                        # Album folder: MUSIC_ROOT/Artist/(Year) Album/image.jpg
-                        # Parent should have audio files (it's an album folder)
-                        is_artist_folder = False
-                except (ValueError, AttributeError):
-                    # If we can't determine relationship, assume it's an album folder (safer default)
-                    is_artist_folder = False
-                
-                if is_artist_folder:
-                    # Artist artwork: normalize to folder.jpg (preferred for artists)
-                    # Location is already correct (artist folder), just normalize filename
-                    normalized_dest = dest_parent / "folder.jpg"
-                    log(f"  [UPDATE ARTIST ART] Normalizing {src.name} -> folder.jpg in artist folder")
-                    logmsg.verbose("Normalizing %item% -> folder.jpg in artist folder")
-                    dest = normalized_dest
-                else:
-                    # Album artwork: normalize to cover.jpg
-                    # Location is already correct (album folder), just normalize filename
-                    normalized_dest = dest_parent / "cover.jpg"
-                    log(f"  [UPDATE ALBUM ART] Normalizing {src.name} -> cover.jpg in album folder")
-                    logmsg.verbose("Normalizing %item% -> cover.jpg in album folder")
-                    dest = normalized_dest
-            
-            log(f"  [UPDATE ASSET] {src} -> {dest}")
-            logmsg.info("COPY: %item% -> {dest}", dest=str(dest))
-            if not dry_run:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                # Convert image format if needed (PNG/GIF → JPG)
-                if is_image and src.suffix.lower() in {".png", ".gif", ".webp"}:
-                    try:
-                        from PIL import Image
-                        with Image.open(src) as img:
-                            # Convert RGBA to RGB if needed
-                            if img.mode in ("RGBA", "LA", "P"):
-                                rgb_img = Image.new("RGB", img.size, (255, 255, 255))
-                                if img.mode == "P":
-                                    img = img.convert("RGBA")
-                                rgb_img.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
-                                img = rgb_img
-                            img.save(dest, "JPEG", quality=95, optimize=True)
-                        logmsg.verbose("Converted %item% to JPEG (optimized)")
-                    except Exception as e:
-                        log(f"  [UPDATE WARN] Could not convert {src.name} to JPEG, copying as-is: {e}")
-                        logmsg.warn("Could not convert %item% to JPEG, copying as-is: {error}", error=str(e))
+                if should_copy:
+                    log(f"  [UPDATE AUDIO] {src} -> {dest}")
+                    logmsg.info("COPY: %item% -> {dest}", dest=str(dest))
+                    if not dry_run:
                         shutil.copy2(src, dest)
+                        remove_backup_for(rel, dry_run)
+                        updated_album_dirs.add(dest.parent)
                 else:
-                    shutil.copy2(src, dest)
-            updated_album_dirs.add(dest.parent)
-            if is_image and not is_artist_folder and dest.name.lower() == "cover.jpg":
-                albums_with_new_cover.add(dest.parent)
-        
-        # Unset item context (common to both audio and non-audio file paths)
-        logmsg.unset_item(item_key)
+                    # Handle non-audio files (artwork, etc.)
+                    # Normalize artwork filenames based on location (album vs artist folder)
+                    image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+                    is_image = src.suffix.lower() in image_extensions
+                    
+                    if is_image:
+                        # Determine if this is an album folder or artist folder
+                        # Album folder: MUSIC_ROOT/Artist/(Year) Album/image.jpg
+                        # Artist folder: MUSIC_ROOT/Artist/image.jpg
+                        dest_parent = dest.parent
+                        dest_grandparent = dest_parent.parent
+                        
+                        # Check if this is an artist folder (parent's parent is MUSIC_ROOT)
+                        is_artist_folder = False
+                        try:
+                            if dest_grandparent == MUSIC_ROOT:
+                                # Artist folder: MUSIC_ROOT/Artist/image.jpg
+                                is_artist_folder = True
+                            else:
+                                # Album folder: MUSIC_ROOT/Artist/(Year) Album/image.jpg
+                                # Parent should have audio files (it's an album folder)
+                                is_artist_folder = False
+                        except (ValueError, AttributeError):
+                            # If we can't determine relationship, assume it's an album folder (safer default)
+                            is_artist_folder = False
+                        
+                        if is_artist_folder:
+                            # Artist artwork: normalize to folder.jpg (preferred for artists)
+                            # Location is already correct (artist folder), just normalize filename
+                            normalized_dest = dest_parent / "folder.jpg"
+                            log(f"  [UPDATE ARTIST ART] Normalizing {src.name} -> folder.jpg in artist folder")
+                            logmsg.verbose("Normalizing %item% -> folder.jpg in artist folder")
+                            dest = normalized_dest
+                        else:
+                            # Album artwork: normalize to cover.jpg
+                            # Location is already correct (album folder), just normalize filename
+                            normalized_dest = dest_parent / "cover.jpg"
+                            log(f"  [UPDATE ALBUM ART] Normalizing {src.name} -> cover.jpg in album folder")
+                            logmsg.verbose("Normalizing %item% -> cover.jpg in album folder")
+                            dest = normalized_dest
+                    
+                    log(f"  [UPDATE ASSET] {src} -> {dest}")
+                    logmsg.info("COPY: %item% -> {dest}", dest=str(dest))
+                    if not dry_run:
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        # Convert image format if needed (PNG/GIF → JPG)
+                        if is_image and src.suffix.lower() in {".png", ".gif", ".webp"}:
+                            try:
+                                from PIL import Image
+                                with Image.open(src) as img:
+                                    # Convert RGBA to RGB if needed
+                                    if img.mode in ("RGBA", "LA", "P"):
+                                        rgb_img = Image.new("RGB", img.size, (255, 255, 255))
+                                        if img.mode == "P":
+                                            img = img.convert("RGBA")
+                                        rgb_img.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+                                        img = rgb_img
+                                    img.save(dest, "JPEG", quality=95, optimize=True)
+                                logmsg.verbose("Converted %item% to JPEG (optimized)")
+                            except Exception as e:
+                                log(f"  [UPDATE WARN] Could not convert {src.name} to JPEG, copying as-is: {e}")
+                                logmsg.warn("Could not convert %item% to JPEG, copying as-is: {error}", error=str(e))
+                                shutil.copy2(src, dest)
+                        else:
+                            shutil.copy2(src, dest)
+                    updated_album_dirs.add(dest.parent)
+                    if is_image and not is_artist_folder and dest.name.lower() == "cover.jpg":
+                        albums_with_new_cover.add(dest.parent)
+            finally:
+                # Unset item context (common to both audio and non-audio file paths)
+                logmsg.unset_item(item_key)
 
-        if not dry_run:
-            try:
-                src.unlink()
-            except Exception as e:
-                log(f"  [UPDATE WARN] Could not delete applied update file {src}: {e}")
-                logmsg.warn("Could not delete applied update file %item%: {error}", error=str(e))
-        
-        # Unset album context unconditionally (before next iteration or loop end)
-        logmsg.unset_album(current_album_key)
+            if not dry_run:
+                try:
+                    src.unlink()
+                except Exception as e:
+                    log(f"  [UPDATE WARN] Could not delete applied update file {src}: {e}")
+                    logmsg.warn("Could not delete applied update file %item%: {error}", error=str(e))
+        finally:
+            # Unset album context unconditionally (before next iteration or loop end)
+            logmsg.unset_album(current_album_key)
 
     # Add structured logging for updated albums
     for album_dir in updated_album_dirs:
@@ -266,8 +266,14 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
         # Set album context temporarily to log the update event (polymorphic: accepts Path directly)
         try:
             album_key = logmsg.set_album(album_dir)
-            logmsg.info("Updated from overlay.", item="album_updated")
-            logmsg.unset_album(album_key)
+            try:
+                item_key = logmsg.set_item("album_updated")
+                try:
+                    logmsg.info("Updated from overlay.")
+                finally:
+                    logmsg.unset_item(item_key)
+            finally:
+                logmsg.unset_album(album_key)
         except Exception:
             # If path extraction fails, skip structured logging for this album
             pass
