@@ -962,6 +962,43 @@ class StructuredLogger:
         """
         self._log_detail(message, "verbose", album, console=False, **kwargs)
     
+    def exception(self, message: str, exc_info=None, album: Optional[str] = None, **kwargs) -> None:
+        """
+        Log an exception with full traceback (similar to logger.exception()).
+        This is an error-level log that includes the full traceback for debugging.
+        
+        Args:
+            message: Error message describing the exception
+            exc_info: Exception info tuple (sys.exc_info()) or exception instance.
+                     If None, uses sys.exc_info() automatically.
+            album: Optional album label (overrides current album context, "" = global)
+            **kwargs: Additional named parameters for {var} placeholder replacement
+        
+        Note: This method automatically captures the current exception context if exc_info is None.
+        The traceback is included in both the detail log and console output.
+        """
+        import sys
+        import traceback
+        
+        # Capture exception info if not provided
+        if exc_info is None:
+            exc_info = sys.exc_info()
+        elif not isinstance(exc_info, tuple):
+            # If an exception instance is passed, convert to tuple
+            exc_info = (type(exc_info), exc_info, exc_info.__traceback__)
+        
+        # Format the traceback
+        if exc_info[0] is not None:
+            tb_lines = traceback.format_exception(*exc_info)
+            tb_text = "".join(tb_lines)
+            # Combine message with traceback
+            full_message = f"{message}\n{tb_text}"
+        else:
+            full_message = message
+        
+        # Log as error with full traceback
+        self._log_detail(full_message, "error", album, console=True, **kwargs)
+    
     def _increment_current_count(self, item_id: str) -> None:
         """
         Increment count for all active header instances if item_id hasn't been counted yet.

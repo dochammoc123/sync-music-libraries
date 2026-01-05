@@ -109,39 +109,66 @@ def main() -> None:
     logmsg.verbose(f"New run started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logmsg.verbose(divider)
     
-    def exit_with_error(error_msg: str, exit_code: int = 1, is_error: bool = True) -> None:
+    def exit_with_error(error_msg: str, exit_code: int = 1, is_error: bool = True, skip_error_log: bool = False) -> None:
         """Common handler for early exits: log, write summary, notify, prompt, exit.
         
         Args:
             error_msg: Error message (may contain "ERROR:" prefix which will be stripped)
             exit_code: Exit code (default 1)
             is_error: If True, log as error; if False, log as warning (e.g., for DRY_RUN scenarios)
+            skip_error_log: If True, skip logging to structured logging (e.g., if exception was already logged)
         """
         log(error_msg)
         # Strip "ERROR:" or "WARNING:" prefix if present
         clean_msg = error_msg
         if clean_msg.startswith("ERROR:") or clean_msg.startswith("WARNING:"):
             clean_msg = clean_msg.split(":", 1)[1].lstrip()
-        # Log to structured logging detail log
+        
+        # Import logmsg (needed for write_summary even if skip_error_log=True)
         from structured_logging import logmsg
-        if is_error:
-            logmsg.error(clean_msg)
-        else:
-            logmsg.warn(clean_msg)
+        
+        # Log to structured logging detail log (unless already logged)
+        if not skip_error_log:
+            if is_error:
+                logmsg.error(clean_msg)
+            else:
+                logmsg.warn(clean_msg)
+        
         # Also add to old API global warnings for old summary file
         level = "error" if is_error else "warn"
         add_global_warning(clean_msg, level=level)
-        write_summary_log(args.mode, DRY_RUN)
-        logmsg.write_summary(args.mode, DRY_RUN)
-        notify_run_summary(args.mode)
-        # Keep console open for user to review
+        
+        # Write summaries (with error handling to ensure we always get to the prompt)
+        try:
+            write_summary_log(args.mode, DRY_RUN)
+            logmsg.write_summary(args.mode, DRY_RUN)
+            notify_run_summary(args.mode)
+        except Exception as summary_error:
+            # If summary writing fails, log it but continue to prompt
+            from logging_utils import logger
+            logger.exception("Error writing summary logs")
+        
+        # Keep console open for user to review (ALWAYS execute this, even if summary failed)
+        # Use a separate try/except to ensure we always attempt the prompt
         if sys.platform == "win32":
             try:
+                # Ensure all output is flushed before showing prompt
+                sys.stdout.flush()
+                sys.stderr.flush()
                 print()  # Add blank line before prompt
-                print("Press Enter to close this window...")  # Use print() not log() - log() doesn't write to console
+                print("Press Enter to close this window...", flush=True)  # Use print() not log() - log() doesn't write to console
+                sys.stdout.flush()  # Ensure prompt is visible before waiting
                 input()
             except (EOFError, KeyboardInterrupt, OSError, AttributeError):
                 pass  # stdin not available - likely running from tray launcher
+            except Exception as prompt_error:
+                # Even if prompt fails for unexpected reasons, log it but continue to exit
+                try:
+                    from logging_utils import logger
+                    logger.debug(f"Console prompt failed (non-fatal): {prompt_error}")
+                except Exception:
+                    pass  # If logging fails too, just continue
+        
         sys.exit(exit_code)
     
     log(f"Starting script in mode: {args.mode}")
@@ -291,10 +318,16 @@ def main() -> None:
         
         log("Disk capacity check passed.\n")
     except Exception as e:
+        import sys
         error_msg = f"ERROR: Exception during disk capacity check: {e}"
         from logging_utils import logger
+        from structured_logging import logmsg
+        
         logger.exception("Disk capacity check failed")
-        exit_with_error(error_msg)
+        # Also log to new structured logging with full traceback
+        logmsg.exception("Exception during disk capacity check", exc_info=sys.exc_info())
+        # Skip error logging in exit_with_error since we already logged the exception with traceback
+        exit_with_error(error_msg, skip_error_log=True)
 
     init_musicbrainz()
 
@@ -512,10 +545,19 @@ def main() -> None:
         sys.exit(exit_code)
 
     except Exception as e:
+        import sys
         from logging_utils import logger
+        from structured_logging import logmsg
+        
+        # Log to old logger (with traceback)
         logger.exception("Fatal error during run")
+        
+        # Also log to new structured logging with full traceback
+        logmsg.exception("Fatal error during run", exc_info=sys.exc_info())
+        
         error_msg = f"Fatal error during run: {e}"
-        exit_with_error(error_msg)
+        # Skip error logging in exit_with_error since we already logged the exception with traceback
+        exit_with_error(error_msg, skip_error_log=True)
 
 
 if __name__ == "__main__":
