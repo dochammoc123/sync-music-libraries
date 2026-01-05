@@ -331,151 +331,178 @@ def move_album_from_downloads(
 
         for src, tags in items_sorted:
             ext = src.suffix
-        
-        # Try to read tags from source file for filename generation
-        # Don't write tags yet - that happens later after backup during embed step
-        tags_to_use = tags.copy()
-        try:
-            from tag_operations import get_tags
-            original_tags = get_tags(src)
-            if original_tags and original_tags.get("title") and original_tags.get("tracknum", 0) > 0:
-                # File has good tags, use them for filename
-                tags_to_use = original_tags.copy()
-        except Exception:
-            # Can't read tags, use fallback tags for filename
-            pass
-        
-        # Generate filename from tags (title and tracknum from tags, not filename)
-        # If tags are missing, filename will use fallback values (from path/filename parsing)
-        filename = format_track_filename(tags_to_use, ext)
-        if len(discs) > 1:
-            disc_label = f"CD{tags_to_use['discnum']}"
-            disc_dir = album_dir / disc_label
-            if not dry_run:
-                disc_dir.mkdir(exist_ok=True)
-            dest = disc_dir / filename
-        else:
-            dest = album_dir / filename
-
-        # Check if destination exists - compare frequency first, then file size
-        # Handles partial/corrupted files and frequency upgrades
-        # Note: We can't detect truncated files (missing last 10 seconds) without a reference file
-        # File size comparison helps when we have duplicates of the same song/quality
-        # We also check for suspiciously small file sizes (heuristic warning)
-        should_move = True
-        
-        # Set item context for this track
-        item_key = logmsg.set_item(str(src))
-        try:
-            # Check source file for size warnings (may indicate truncation)
-            from tag_operations import check_file_size_warning
-            size_warning = check_file_size_warning(src)
-            if size_warning:
-                level, message = size_warning
-                log(f"  [{level}] {src.name}: {message}")
-                logmsg.warn("{file}: {message}", file=src.name, message=message)
             
-            if dest.exists():
-                from tag_operations import get_sample_rate, get_audio_duration, get_tags, check_file_size_warning
+            # Try to read tags from source file for filename generation
+            # Don't write tags yet - that happens later after backup during embed step
+            tags_to_use = tags.copy()
+            try:
+                from tag_operations import get_tags
+                original_tags = get_tags(src)
+                if original_tags and original_tags.get("title") and original_tags.get("tracknum", 0) > 0:
+                    # File has good tags, use them for filename
+                    tags_to_use = original_tags.copy()
+            except Exception:
+                # Can't read tags, use fallback tags for filename
+                pass
             
-            # First check if existing file is corrupt (can't read tags) or truncated
-            # If corrupt, always upgrade (any working file is better than corrupt)
-            # If truncated, upgrade if incoming is better (not truncated, or larger if both truncated)
-            dest_tags = get_tags(dest)
-            dest_is_corrupt = (dest_tags is None)
-            dest_size_warning = check_file_size_warning(dest)
-            dest_is_truncated = (dest_size_warning is not None)
-            
-            src_size = src.stat().st_size
-            dest_size = dest.stat().st_size
-            src_freq = get_sample_rate(src)
-            dest_freq = get_sample_rate(dest)
-            src_duration = get_audio_duration(src)
-            dest_duration = get_audio_duration(dest)
-            src_size_warning = check_file_size_warning(src)
-            src_is_truncated = (src_size_warning is not None)
-            
-            # If existing file is corrupt, always upgrade (any working file is better)
-            if dest_is_corrupt:
-                upgrade_reason = ["existing file is corrupt (cannot read tags)"]
-                should_move = True
-            elif dest_is_truncated:
-                # Existing file is truncated - upgrade if incoming is better
-                if not src_is_truncated:
-                    # Incoming is not truncated - upgrade
-                    upgrade_reason = ["existing file is truncated, incoming file is complete"]
-                    should_move = True
-                elif src_size > dest_size:
-                    # Both truncated, but incoming is larger - upgrade
-                    upgrade_reason = [f"existing file is truncated, incoming is larger (size: {src_size} > {dest_size} bytes)"]
-                    should_move = True
-                else:
-                    # Both truncated, incoming is not better - skip
-                    should_move = False
-                    log(f"  SKIP: {src.name} (existing file is truncated, but incoming is also truncated and not larger)")
-                    logmsg.info("SKIP: %item% (existing file is truncated, but incoming is also truncated and not larger)")
-            else:
-                # Compare: frequency first, then file size
-                # Duration can help detect truncation, but metadata duration may be wrong
-                upgrade_reason = []
-                if src_freq and dest_freq:
-                    if src_freq > dest_freq:
-                        upgrade_reason.append(f"frequency: {src_freq}Hz > {dest_freq}Hz")
-                        should_move = True
-                    elif src_freq < dest_freq:
-                        should_move = False
-                        log(f"  SKIP: {src.name} (existing has higher frequency: {dest_freq}Hz > {src_freq}Hz)")
-                        logmsg.info("SKIP: %item% (existing has higher frequency: {dest_freq}Hz > {src_freq}Hz)", dest_freq=dest_freq, src_freq=src_freq)
-                    else:
-                        # Same frequency, compare file size (more reliable than duration for detecting truncation)
-                        if src_size > dest_size:
-                            upgrade_reason.append(f"size: {src_size} > {dest_size} bytes")
-                            # Also check duration if available (though metadata may be wrong for truncated files)
-                            if src_duration and dest_duration:
-                                duration_diff = src_duration - dest_duration
-                                if abs(duration_diff) > 5:  # More than 5 seconds difference
-                                    upgrade_reason.append(f"duration: {src_duration:.1f}s vs {dest_duration:.1f}s")
-                            should_move = True
-                        else:
-                            should_move = False
-                            log(f"  SKIP: {src.name} (same frequency {src_freq}Hz, existing file is larger or equal: {dest_size} >= {src_size} bytes)")
-                            logmsg.info("SKIP: %item% (same frequency {freq}Hz, existing file is larger or equal: {dest_size} >= {src_size} bytes)", freq=src_freq, dest_size=dest_size, src_size=src_size)
-                else:
-                    # Can't determine frequency, fall back to file size only
-                    if src_size > dest_size:
-                        upgrade_reason.append(f"size: {src_size} > {dest_size} bytes")
-                        if src_duration and dest_duration:
-                            duration_diff = src_duration - dest_duration
-                            if abs(duration_diff) > 5:
-                                upgrade_reason.append(f"duration: {src_duration:.1f}s vs {dest_duration:.1f}s")
-                        should_move = True
-                    else:
-                        should_move = False
-                        log(f"  SKIP: {src.name} (existing file is larger or equal: {dest_size} >= {src_size} bytes)")
-                        logmsg.info("SKIP: %item% (existing file is larger or equal: {dest_size} >= {src_size} bytes)", dest_size=dest_size, src_size=src_size)
-            
-            if should_move and upgrade_reason:
-                freq_str = f" ({src_freq}Hz vs {dest_freq}Hz)" if src_freq and dest_freq else ""
-                log(f"  UPGRADE: {src.name}{freq_str} - {', '.join(upgrade_reason)}")
-                logmsg.info("UPGRADE: %item%{freq_str} - {reasons}", freq_str=freq_str, reasons=', '.join(upgrade_reason))
-
-            if should_move:
-                log(f"  MOVE: {src} -> {dest}")
-                logmsg.info("MOVE: %item% -> {dest}", dest=str(dest))
+            # Generate filename from tags (title and tracknum from tags, not filename)
+            # If tags are missing, filename will use fallback values (from path/filename parsing)
+            filename = format_track_filename(tags_to_use, ext)
+            if len(discs) > 1:
+                disc_label = f"CD{tags_to_use['discnum']}"
+                disc_dir = album_dir / disc_label
                 if not dry_run:
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(src), str(dest))
-                # Track destination file for use after moving (for artwork export, etc.)
-                dest_items.append((dest, tags_to_use))
-                # Track that this file was processed (moved)
-                processed_audio_files.append(src)
+                    disc_dir.mkdir(exist_ok=True)
+                dest = disc_dir / filename
             else:
-                # File was skipped (better version exists) - use existing destination
-                dest_items.append((dest, tags_to_use))
-                # File was skipped (better version exists) - still mark as processed for cleanup
-                processed_audio_files.append(src)
-        finally:
-            logmsg.unset_item(item_key)
+                dest = album_dir / filename
+
+            # Check if destination exists - compare frequency first, then file size
+            # Handles partial/corrupted files and frequency upgrades
+            # Note: We can't detect truncated files (missing last 10 seconds) without a reference file
+            # File size comparison helps when we have duplicates of the same song/quality
+            # We also check for suspiciously small file sizes (heuristic warning)
+            should_move = True
+            
+            # Set item context for this track
+            item_key = logmsg.set_item(str(src))
+            try:
+                # Check source file for size warnings (may indicate truncation)
+                from tag_operations import check_file_size_warning
+                size_warning = check_file_size_warning(src)
+                if size_warning:
+                    level, message = size_warning
+                    log(f"  [{level}] {src.name}: {message}")
+                    logmsg.warn("{file}: {message}", file=src.name, message=message)
+                
+                # Always check source file properties
+                from tag_operations import get_sample_rate, get_audio_duration, get_tags, check_file_size_warning
+                src_size = src.stat().st_size
+                src_freq = get_sample_rate(src)
+                src_duration = get_audio_duration(src)
+                src_size_warning = check_file_size_warning(src)
+                src_is_truncated = (src_size_warning is not None)
+                
+                # Check destination file properties only if it exists
+                # On network paths (UNC), dest.exists() might raise an exception instead of returning False
+                dest_exists = False
+                dest_size = 0
+                dest_freq = None
+                dest_duration = None
+                dest_tags = None
+                dest_is_corrupt = False
+                dest_is_truncated = False
+                upgrade_reason = []
+                
+                try:
+                    dest_exists = dest.exists()
+                except (OSError, FileNotFoundError):
+                    # Network path might not be accessible or file doesn't exist
+                    dest_exists = False
+                
+                if dest_exists:
+                    try:
+                        # First check if existing file is corrupt (can't read tags) or truncated
+                        # If corrupt, always upgrade (any working file is better than corrupt)
+                        # If truncated, upgrade if incoming is better (not truncated, or larger if both truncated)
+                        dest_tags = get_tags(dest)
+                        dest_is_corrupt = (dest_tags is None)
+                        dest_size_warning = check_file_size_warning(dest)
+                        dest_is_truncated = (dest_size_warning is not None)
+                        dest_size = dest.stat().st_size
+                        dest_freq = get_sample_rate(dest)
+                        dest_duration = get_audio_duration(dest)
+                        
+                        # If existing file is corrupt, always upgrade (any working file is better)
+                        if dest_is_corrupt:
+                            upgrade_reason = ["existing file is corrupt (cannot read tags)"]
+                            should_move = True
+                        elif dest_is_truncated:
+                            # Existing file is truncated - upgrade if incoming is better
+                            if not src_is_truncated:
+                                # Incoming is not truncated - upgrade
+                                upgrade_reason = ["existing file is truncated, incoming file is complete"]
+                                should_move = True
+                            elif src_size > dest_size:
+                                # Both truncated, but incoming is larger - upgrade
+                                upgrade_reason = [f"existing file is truncated, incoming is larger (size: {src_size} > {dest_size} bytes)"]
+                                should_move = True
+                            else:
+                                # Both truncated, incoming is not better - skip
+                                should_move = False
+                                log(f"  SKIP: {src.name} (existing file is truncated, but incoming is also truncated and not larger)")
+                                logmsg.info("SKIP: %item% (existing file is truncated, but incoming is also truncated and not larger)")
+                        else:
+                            # Compare: frequency first, then file size
+                            # Duration can help detect truncation, but metadata duration may be wrong
+                            upgrade_reason = []
+                            if src_freq and dest_freq:
+                                if src_freq > dest_freq:
+                                    upgrade_reason.append(f"frequency: {src_freq}Hz > {dest_freq}Hz")
+                                    should_move = True
+                                elif src_freq < dest_freq:
+                                    should_move = False
+                                    log(f"  SKIP: {src.name} (existing has higher frequency: {dest_freq}Hz > {src_freq}Hz)")
+                                    logmsg.info("SKIP: %item% (existing has higher frequency: {dest_freq}Hz > {src_freq}Hz)", dest_freq=dest_freq, src_freq=src_freq)
+                                else:
+                                    # Same frequency, compare file size (more reliable than duration for detecting truncation)
+                                    if src_size > dest_size:
+                                        upgrade_reason.append(f"size: {src_size} > {dest_size} bytes")
+                                        # Also check duration if available (though metadata may be wrong for truncated files)
+                                        if src_duration and dest_duration:
+                                            duration_diff = src_duration - dest_duration
+                                            if abs(duration_diff) > 5:  # More than 5 seconds difference
+                                                upgrade_reason.append(f"duration: {src_duration:.1f}s vs {dest_duration:.1f}s")
+                                        should_move = True
+                                    else:
+                                        should_move = False
+                                        log(f"  SKIP: {src.name} (same frequency {src_freq}Hz, existing file is larger or equal: {dest_size} >= {src_size} bytes)")
+                                        logmsg.info("SKIP: %item% (same frequency {freq}Hz, existing file is larger or equal: {dest_size} >= {src_size} bytes)", freq=src_freq, dest_size=dest_size, src_size=src_size)
+                            else:
+                                # Can't determine frequency, fall back to file size only
+                                if src_size > dest_size:
+                                    upgrade_reason.append(f"size: {src_size} > {dest_size} bytes")
+                                    if src_duration and dest_duration:
+                                        duration_diff = src_duration - dest_duration
+                                        if abs(duration_diff) > 5:
+                                            upgrade_reason.append(f"duration: {src_duration:.1f}s vs {dest_duration:.1f}s")
+                                    should_move = True
+                                else:
+                                    should_move = False
+                                    log(f"  SKIP: {src.name} (existing file is larger or equal: {dest_size} >= {src_size} bytes)")
+                                    logmsg.info("SKIP: %item% (existing file is larger or equal: {dest_size} >= {src_size} bytes)", dest_size=dest_size, src_size=src_size)
+                    except (OSError, FileNotFoundError) as e:
+                        # File might have been deleted or become inaccessible between exists() check and stat()
+                        # Treat as if destination doesn't exist
+                        dest_exists = False
+                        logmsg.verbose("Destination file became inaccessible during check: %item% ({error})", error=str(e))
+                
+                if not dest_exists:
+                    # Destination doesn't exist - initialize upgrade_reason for new file
+                    upgrade_reason = []
+                
+                if should_move and upgrade_reason:
+                    freq_str = f" ({src_freq}Hz vs {dest_freq}Hz)" if dest_exists and src_freq and dest_freq else ""
+                    log(f"  UPGRADE: {src.name}{freq_str} - {', '.join(upgrade_reason)}")
+                    logmsg.info("UPGRADE: %item%{freq_str} - {reasons}", freq_str=freq_str, reasons=', '.join(upgrade_reason))
+
+                if should_move:
+                    log(f"  MOVE: {src} -> {dest}")
+                    logmsg.info("MOVE: %item% -> {dest}", dest=str(dest))
+                    if not dry_run:
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.move(str(src), str(dest))
+                    # Track destination file for use after moving (for artwork export, etc.)
+                    dest_items.append((dest, tags_to_use))
+                    # Track that this file was processed (moved)
+                    processed_audio_files.append(src)
+                else:
+                    # File was skipped (better version exists) - use existing destination
+                    dest_items.append((dest, tags_to_use))
+                    # File was skipped (better version exists) - still mark as processed for cleanup
+                    processed_audio_files.append(src)
+            finally:
+                logmsg.unset_item(item_key)
     finally:
         # Pop organizing header
         logmsg.pop_header(organize_key)
@@ -643,36 +670,64 @@ def move_album_from_downloads(
                     except Exception:
                         # If we can't determine the path relationship, don't clean up (safer)
                         pass
-                logmsg.unset_item(art_item_key)
-            elif predownloaded_folder:
-                # Only folder.jpg exists, use it for cover.jpg
-                art_item_key = logmsg.set_item(str(predownloaded_folder))
-                logmsg.info("Using folder.jpg for cover.jpg")
-                shutil.copy2(predownloaded_folder, cover_dest)
-                logmsg.unset_item(art_item_key)
+                    logmsg.unset_item(art_item_key)
+                elif predownloaded_folder:
+                    # Only folder.jpg exists, use it for cover.jpg
+                    if predownloaded_folder.exists():
+                        art_item_key = logmsg.set_item(str(predownloaded_folder))
+                        logmsg.info("Using folder.jpg for cover.jpg")
+                        try:
+                            # Ensure parent directory exists (should already exist from line 577, but be safe)
+                            cover_dest.parent.mkdir(parents=True, exist_ok=True)
+                            shutil.copy2(predownloaded_folder, cover_dest)
+                        except (OSError, FileNotFoundError) as e:
+                            logmsg.error("Failed to copy folder.jpg to cover.jpg: {error}", error=str(e))
+                            logmsg.verbose("Source: {src}, Destination: {dst}", src=str(predownloaded_folder), dst=str(cover_dest))
+                        logmsg.unset_item(art_item_key)
+                    else:
+                        logmsg.warn("predownloaded_folder does not exist: {path}", path=str(predownloaded_folder))
             
             # Determine source for folder.jpg:
             # Only create folder.jpg if it doesn't exist
             # If it exists, preserve it (may differ from cover.jpg)
             # If creating, use same as cover.jpg (unless there's a separate predownloaded_folder)
             if not folder_dest.exists():
-                if predownloaded_folder and predownloaded_folder != predownloaded_art:
-                    # Separate folder.jpg exists in downloads - copy it
-                    logmsg.verbose("Creating folder.jpg from separate downloads file (may differ from cover.jpg)")
-                    shutil.copy2(predownloaded_folder, folder_dest)
-                elif predownloaded_art:
-                    # Use same art as cover.jpg for folder.jpg
-                    if predownloaded_art.suffix.lower() in {".png", ".gif", ".webp"}:
-                        # Already converted to cover.jpg above, just copy it
+                try:
+                    # Ensure parent directory exists
+                    folder_dest.parent.mkdir(parents=True, exist_ok=True)
+                    
+                    if predownloaded_folder and predownloaded_folder != predownloaded_art:
+                        # Separate folder.jpg exists in downloads - copy it
+                        if predownloaded_folder.exists():
+                            logmsg.verbose("Creating folder.jpg from separate downloads file (may differ from cover.jpg)")
+                            shutil.copy2(predownloaded_folder, folder_dest)
+                        else:
+                            logmsg.warn("predownloaded_folder does not exist for folder.jpg: {path}", path=str(predownloaded_folder))
+                    elif predownloaded_art:
+                        # Use same art as cover.jpg for folder.jpg
+                        if predownloaded_art.suffix.lower() in {".png", ".gif", ".webp"}:
+                            # Already converted to cover.jpg above, just copy it
+                            if cover_dest.exists():
+                                shutil.copy2(cover_dest, folder_dest)
+                            else:
+                                logmsg.warn("cover_dest does not exist for folder.jpg copy: {path}", path=str(cover_dest))
+                        else:
+                            if predownloaded_art.exists():
+                                shutil.copy2(predownloaded_art, folder_dest)
+                            else:
+                                logmsg.warn("predownloaded_art does not exist for folder.jpg: {path}", path=str(predownloaded_art))
+                    elif predownloaded_folder:
+                        # Use folder.jpg for both
+                        if predownloaded_folder.exists():
+                            shutil.copy2(predownloaded_folder, folder_dest)
+                        else:
+                            logmsg.warn("predownloaded_folder does not exist for folder.jpg: {path}", path=str(predownloaded_folder))
+                    elif cover_dest.exists():
+                        # No predownloaded art, but cover.jpg exists - use it for folder.jpg
                         shutil.copy2(cover_dest, folder_dest)
-                    else:
-                        shutil.copy2(predownloaded_art, folder_dest)
-                elif predownloaded_folder:
-                    # Use folder.jpg for both
-                    shutil.copy2(predownloaded_folder, folder_dest)
-                elif cover_dest.exists():
-                    # No predownloaded art, but cover.jpg exists - use it for folder.jpg
-                    shutil.copy2(cover_dest, folder_dest)
+                except (OSError, FileNotFoundError) as e:
+                    logmsg.error("Failed to create folder.jpg: {error}", error=str(e))
+                    logmsg.verbose("folder_dest: {dst}", dst=str(folder_dest))
             else:
                 logmsg.verbose("folder.jpg already exists, preserving it (may differ from cover.jpg)")
         

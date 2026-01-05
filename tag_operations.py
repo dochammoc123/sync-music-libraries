@@ -284,6 +284,19 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
         # File might be corrupted, wrong format, or unreadable
         # Log warning but return None - path-based fallback will be handled at directory level
         from logging_utils import log
+        try:
+            from structured_logging import logmsg
+            # Only log warning if album context is set (during processing, not during scanning)
+            # This prevents duplicate warnings and ensures they appear only under album context
+            msg = f"Could not read tags from {str(path)}: {str(e)}"
+            if logmsg.current_album_label is not None:
+                # Log as warning when we have album context (appears in summary)
+                logmsg.warn(msg)
+            else:
+                # Log as verbose when no album context (appears in detail log only, not console)
+                logmsg.verbose(msg)
+        except Exception:
+            pass  # Fallback if structured logging not available
         log(f"[WARN] Could not read tags from {path}: {e}")
         return None
 
@@ -323,6 +336,19 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
     except Exception as e:
         # Error reading tags even though file opened
         from logging_utils import log
+        try:
+            from structured_logging import logmsg
+            # Only log warning if album context is set (during processing, not during scanning)
+            # This prevents duplicate warnings and ensures they appear only under album context
+            msg = f"Error processing tags from {str(path)}: {str(e)}"
+            if logmsg.current_album_label is not None:
+                # Log as warning when we have album context (appears in summary)
+                logmsg.warn(msg)
+            else:
+                # Log as verbose when no album context (appears in detail log only, not console)
+                logmsg.verbose(msg)
+        except Exception:
+            pass  # Fallback if structured logging not available
         log(f"[WARN] Error processing tags from {path}: {e}")
         return None
 
@@ -562,6 +588,13 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
             
             # For files without tags, create minimal tags using determined artist/album
             for f in items_without_tags:
+                try:
+                    from structured_logging import logmsg
+                    # Use format() for placeholder replacement since these are called before album context is set
+                    msg = f"No tags for {str(f)}, using artist/album from other files in directory: {artist} - {album}"
+                    logmsg.verbose(msg)
+                except Exception:
+                    pass  # Fallback if structured logging not available
                 log(f"[WARN] No tags for {f}, using artist/album from other files in directory: {artist} - {album}")
                 # Create minimal tags with determined artist/album
                 fallback_tags = get_tags_from_path(f, downloads_root if downloads_root else f.parent.parent.parent)
@@ -593,9 +626,21 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
                     verified = verify_album_via_musicbrainz(path_artist, path_album)
                     if verified:
                         artist, album = verified
+                        try:
+                            from structured_logging import logmsg
+                            msg = f"No tags in directory {str(dir_path)}, MusicBrainz verified: {path_artist} - {path_album} -> {artist} - {album}"
+                            logmsg.verbose(msg)
+                        except Exception:
+                            pass  # Fallback if structured logging not available
                         log(f"[WARN] No tags in directory {dir_path}, MusicBrainz verified: {path_artist} - {path_album} -> {artist} - {album}")
                     else:
                         artist, album = path_artist, path_album
+                        try:
+                            from structured_logging import logmsg
+                            msg = f"No tags in directory {str(dir_path)}, using path-based: {artist} - {album}"
+                            logmsg.verbose(msg)
+                        except Exception:
+                            pass  # Fallback if structured logging not available
                         log(f"[WARN] No tags in directory {dir_path}, using path-based: {artist} - {album}")
                     
                     dir_to_key[dir_path] = (artist, album)

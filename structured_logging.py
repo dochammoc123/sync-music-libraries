@@ -996,7 +996,7 @@ class StructuredLogger:
         else:
             full_message = message
         
-        # Log as error with full traceback
+        # Log as error with full traceback (both detail log and console)
         self._log_detail(full_message, "error", album, console=True, **kwargs)
     
     def _increment_current_count(self, item_id: str) -> None:

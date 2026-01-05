@@ -109,66 +109,39 @@ def main() -> None:
     logmsg.verbose(f"New run started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     logmsg.verbose(divider)
     
-    def exit_with_error(error_msg: str, exit_code: int = 1, is_error: bool = True, skip_error_log: bool = False) -> None:
+    def exit_with_error(error_msg: str, exit_code: int = 1, is_error: bool = True) -> None:
         """Common handler for early exits: log, write summary, notify, prompt, exit.
         
         Args:
             error_msg: Error message (may contain "ERROR:" prefix which will be stripped)
             exit_code: Exit code (default 1)
             is_error: If True, log as error; if False, log as warning (e.g., for DRY_RUN scenarios)
-            skip_error_log: If True, skip logging to structured logging (e.g., if exception was already logged)
         """
         log(error_msg)
         # Strip "ERROR:" or "WARNING:" prefix if present
         clean_msg = error_msg
         if clean_msg.startswith("ERROR:") or clean_msg.startswith("WARNING:"):
             clean_msg = clean_msg.split(":", 1)[1].lstrip()
-        
-        # Import logmsg (needed for write_summary even if skip_error_log=True)
+        # Log to structured logging detail log
         from structured_logging import logmsg
-        
-        # Log to structured logging detail log (unless already logged)
-        if not skip_error_log:
-            if is_error:
-                logmsg.error(clean_msg)
-            else:
-                logmsg.warn(clean_msg)
-        
+        if is_error:
+            logmsg.error(clean_msg)
+        else:
+            logmsg.warn(clean_msg)
         # Also add to old API global warnings for old summary file
         level = "error" if is_error else "warn"
         add_global_warning(clean_msg, level=level)
-        
-        # Write summaries (with error handling to ensure we always get to the prompt)
-        try:
-            write_summary_log(args.mode, DRY_RUN)
-            logmsg.write_summary(args.mode, DRY_RUN)
-            notify_run_summary(args.mode)
-        except Exception as summary_error:
-            # If summary writing fails, log it but continue to prompt
-            from logging_utils import logger
-            logger.exception("Error writing summary logs")
-        
-        # Keep console open for user to review (ALWAYS execute this, even if summary failed)
-        # Use a separate try/except to ensure we always attempt the prompt
+        write_summary_log(args.mode, DRY_RUN)
+        logmsg.write_summary(args.mode, DRY_RUN)
+        notify_run_summary(args.mode)
+        # Keep console open for user to review
         if sys.platform == "win32":
             try:
-                # Ensure all output is flushed before showing prompt
-                sys.stdout.flush()
-                sys.stderr.flush()
                 print()  # Add blank line before prompt
-                print("Press Enter to close this window...", flush=True)  # Use print() not log() - log() doesn't write to console
-                sys.stdout.flush()  # Ensure prompt is visible before waiting
+                print("Press Enter to close this window...")  # Use print() not log() - log() doesn't write to console
                 input()
             except (EOFError, KeyboardInterrupt, OSError, AttributeError):
                 pass  # stdin not available - likely running from tray launcher
-            except Exception as prompt_error:
-                # Even if prompt fails for unexpected reasons, log it but continue to exit
-                try:
-                    from logging_utils import logger
-                    logger.debug(f"Console prompt failed (non-fatal): {prompt_error}")
-                except Exception:
-                    pass  # If logging fails too, just continue
-        
         sys.exit(exit_code)
     
     log(f"Starting script in mode: {args.mode}")
@@ -318,7 +291,6 @@ def main() -> None:
         
         log("Disk capacity check passed.\n")
     except Exception as e:
-        import sys
         error_msg = f"ERROR: Exception during disk capacity check: {e}"
         from logging_utils import logger
         from structured_logging import logmsg
@@ -326,8 +298,7 @@ def main() -> None:
         logger.exception("Disk capacity check failed")
         # Also log to new structured logging with full traceback
         logmsg.exception("Exception during disk capacity check", exc_info=sys.exc_info())
-        # Skip error logging in exit_with_error since we already logged the exception with traceback
-        exit_with_error(error_msg, skip_error_log=True)
+        exit_with_error(error_msg)
 
     init_musicbrainz()
 
@@ -448,15 +419,27 @@ def main() -> None:
             dir_path = Path(dirpath)
             # Check if this is an artist folder (has album subdirectories with audio files)
             has_albums = False
-            for subdir in dir_path.iterdir():
-                if subdir.is_dir():
-                    # Check if subdir has audio files (it's an album)
-                    for audio_file in subdir.iterdir():
-                        if audio_file.is_file() and audio_file.suffix.lower() in {".flac", ".mp3", ".m4a", ".aac", ".ogg", ".wav"}:
-                            has_albums = True
-                            break
-                    if has_albums:
-                        break
+            try:
+                for subdir in dir_path.iterdir():
+                    if subdir.is_dir():
+                        try:
+                            # Check if subdir has audio files (it's an album)
+                            for audio_file in subdir.iterdir():
+                                if audio_file.is_file() and audio_file.suffix.lower() in {".flac", ".mp3", ".m4a", ".aac", ".ogg", ".wav"}:
+                                    has_albums = True
+                                    break
+                            if has_albums:
+                                break
+                        except (PermissionError, OSError) as e:
+                            # Skip directories we can't access (network path issues, permissions)
+                            from structured_logging import logmsg
+                            logmsg.verbose("Skipping inaccessible directory: {path} ({error})", path=str(subdir), error=str(e))
+                            continue
+            except (PermissionError, OSError) as e:
+                # Skip directories we can't access (network path issues, permissions)
+                from structured_logging import logmsg
+                logmsg.verbose("Skipping inaccessible directory: {path} ({error})", path=str(dir_path), error=str(e))
+                continue
             
             # If this looks like an artist folder (parent of album folders), process it
             if has_albums and dir_path not in artist_dirs_processed:
@@ -545,19 +528,35 @@ def main() -> None:
         sys.exit(exit_code)
 
     except Exception as e:
-        import sys
         from logging_utils import logger
         from structured_logging import logmsg
         
         # Log to old logger (with traceback)
         logger.exception("Fatal error during run")
-        
         # Also log to new structured logging with full traceback
         logmsg.exception("Fatal error during run", exc_info=sys.exc_info())
         
-        error_msg = f"Fatal error during run: {e}"
-        # Skip error logging in exit_with_error since we already logged the exception with traceback
-        exit_with_error(error_msg, skip_error_log=True)
+        # Write summaries (error already logged above, don't duplicate in exit_with_error)
+        try:
+            write_summary_log(args.mode, DRY_RUN)
+            logmsg.write_summary(args.mode, DRY_RUN)
+            notify_run_summary(args.mode)
+        except Exception as summary_error:
+            # If summary writing fails, log it but continue to prompt
+            logger.exception("Error writing summary logs")
+        
+        # Keep console open for user to review
+        if sys.platform == "win32":
+            try:
+                sys.stdout.flush()
+                sys.stderr.flush()
+                print()  # Add blank line before prompt
+                print("Press Enter to close this window...", flush=True)
+                input()
+            except (EOFError, KeyboardInterrupt, OSError, AttributeError):
+                pass  # stdin not available - likely running from tray launcher
+        
+        sys.exit(1)
 
 
 if __name__ == "__main__":
