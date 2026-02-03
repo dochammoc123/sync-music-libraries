@@ -6,7 +6,7 @@ set -e
 
 DOWNLOADS_MUSIC="$HOME/Downloads/Music"
 TEST_MUSIC_ROOT="smb:/ROCK/Data/Storage/InternalStorage/Music"
-TEST_T8_ROOT="smb:/10.0.1.222/Share/EB5E-E9D3/Music"
+TEST_T8_ROOT="smb:/10.0.1.222/Share/Storage/Music"
 BACKUP_ROOT="smb:/ROCK/Data/Storage/InternalStorage/_EmbeddedArtOriginal"
 UPDATE_ROOT="smb:/ROCK/Data/Storage/InternalStorage/_UpdateOverlay"
 

@@ -78,12 +78,11 @@ echo.
 echo Files deployed to: %DEPLOY_FOLDER%
 echo.
 echo To test:
-echo   1. Activate venv: C:\Users\docha\local_python_envs\t8sync\Scripts\activate
+echo   1. Activate venv: 
+echo      C:\Users\docha\local_python_envs\t8sync\.venv\Scripts\activate
 echo   2. cd /d "%DEPLOY_FOLDER%"
 echo   3. python test_quick.py
 echo   4. python main.py --mode normal --dry
 echo.
-echo Or use your existing test scripts (safe_test_run.bat, etc.)
-echo.
-pause
 
+pause

@@ -19,7 +19,7 @@ from artwork import (
     fixup_missing_art,
     init_musicbrainz,
 )
-from config import MIN_DISK_CAPACITY_BYTES, MUSIC_ROOT, T8_ROOT, check_disk_capacity
+from config import MIN_DISK_CAPACITY_BYTES, MUSIC_ROOT, SYSTEM, T8_ROOT, check_disk_capacity
 from file_operations import process_downloads, upgrade_albums_to_flac_only
 from logging_utils import (
     add_global_warning,
@@ -117,6 +117,7 @@ def main() -> None:
             exit_code: Exit code (default 1)
             is_error: If True, log as error; if False, log as warning (e.g., for DRY_RUN scenarios)
         """
+        import sys  # Ensure sys is available in this scope
         log(error_msg)
         # Strip "ERROR:" or "WARNING:" prefix if present
         clean_msg = error_msg
@@ -167,52 +168,62 @@ def main() -> None:
     try:
         # Check ROON (MUSIC_ROOT) drive
         log(f"  Checking ROON drive: {MUSIC_ROOT}")
-        has_capacity, capacity_gb, checked_path = check_disk_capacity(MUSIC_ROOT, MIN_DISK_CAPACITY_BYTES)
-        if not has_capacity:
-            # Treat capacity <= 1 GB as "unknown" (likely a network share that can't report capacity reliably)
-            # This prevents false positives where network shares return 0 or very small values
-            if capacity_gb <= 1.0:
-                # Capacity unknown (network shares may not report capacity reliably)
-                # Check if path is at least accessible
-                try:
-                    test_access = MUSIC_ROOT if MUSIC_ROOT.exists() else MUSIC_ROOT.parent
-                    if test_access.exists():
-                        log(f"  INFO: ROON drive ({checked_path}) capacity could not be determined, but path is accessible.")
-                        log(f"  Allowing operation (network shares may not report capacity reliably).")
-                        # Use verbose for new API (network shares often can't report capacity - this is normal)
-                        from structured_logging import logmsg
-                        logmsg.verbose("ROON drive capacity check inconclusive - path accessible but capacity unknown (network shares may not report capacity reliably)")
-                    else:
-                        # Path not accessible
-                        error_msg = (
-                            f"ERROR: Could not verify disk capacity for ROON drive ({checked_path}).\n"
-                            f"  The drive appears to be inaccessible.\n"
-                            f"  Required: {min_tb:.2f} TB minimum total capacity.\n"
-                            f"This check protects system drives on the server. Exiting."
-                        )
-                        exit_with_error(error_msg)
-                except Exception as e:
-                    # In dry-run, allow it to continue with warning (might be a temporary network issue)
+        # Check if this is a network share - they often report incorrect capacity
+        is_network_share = (
+            (SYSTEM == "Windows" and str(MUSIC_ROOT).startswith("\\\\")) or
+            (SYSTEM == "Darwin" and str(MUSIC_ROOT).startswith("SMB:"))
+        )
+        
+        if is_network_share:
+            # Network shares often report incorrect capacity - just check if path is accessible
+            try:
+                test_access = MUSIC_ROOT if MUSIC_ROOT.exists() else MUSIC_ROOT.parent
+                if test_access.exists():
+                    log(f"  INFO: ROON drive ({MUSIC_ROOT}) is accessible (network share - capacity check skipped)")
+                    logmsg.verbose("ROON drive is a network share - capacity check skipped (network shares may not report capacity reliably)")
+                    # Don't check capacity for network shares - they're unreliable
+                    pass
+                else:
+                    # Path not accessible
                     if DRY_RUN:
-                        log(f"  WARNING: Could not access ROON drive ({checked_path}) in DRY RUN: {e}")
-                        log(f"  DRY RUN: Continuing with warning (path may be temporarily inaccessible).")
-                        add_global_warning(f"ROON drive access check failed in DRY RUN - continuing with warning: {e}")
+                        log(f"  WARNING: ROON drive ({MUSIC_ROOT}) appears to be inaccessible.")
+                        log(f"  DRY RUN: Continuing with warning (drive may be offline).")
+                        add_global_warning(f"ROON drive inaccessible in DRY RUN - continuing with warning (drive may be offline)")
+                        logmsg.warn("ROON drive appears to be inaccessible in DRY RUN - continuing with warning")
                     else:
                         error_msg = (
-                            f"ERROR: Could not access ROON drive ({checked_path}): {e}\n"
-                            f"  Required: {min_tb:.2f} TB minimum total capacity.\n"
-                            f"This check protects system drives on the server. Exiting."
+                            f"ERROR: ROON drive ({MUSIC_ROOT}) is not accessible.\n"
+                            f"Path may be inaccessible or drive may be offline.\n"
+                            f"Please verify the ROON drive is accessible and try again."
                         )
-                        exit_with_error(error_msg)
-            else:
-                # Drive too small (likely a system drive) - only fail if > 1GB (real capacity, not unknown)
-                # In dry-run mode, allow it to continue with warning (no changes will be made anyway)
+                        exit_with_error(error_msg, exit_code=1, is_error=True)
+            except Exception as e:
+                # In dry-run, allow it to continue with warning (might be a temporary network issue)
                 if DRY_RUN:
-                    log(f"  WARNING: ROON drive ({checked_path}) capacity is too small.")
+                    log(f"  WARNING: Could not access ROON drive ({MUSIC_ROOT}) in DRY RUN: {e}")
+                    log(f"  DRY RUN: Continuing with warning (path may be temporarily inaccessible).")
+                    add_global_warning(f"ROON drive access check failed in DRY RUN - continuing with warning: {e}")
+                    logmsg.warn("ROON drive access check failed in DRY RUN - continuing with warning: {error}", error=str(e))
+                else:
+                    error_msg = (
+                        f"ERROR: Could not access ROON drive ({MUSIC_ROOT}): {e}\n"
+                        f"Please verify the ROON drive is accessible and try again."
+                    )
+                    exit_with_error(error_msg, exit_code=1, is_error=True)
+        else:
+            # Not a network share - do capacity check
+            has_capacity, capacity_gb, checked_path = check_disk_capacity(MUSIC_ROOT, MIN_DISK_CAPACITY_BYTES)
+            if has_capacity:
+                log(f"  ROON drive ({checked_path}): {capacity_gb:.2f} GB capacity ({capacity_gb / 1024:.2f} TB) - OK")
+            else:
+                # Capacity check failed
+                log(f"  WARNING: ROON drive ({checked_path}) capacity is too small.")
+                if DRY_RUN:
                     log(f"  Required: {min_tb:.2f} TB minimum")
                     log(f"  Actual: {capacity_gb:.2f} GB ({capacity_gb / 1024:.2f} TB)")
                     log(f"  DRY RUN: Allowing operation to continue (no changes will be made).")
                     add_global_warning(f"ROON drive capacity too small ({capacity_gb:.2f} GB) - continuing in DRY RUN mode")
+                    logmsg.warn("ROON drive capacity too small in DRY RUN - continuing with warning: {capacity} GB", capacity=capacity_gb)
                 else:
                     error_msg = (
                         f"ERROR: ROON drive ({checked_path}) capacity is too small.\n"
@@ -220,57 +231,60 @@ def main() -> None:
                         f"  Actual: {capacity_gb:.2f} GB ({capacity_gb / 1024:.2f} TB)\n"
                         f"This check protects system drives on the server. Exiting."
                     )
-                    exit_with_error(error_msg)
-        else:
-            log(f"  ROON drive ({checked_path}): {capacity_gb:.2f} GB capacity ({capacity_gb / 1024:.2f} TB) - OK")
+                    exit_with_error(error_msg, exit_code=1, is_error=True)
         
         # Check T8 drive
         if T8_ROOT is not None:
             log(f"  Checking T8 drive: {T8_ROOT}")
-            has_capacity, capacity_gb, checked_path = check_disk_capacity(T8_ROOT, MIN_DISK_CAPACITY_BYTES)
-            if not has_capacity:
-                # Treat capacity <= 1 GB as "unknown" (likely a network share that can't report capacity reliably)
-                # This prevents false positives where network shares return 0 or very small values
-                if capacity_gb <= 1.0:
-                    # Capacity unknown (network shares may not report capacity reliably)
-                    # Check if path is at least accessible
-                    try:
-                        test_access = T8_ROOT if T8_ROOT.exists() else T8_ROOT.parent
-                        if test_access.exists():
-                            log(f"  INFO: T8 drive ({checked_path}) capacity could not be determined, but path is accessible.")
-                            log(f"  Allowing operation (network shares may not report capacity reliably).")
-                            # Use verbose for new API (network shares often can't report capacity - this is normal)
-                            from structured_logging import logmsg
-                            logmsg.verbose("T8 drive capacity check inconclusive - path accessible but capacity unknown (network shares may not report capacity reliably)")
-                        else:
-                            # Path not accessible - in dry-run, allow with warning (for testing when T8 is offline)
-                            if DRY_RUN:
-                                log(f"  WARNING: T8 drive ({checked_path}) appears to be inaccessible.")
-                                log(f"  DRY RUN: Continuing with warning (drive may be offline or IP changed).")
-                                add_global_warning(f"T8 drive inaccessible in DRY RUN - continuing with warning (drive may be offline)")
-                            else:
-                                error_msg = (
-                                    f"ERROR: Could not verify disk capacity for T8 drive ({checked_path}).\n"
-                                    f"  The drive appears to be inaccessible.\n"
-                                    f"  Required: {min_tb:.2f} TB minimum total capacity.\n"
-                                    f"This check protects system drives on the server. Exiting."
-                                )
-                                exit_with_error(error_msg)
-                    except Exception as e:
-                        # In dry-run, allow it to continue with warning (might be a temporary network issue)
+            # Check if this is a network share - they often report incorrect capacity
+            is_network_share = (
+                (SYSTEM == "Windows" and str(T8_ROOT).startswith("\\\\")) or
+                (SYSTEM == "Darwin" and str(T8_ROOT).startswith("SMB:"))
+            )
+            
+            if is_network_share:
+                # Network shares often report incorrect capacity - just check if path is accessible
+                try:
+                    test_access = T8_ROOT if T8_ROOT.exists() else T8_ROOT.parent
+                    if test_access.exists():
+                        log(f"  INFO: T8 drive ({T8_ROOT}) is accessible (network share - capacity check skipped)")
+                        logmsg.verbose("T8 drive is a network share - capacity check skipped (network shares may not report capacity reliably)")
+                        # Don't check capacity for network shares - they're unreliable
+                        pass
+                    else:
+                        # Path not accessible - in dry-run, allow with warning (for testing when T8 is offline)
                         if DRY_RUN:
-                            log(f"  WARNING: Could not access T8 drive ({checked_path}) in DRY RUN: {e}")
-                            log(f"  DRY RUN: Continuing with warning (path may be temporarily inaccessible).")
-                            add_global_warning(f"T8 drive access check failed in DRY RUN - continuing with warning: {e}")
+                            log(f"  WARNING: T8 drive ({T8_ROOT}) appears to be inaccessible.")
+                            log(f"  DRY RUN: Continuing with warning (drive may be offline or IP changed).")
+                            add_global_warning(f"T8 drive inaccessible in DRY RUN - continuing with warning (drive may be offline)")
+                            logmsg.warn("T8 drive appears to be inaccessible in DRY RUN - continuing with warning")
                         else:
                             error_msg = (
-                                f"ERROR: Could not access T8 drive ({checked_path}): {e}\n"
-                                f"  Required: {min_tb:.2f} TB minimum total capacity.\n"
-                                f"This check protects system drives on the server. Exiting."
+                                f"ERROR: T8 drive ({T8_ROOT}) is not accessible.\n"
+                                f"Path may be inaccessible or drive may be offline.\n"
+                                f"Please verify the T8 drive is accessible and try again."
                             )
-                            exit_with_error(error_msg)
+                            exit_with_error(error_msg, exit_code=1, is_error=True)
+                except Exception as e:
+                    # In dry-run, allow it to continue with warning (might be a temporary network issue)
+                    if DRY_RUN:
+                        log(f"  WARNING: Could not access T8 drive ({T8_ROOT}) in DRY RUN: {e}")
+                        log(f"  DRY RUN: Continuing with warning (path may be temporarily inaccessible).")
+                        add_global_warning(f"T8 drive access check failed in DRY RUN - continuing with warning: {e}")
+                        logmsg.warn("T8 drive access check failed in DRY RUN - continuing with warning: {error}", error=str(e))
+                    else:
+                        error_msg = (
+                            f"ERROR: Could not access T8 drive ({T8_ROOT}): {e}\n"
+                            f"Please verify the T8 drive is accessible and try again."
+                        )
+                        exit_with_error(error_msg, exit_code=1, is_error=True)
+            else:
+                # Not a network share - do capacity check
+                has_capacity, capacity_gb, checked_path = check_disk_capacity(T8_ROOT, MIN_DISK_CAPACITY_BYTES)
+                if has_capacity:
+                    log(f"  T8 drive ({checked_path}): {capacity_gb:.2f} GB capacity ({capacity_gb / 1024:.2f} TB) - OK")
                 else:
-                    # Drive too small (likely a system drive) - only fail if > 1GB (real capacity, not unknown)
+                    # Drive too small (likely a system drive)
                     # In dry-run mode, allow it to continue with warning (no changes will be made anyway)
                     if DRY_RUN:
                         log(f"  WARNING: T8 drive ({checked_path}) capacity is too small.")
@@ -278,6 +292,7 @@ def main() -> None:
                         log(f"  Actual: {capacity_gb:.2f} GB ({capacity_gb / 1024:.2f} TB)")
                         log(f"  DRY RUN: Allowing operation to continue (no changes will be made).")
                         add_global_warning(f"T8 drive capacity too small ({capacity_gb:.2f} GB) - continuing in DRY RUN mode")
+                        logmsg.warn("T8 drive capacity too small in DRY RUN - continuing with warning: {capacity} GB", capacity=capacity_gb)
                     else:
                         error_msg = (
                             f"ERROR: T8 drive ({checked_path}) capacity is too small.\n"
@@ -285,9 +300,7 @@ def main() -> None:
                             f"  Actual: {capacity_gb:.2f} GB ({capacity_gb / 1024:.2f} TB)\n"
                             f"This check protects system drives on the server. Exiting."
                         )
-                        exit_with_error(error_msg)
-            else:
-                log(f"  T8 drive ({checked_path}): {capacity_gb:.2f} GB capacity ({capacity_gb / 1024:.2f} TB) - OK")
+                        exit_with_error(error_msg, exit_code=1, is_error=True)
         
         log("Disk capacity check passed.\n")
     except Exception as e:
@@ -472,10 +485,10 @@ def main() -> None:
                     ensure_artist_images(dir_path, artist_name, DRY_RUN)
                     artist_dirs_processed.add(dir_path)
 
-        log("\nStep 8: Sync backup folder (remove identical backups, restore missing files)...")
+        log("\nStep 8: Sync backup folder (remove identical backups, remove orphan backups)...")
         header_key = logmsg.set_header("Step 8: Sync backup folder", "%msg% (%count% items)", key=header_key)
         from sync_operations import sync_backups
-        sync_backups(DRY_RUN)
+        sync_backups(DRY_RUN, use_checksums=None)  # Uses T8_SYNC_USE_CHECKSUMS from config
 
         log("\nStep 9: Final missing-art fixup...")
         header_key = logmsg.set_header("Step 9: Final missing-art fixup", "%msg% (%count% items)", key=header_key)
@@ -534,9 +547,8 @@ def main() -> None:
         total_warnings = new_warnings + old_warnings
         
         # Determine exit code: errors = 1 (red), warnings only = 2 (yellow), clean = 0 (green)
-        # Debug: Log counts for troubleshooting
-        if total_errors > 0 or total_warnings > 0:
-            log(f"[DEBUG] Error/Warning counts - Old API: {old_errors} errors, {old_warnings} warnings | New API: {new_errors} errors, {new_warnings} warnings | Total: {total_errors} errors, {total_warnings} warnings")
+        # Debug: Always log counts for troubleshooting (even if 0, helps diagnose issues)
+        log(f"[DEBUG] Error/Warning counts - Old API: {old_errors} errors, {old_warnings} warnings | New API: {new_errors} errors, {new_warnings} warnings | Total: {total_errors} errors, {total_warnings} warnings")
         
         if total_errors > 0:
             exit_code = 1
@@ -548,7 +560,7 @@ def main() -> None:
         # Summary is already printed by logmsg.write_summary() (new API)
         # Old summary printing is now redundant but kept for compatibility
         
-        # Log exit status before prompt
+        # Log exit status
         if exit_code == 1:
             log(f"Exiting with code 1 ({total_errors} error(s)) - systray will show red error icon")
         elif exit_code == 2:
@@ -556,24 +568,52 @@ def main() -> None:
         else:
             log("Exiting with code 0 (success) - systray will show idle icon")
         
-        # Keep console open for user to review
+        # IMPORTANT: Set exit code early and flush logs before user interaction
+        # This ensures the correct exit code is used even if user closes the window
+        # Flush all logs to ensure they're written before potential window close
+        import sys
+        sys.stdout.flush()
+        sys.stderr.flush()
+        
+        # Final safety check: ensure exit_code is valid before exiting
+        if exit_code not in (0, 1, 2):
+            log(f"[ERROR] Invalid exit code {exit_code}, defaulting to 1")
+            exit_code = 1
+        
+        # Log final exit code one more time for debugging
+        log(f"[DEBUG] Final exit code: {exit_code} (about to call sys.exit)")
+        sys.stdout.flush()
+        sys.stderr.flush()
+        
+        # Keep console open for user to review (only if running interactively)
         # On Windows, always try to wait for input when run from console
         # When run from tray launcher, this will fail gracefully and exit immediately
-        if sys.platform == "win32":
-            try:
-                # Try to wait for user input - this keeps console open
-                # If stdin is not available (tray launcher), this will raise an exception
-                print()  # Add blank line before prompt
-                print("Press Enter to close this window...")  # Use print() not log() - log() doesn't write to console
-                input()
-            except (EOFError, KeyboardInterrupt, OSError, AttributeError):
-                # stdin not available or interrupted - likely running from tray launcher
-                # Just continue and exit (console will close automatically)
-                pass
+        # NOTE: If user closes window instead of pressing Enter, Windows may terminate
+        # the process with a different exit code. The exit_code is set above to minimize
+        # the window where this could happen.
+        try:
+            if sys.platform == "win32":
+                try:
+                    # Try to wait for user input - this keeps console open
+                    # If stdin is not available (tray launcher), this will raise an exception
+                    print()  # Add blank line before prompt
+                    print("Press Enter to close this window...")  # Use print() not log() - log() doesn't write to console
+                    print(f"(Exit code is already set to {exit_code} - closing window may show wrong icon)")  # Inform user
+                    input()
+                except (EOFError, KeyboardInterrupt, OSError, AttributeError):
+                    # stdin not available or interrupted - likely running from tray launcher
+                    # Just continue and exit (console will close automatically)
+                    pass
+        except Exception as e:
+            # If anything fails here, log it but preserve the exit_code
+            log(f"[WARN] Error during final cleanup: {e} - preserving exit code {exit_code}")
+            sys.stdout.flush()
+            sys.stderr.flush()
         
         sys.exit(exit_code)
 
     except Exception as e:
+        import sys  # Ensure sys is available in exception handler
         from logging_utils import logger
         from structured_logging import logmsg
         

@@ -583,7 +583,13 @@ def ensure_cover_and_folder(
         if not folder_path.exists():
             log("  cover.jpg exists, creating folder.jpg from it")
             if not dry_run:
-                shutil.copy2(cover_path, folder_path)
+                try:
+                    shutil.copy2(cover_path, folder_path)
+                    log("  ✓ folder.jpg created successfully")
+                except Exception as e:
+                    log(f"  [WARN] Failed to create folder.jpg: {e}")
+                    if label:
+                        add_album_warning_label(label, f"Failed to create folder.jpg: {e}")
         return
 
     # Neither exists - try to create cover.jpg from embedded art or web
@@ -611,7 +617,13 @@ def ensure_cover_and_folder(
     if cover_path.exists() and not folder_path.exists():
         log("  Creating folder.jpg from cover.jpg")
         if not dry_run:
-            shutil.copy2(cover_path, folder_path)
+            try:
+                shutil.copy2(cover_path, folder_path)
+                log("  ✓ folder.jpg created successfully")
+            except Exception as e:
+                log(f"  [WARN] Failed to create folder.jpg: {e}")
+                if label:
+                    add_album_warning_label(label, f"Failed to create folder.jpg: {e}")
 
 
 def embed_art_into_flacs(album_dir: Path, dry_run: bool = False, backup_enabled: bool = True) -> None:
@@ -815,15 +827,8 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                     except Exception:
                         pass
                 
-                # Try MP4/M4A
-                if not has_embedded_art and (use_format in {'mp4', 'm4a'} or p.suffix.lower() in {".m4a", ".mp4", ".m4v"}):
-                    try:
-                        audio = MP4(str(p))
-                        if "\xa9cov" in audio:
-                            has_embedded_art = True
-                            log(f"  [EMBED] {p.name} already has embedded art, skipping")
-                    except Exception:
-                        pass
+                # Skip MP4/M4A - they don't support embedded art reliably
+                # (check is done later to skip entirely)
                 
                 # Generic check for other formats
                 if not has_embedded_art:
@@ -841,6 +846,11 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                 # Don't skip - try to embed anyway if we can determine format later
 
             if has_embedded_art:
+                continue
+
+            # Skip MP4/M4A files - they don't support embedded art reliably
+            if p.suffix.lower() in {".m4a", ".mp4", ".m4v"}:
+                log(f"  [EMBED] Skipping {p.name} - MP4/M4A format does not support embedded art")
                 continue
 
             if cover_data is None:
@@ -922,24 +932,16 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                         embedded = True
                     except Exception as e:
                         if p.suffix.lower() == ".mp3":
-                            log(f"    [WARN] File has .mp3 extension but is not valid MP3, trying other formats: {e}")
+                            # Don't log the exception object directly (may contain binary data)
+                            error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
+                            # Truncate very long error messages
+                            if len(error_msg) > 200:
+                                error_msg = error_msg[:197] + "..."
+                            log(f"    [WARN] File has .mp3 extension but is not valid MP3, trying other formats: {error_msg}")
                         else:
                             raise
                 
-                # Try MP4/M4A if FLAC and MP3 didn't work
-                if not embedded and (use_format in {'mp4', 'm4a'} or p.suffix.lower() in {".m4a", ".mp4", ".m4v"}):
-                    try:
-                        audio = MP4(str(p))
-                        audio["\xa9cov"] = [MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)]
-                        audio.save()
-                        log(f"    ✓ Embedded art into {p.name} (MP4/M4A)")
-                        total_embedded += 1
-                        embedded = True
-                    except Exception as e:
-                        if p.suffix.lower() in {".m4a", ".mp4", ".m4v"}:
-                            log(f"    [WARN] File has MP4 extension but is not valid MP4, trying generic: {e}")
-                        else:
-                            raise
+                # MP4/M4A files are skipped earlier - no need to try here
                 
                 # Try generic MutagenFile for other formats
                 if not embedded:
@@ -960,15 +962,31 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                                 embedded = True
                             else:
                                 log(f"  [EMBED WARN] Format {p.suffix} does not support embedded art")
+                                if label:
+                                    add_album_warning_label(label, f"[WARN] Format {p.suffix} does not support embedded art")
                     except Exception as e:
-                        log(f"  [EMBED WARN] Could not embed art using generic method: {e}")
+                        # Don't log the exception object directly (may contain binary data)
+                        error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
+                        # Truncate very long error messages
+                        if len(error_msg) > 200:
+                            error_msg = error_msg[:197] + "..."
+                        log(f"  [EMBED WARN] Could not embed art using generic method: {error_msg}")
+                        if label:
+                            add_album_warning_label(label, f"[WARN] Could not embed art using generic method: {error_msg}")
                 
                 if not embedded:
                     log(f"  [EMBED WARN] Could not determine format or embed art into {p.name}")
+                    if label:
+                        add_album_warning_label(label, f"[WARN] Could not determine format or embed art into {p.name}")
             except Exception as e:
-                log(f"  [EMBED WARN] Failed to embed art into {p}: {e}")
+                # Don't log the exception object directly (may contain binary data)
+                error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
+                # Truncate very long error messages
+                if len(error_msg) > 200:
+                    error_msg = error_msg[:197] + "..."
+                log(f"  [EMBED WARN] Failed to embed art into {p}: {error_msg}")
                 if label:
-                    add_album_warning_label(label, f"[WARN] Failed to embed art into {p}: {e}")
+                    add_album_warning_label(label, f"[WARN] Failed to embed art into {p}: {error_msg}")
 
         if embedded_any and label:
             add_album_event_label(label, "Embedded missing art.")

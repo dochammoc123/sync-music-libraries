@@ -62,7 +62,14 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
     updated_album_dirs: Set[Path] = set()
     albums_with_new_cover: Set[Path] = set()
 
+    # Create UPDATE_ROOT if it doesn't exist
     if not UPDATE_ROOT.exists():
+        if not dry_run:
+            UPDATE_ROOT.mkdir(parents=True, exist_ok=True)
+            log(f"[UPDATE] Created UPDATE overlay root: {UPDATE_ROOT}")
+        else:
+            log(f"[UPDATE] Would create UPDATE overlay root: {UPDATE_ROOT}")
+        # If dry run or if folder was just created, return early (no files to process yet)
         return updated_album_dirs, albums_with_new_cover
 
     log(f"\n[UPDATE] Applying overlay from {UPDATE_ROOT} -> {MUSIC_ROOT}")
@@ -73,33 +80,8 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
 
         rel = src.relative_to(UPDATE_ROOT)
         
-        # Normalize audio filenames using tags (same logic as downloads)
-        if src.suffix.lower() in AUDIO_EXT:
-            ext = src.suffix
-            # Try to read tags from source file for filename generation (same as downloads)
-            tags_to_use = None
-            try:
-                from tag_operations import get_tags
-                original_tags = get_tags(src)
-                if original_tags and original_tags.get("title") and original_tags.get("tracknum", 0) > 0:
-                    # File has good tags, use them for filename (same as downloads)
-                    tags_to_use = original_tags.copy()
-            except Exception:
-                # Can't read tags, will use original filename (same as downloads fallback)
-                pass
-            
-            if tags_to_use:
-                # Generate filename from tags (same as downloads)
-                from tag_operations import format_track_filename
-                normalized_filename = format_track_filename(tags_to_use, ext)
-                # Update rel to use normalized filename
-                rel = rel.parent / normalized_filename
-                log(f"  [UPDATE AUDIO] Normalized filename: {src.name} -> {normalized_filename}")
-                logmsg.verbose("Normalized filename: %item% -> {normalized}", normalized=normalized_filename)
-            else:
-                # No tags or incomplete tags, use original filename (same as downloads fallback)
-                log(f"  [UPDATE AUDIO] No tags found, using original filename: {src.name}")
-                logmsg.verbose("No tags found, using original filename: %item%")
+        # Overlay is "dumb" - preserve original filenames, no normalization
+        # User manually placed the file with the exact name they want
         
         dest = MUSIC_ROOT / rel
         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -110,66 +92,15 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
             # Set item context for this file
             item_key = logmsg.set_item(str(src.name))
             try:
-                if src.suffix.lower() in AUDIO_EXT:
-                    # Check if destination exists - compare frequency first, then file size
-                    # Handles partial/corrupted files and frequency upgrades
-                    # We also check for suspiciously small file sizes (heuristic warning)
-                    should_copy = True
-                    
-                    # Check source file for size warnings (may indicate truncation)
-                    from tag_operations import check_file_size_warning
-                    size_warning = check_file_size_warning(src)
-                    if size_warning:
-                        level, message = size_warning
-                        log(f"  [UPDATE {level}] {src.name}: {message}")
-                        if level == "WARN":
-                            logmsg.warn("%item%: {warning_msg}", warning_msg=message)
-                        elif level == "ERROR":
-                            logmsg.error("%item%: {error_msg}", error_msg=message)
-                    
-                    if dest.exists():
-                        from tag_operations import get_sample_rate
-                        
-                        src_size = src.stat().st_size
-                        dest_size = dest.stat().st_size
-                        src_freq = get_sample_rate(src)
-                        dest_freq = get_sample_rate(dest)
-                        
-                        # Compare: frequency first, then file size
-                        upgrade_reason = []
-                        if src_freq and dest_freq:
-                            if src_freq > dest_freq:
-                                upgrade_reason.append(f"frequency: {src_freq}Hz > {dest_freq}Hz")
-                        should_copy = True
-                    elif src_freq < dest_freq:
-                        should_copy = False
-                        log(f"  [UPDATE SKIP] {dest.name} (existing has higher frequency: {dest_freq}Hz > {src_freq}Hz)")
-                        logmsg.info("SKIP: %item% (existing has higher frequency: {dest_freq}Hz > {src_freq}Hz)", dest_freq=dest_freq, src_freq=src_freq)
-                    else:
-                        # Same frequency, compare file size
-                        if src_size > dest_size:
-                            upgrade_reason.append(f"size: {src_size} > {dest_size} bytes")
-                            should_copy = True
-                        else:
-                            should_copy = False
-                            log(f"  [UPDATE SKIP] {dest.name} (same frequency {src_freq}Hz, existing file is larger or equal: {dest_size} >= {src_size} bytes)")
-                            logmsg.info("SKIP: %item% (same frequency {freq}Hz, existing file is larger or equal: {dest_size} >= {src_size} bytes)", freq=src_freq, dest_size=dest_size, src_size=src_size)
-                else:
-                    # Can't determine frequency, fall back to file size only
-                    if src_size > dest_size:
-                        upgrade_reason.append(f"size: {src_size} > {dest_size} bytes")
-                        should_copy = True
-                    else:
-                        should_copy = False
-                        log(f"  [UPDATE SKIP] {dest.name} (existing file is larger or equal: {dest_size} >= {src_size} bytes)")
-                        logmsg.info("SKIP: %item% (existing file is larger or equal: {dest_size} >= {src_size} bytes)", dest_size=dest_size, src_size=src_size)
+                # Initialize variables that may be used later
+                should_copy = True
+                upgrade_reason = []
+                src_freq = None
+                dest_freq = None
                 
-                if should_copy and upgrade_reason:
-                    freq_str = f" ({src_freq}Hz vs {dest_freq}Hz)" if src_freq and dest_freq else ""
-                    log(f"  [UPDATE UPGRADE] {dest.name}{freq_str} - {', '.join(upgrade_reason)}")
-                    logmsg.info("UPGRADE: %item%{freq_str} - {reasons}", freq_str=freq_str, reasons=', '.join(upgrade_reason))
-            
-                if should_copy:
+                if src.suffix.lower() in AUDIO_EXT:
+                    # Overlay is "dumb" - just copy files as-is, no smart comparisons
+                    # User manually placed the file, so trust their judgment
                     log(f"  [UPDATE AUDIO] {src} -> {dest}")
                     logmsg.info("COPY: %item% -> {dest}", dest=str(dest))
                     if not dry_run:
@@ -178,45 +109,10 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
                         updated_album_dirs.add(dest.parent)
                 else:
                     # Handle non-audio files (artwork, etc.)
-                    # Normalize artwork filenames based on location (album vs artist folder)
+                    # Simple overlay: copy files as-is, no normalization
+                    # If you want embedding to work, name it cover.jpg yourself
                     image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
                     is_image = src.suffix.lower() in image_extensions
-                    
-                    if is_image:
-                        # Determine if this is an album folder or artist folder
-                        # Album folder: MUSIC_ROOT/Artist/(Year) Album/image.jpg
-                        # Artist folder: MUSIC_ROOT/Artist/image.jpg
-                        dest_parent = dest.parent
-                        dest_grandparent = dest_parent.parent
-                        
-                        # Check if this is an artist folder (parent's parent is MUSIC_ROOT)
-                        is_artist_folder = False
-                        try:
-                            if dest_grandparent == MUSIC_ROOT:
-                                # Artist folder: MUSIC_ROOT/Artist/image.jpg
-                                is_artist_folder = True
-                            else:
-                                # Album folder: MUSIC_ROOT/Artist/(Year) Album/image.jpg
-                                # Parent should have audio files (it's an album folder)
-                                is_artist_folder = False
-                        except (ValueError, AttributeError):
-                            # If we can't determine relationship, assume it's an album folder (safer default)
-                            is_artist_folder = False
-                        
-                        if is_artist_folder:
-                            # Artist artwork: normalize to folder.jpg (preferred for artists)
-                            # Location is already correct (artist folder), just normalize filename
-                            normalized_dest = dest_parent / "folder.jpg"
-                            log(f"  [UPDATE ARTIST ART] Normalizing {src.name} -> folder.jpg in artist folder")
-                            logmsg.verbose("Normalizing %item% -> folder.jpg in artist folder")
-                            dest = normalized_dest
-                        else:
-                            # Album artwork: normalize to cover.jpg
-                            # Location is already correct (album folder), just normalize filename
-                            normalized_dest = dest_parent / "cover.jpg"
-                            log(f"  [UPDATE ALBUM ART] Normalizing {src.name} -> cover.jpg in album folder")
-                            logmsg.verbose("Normalizing %item% -> cover.jpg in album folder")
-                            dest = normalized_dest
                     
                     log(f"  [UPDATE ASSET] {src} -> {dest}")
                     logmsg.info("COPY: %item% -> {dest}", dest=str(dest))
@@ -243,7 +139,8 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
                         else:
                             shutil.copy2(src, dest)
                     updated_album_dirs.add(dest.parent)
-                    if is_image and not is_artist_folder and dest.name.lower() == "cover.jpg":
+                    # Track albums with new cover.jpg for embedding (Step 4 only looks for cover.jpg)
+                    if is_image and dest.name.lower() == "cover.jpg":
                         albums_with_new_cover.add(dest.parent)
             finally:
                 # Unset item context (common to both audio and non-audio file paths)
@@ -259,24 +156,10 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
             # Unset album context unconditionally (before next iteration or loop end)
             logmsg.unset_album(current_album_key)
 
-    # Add structured logging for updated albums
+    # Add structured logging for updated albums (old API only - for summary log compatibility)
     for album_dir in updated_album_dirs:
         label = album_label_from_dir(album_dir)
-        add_album_event_label(label, "Updated from overlay.")  # Old API
-        # Set album context temporarily to log the update event (polymorphic: accepts Path directly)
-        try:
-            album_key = logmsg.set_album(album_dir)
-            try:
-                item_key = logmsg.set_item("album_updated")
-                try:
-                    logmsg.info("Updated from overlay.")
-                finally:
-                    logmsg.unset_item(item_key)
-            finally:
-                logmsg.unset_album(album_key)
-        except Exception:
-            # If path extraction fails, skip structured logging for this album
-            pass
+        add_album_event_label(label, "Updated from overlay.")  # Old API only
 
     return updated_album_dirs, albums_with_new_cover
 
@@ -286,8 +169,16 @@ def sync_update_root_structure(dry_run: bool = False) -> None:
     Ensure UPDATE_ROOT has the same directory structure as MUSIC_ROOT, but no files.
     Remove any directories in UPDATE_ROOT that don't exist in MUSIC_ROOT.
     """
-    if not UPDATE_ROOT or not UPDATE_ROOT.exists():
+    if not UPDATE_ROOT:
         return
+    
+    # Create UPDATE_ROOT if it doesn't exist
+    if not UPDATE_ROOT.exists():
+        if not dry_run:
+            UPDATE_ROOT.mkdir(parents=True, exist_ok=True)
+            log(f"[UPDATE] Created UPDATE overlay root: {UPDATE_ROOT}")
+        else:
+            log(f"[UPDATE] Would create UPDATE overlay root: {UPDATE_ROOT}")
 
     log(f"\n[UPDATE] Syncing empty overlay directory structure under {UPDATE_ROOT}")
 
@@ -460,18 +351,21 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
                     pass
 
 
-def sync_backups(dry_run: bool = False) -> None:
+def sync_backups(dry_run: bool = False, use_checksums: bool = None) -> None:
     """
     Sync backup folder with live files:
-    - If backup and live file exist and are identical (same checksum): remove backup
-    - If backup exists but live file doesn't: restore backup, then remove backup
-    - If backup exists and live file is different: keep backup (live was modified)
+    - If backup and live file exist and are identical: remove backup
+    - If backup exists and live file is different: keep backup (files differ, backup may be needed)
+    - If backup exists but live file doesn't: remove orphan backup
     - Clean up empty folders including backup root
     
-    Goal: Only keep backups when we have a corresponding live file that is different.
+    Uses fast comparison (size + mtime) by default, or checksums if use_checksums=True.
     """
-    from config import BACKUP_ROOT, MUSIC_ROOT, CLEAN_EMPTY_BACKUP_FOLDERS
+    from config import BACKUP_ROOT, MUSIC_ROOT, CLEAN_EMPTY_BACKUP_FOLDERS, T8_SYNC_USE_CHECKSUMS
     from logging_utils import log, album_label_from_dir, add_album_event_label, add_album_warning_label
+    
+    if use_checksums is None:
+        use_checksums = T8_SYNC_USE_CHECKSUMS
     
     log(f"\n[SYNC BACKUP] Syncing backup folder with live files...")
     if not BACKUP_ROOT.exists():
@@ -511,48 +405,56 @@ def sync_backups(dry_run: bool = False) -> None:
             live_file = MUSIC_ROOT / rel
             
             if live_file.exists():
-                # Both backup and live file exist - compare checksums
-                backup_checksum = file_checksum(backup_file)
-                live_checksum = file_checksum(live_file)
+                # Both backup and live file exist - compare them
+                files_identical = False
                 
-                if backup_checksum and live_checksum:
-                    if backup_checksum == live_checksum:
-                        # Files are identical - remove backup (no need to keep it)
-                        log(f"  [SYNC BACKUP] Files identical, removing backup: {backup_file.name}")
-                        if not dry_run:
-                            try:
-                                backup_file.unlink()
-                                backups_removed += 1
-                            except Exception as e:
-                                log(f"    [WARN] Could not remove backup {backup_file}: {e}")
+                if use_checksums:
+                    # Use checksums (slower but accurate)
+                    backup_checksum = file_checksum(backup_file)
+                    live_checksum = file_checksum(live_file)
+                    
+                    if backup_checksum and live_checksum:
+                        files_identical = (backup_checksum == live_checksum)
                     else:
-                        # Files are different - keep backup (live file was modified)
-                        log(f"  [SYNC BACKUP] Files differ, keeping backup: {backup_file.name}")
+                        # Couldn't calculate checksums - assume different to be safe
+                        files_identical = False
                 else:
-                    # Couldn't calculate checksums - keep backup to be safe
-                    log(f"  [SYNC BACKUP] Could not compare checksums, keeping backup: {backup_file.name}")
-            else:
-                # Backup exists but live file doesn't - restore it
-                log(f"  [SYNC BACKUP] Live file missing, restoring: {backup_file.name} -> {live_file}")
-                if not dry_run:
+                    # Fast comparison: size + mtime (much faster)
                     try:
-                        live_file.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(backup_file, live_file)
-                        backups_restored += 1
-                        
-                        # Remove backup after restoring
+                        backup_stat = backup_file.stat()
+                        live_stat = live_file.stat()
+                        files_identical = (
+                            backup_stat.st_size == live_stat.st_size and
+                            abs(backup_stat.st_mtime - live_stat.st_mtime) < 1.0  # Within 1 second
+                        )
+                    except (OSError, FileNotFoundError):
+                        # Can't stat files - assume different to be safe
+                        files_identical = False
+                
+                if files_identical:
+                    # Files are identical - remove backup (no need to keep it)
+                    log(f"  [SYNC BACKUP] Files identical, removing backup: {backup_file.name}")
+                    if not dry_run:
                         try:
                             backup_file.unlink()
                             backups_removed += 1
                         except Exception as e:
-                            log(f"    [WARN] Could not delete backup after restore {backup_file}: {e}")
-                        
-                        label = album_label_from_dir(live_file.parent)
-                        add_album_event_label(label, "Restored missing file from backup.")
+                            log(f"    [WARN] Could not remove backup {backup_file}: {e}")
+                else:
+                    # Files are different - keep backup (files differ, backup may be needed)
+                    log(f"  [SYNC BACKUP] Files differ, keeping backup: {backup_file.name}")
+            else:
+                # Backup exists but live file doesn't - delete orphan backup
+                # If file was deleted from Music, backup is orphaned and shouldn't overwrite potential new original
+                log(f"  [SYNC BACKUP] Live file missing, removing orphan backup: {backup_file.name}")
+                if not dry_run:
+                    try:
+                        backup_file.unlink()
+                        backups_removed += 1
                     except Exception as e:
-                        log(f"    [WARN] Could not restore {backup_file}: {e}")
-                        label = album_label_from_dir(live_file.parent)
-                        add_album_warning_label(label, f"[WARN] Could not restore {backup_file}: {e}")
+                        log(f"    [WARN] Could not delete orphan backup {backup_file}: {e}")
+                        label = album_label_from_dir(backup_file.parent)
+                        add_album_warning_label(label, f"[WARN] Could not delete orphan backup {backup_file.name}: {e}")
         
         # Clean up empty directories after processing files
         if not dry_run and CLEAN_EMPTY_BACKUP_FOLDERS:

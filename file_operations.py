@@ -527,6 +527,14 @@ def move_album_from_downloads(
                     if not dry_run:
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         shutil.move(str(src), str(dest))
+                        # Remove any existing backup - this is a new original, backup is obsolete
+                        try:
+                            rel = dest.relative_to(music_root)
+                            from sync_operations import remove_backup_for
+                            remove_backup_for(rel, dry_run)
+                        except (ValueError, Exception) as e:
+                            # If we can't determine relative path or remove backup, log but continue
+                            logmsg.verbose("Could not remove backup for new original: {error}", error=str(e))
                     # Track destination file for use after moving (for artwork export, etc.)
                     dest_items.append((dest, tags_to_use))
                     # Track that this file was processed (moved)
