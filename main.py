@@ -324,17 +324,41 @@ def main() -> None:
             from logging_utils import ALBUM_SUMMARY, GLOBAL_WARNINGS
             from structured_logging import logmsg
             
-            # Count warnings from old API (old API doesn't distinguish errors from warnings)
-            old_total_warnings = sum(len(v["warnings"]) for v in ALBUM_SUMMARY.values()) + len(GLOBAL_WARNINGS)
+            # Count warnings/errors from old API (distinguish errors from warnings by [ERROR] prefix)
+            old_errors = 0
+            old_warnings = 0
+            
+            # Count errors and warnings in album summaries
+            for v in ALBUM_SUMMARY.values():
+                for warning in v.get("warnings", []):
+                    if warning.startswith("[ERROR]"):
+                        old_errors += 1
+                    else:
+                        old_warnings += 1
+            
+            # Count errors and warnings in global warnings
+            for warning in GLOBAL_WARNINGS:
+                if warning.startswith("[ERROR]"):
+                    old_errors += 1
+                else:
+                    old_warnings += 1
             
             # Get counts from new structured logging API (consolidated)
             new_errors = logmsg.count_errors
             new_warnings = logmsg.count_warnings
             
+            # Combine old and new API counts
+            total_errors = new_errors + old_errors
+            total_warnings = new_warnings + old_warnings
+            
             # Determine exit code: errors = 1 (red), warnings only = 2 (yellow), clean = 0 (green)
-            if new_errors > 0:
+            # Debug: Log counts for troubleshooting
+            if total_errors > 0 or total_warnings > 0:
+                log(f"[DEBUG] Error/Warning counts - Old API: {old_errors} errors, {old_warnings} warnings | New API: {new_errors} errors, {new_warnings} warnings | Total: {total_errors} errors, {total_warnings} warnings")
+            
+            if total_errors > 0:
                 exit_code = 1
-            elif new_warnings > 0 or old_total_warnings > 0:
+            elif total_warnings > 0:
                 exit_code = 2
             else:
                 exit_code = 0
@@ -346,11 +370,10 @@ def main() -> None:
                 log(f"[WARN] Could not print summary log: {e}")
             
             # Log exit status before prompt
-            total_warnings_count = new_errors + new_warnings + old_total_warnings
             if exit_code == 1:
-                log(f"Exiting with code 1 ({new_errors} error(s)) - systray will show red error icon")
+                log(f"Exiting with code 1 ({total_errors} error(s)) - systray will show red error icon")
             elif exit_code == 2:
-                log(f"Exiting with code 2 ({total_warnings_count} warning(s)) - systray will show yellow warning icon")
+                log(f"Exiting with code 2 ({total_warnings} warning(s)) - systray will show yellow warning icon")
             else:
                 log("Exiting with code 0 (success) - systray will show idle icon")
             
@@ -483,17 +506,41 @@ def main() -> None:
         from logging_utils import ALBUM_SUMMARY, GLOBAL_WARNINGS
         from structured_logging import logmsg
         
-        # Count warnings/errors from old API
-        old_total_warnings = sum(len(v["warnings"]) for v in ALBUM_SUMMARY.values()) + len(GLOBAL_WARNINGS)
+        # Count warnings/errors from old API (distinguish errors from warnings by [ERROR] prefix)
+        old_errors = 0
+        old_warnings = 0
+        
+        # Count errors and warnings in album summaries
+        for v in ALBUM_SUMMARY.values():
+            for warning in v.get("warnings", []):
+                if warning.startswith("[ERROR]"):
+                    old_errors += 1
+                else:
+                    old_warnings += 1
+        
+        # Count errors and warnings in global warnings
+        for warning in GLOBAL_WARNINGS:
+            if warning.startswith("[ERROR]"):
+                old_errors += 1
+            else:
+                old_warnings += 1
         
         # Get counts from new structured logging API (consolidated)
         new_errors = logmsg.count_errors
         new_warnings = logmsg.count_warnings
         
+        # Combine old and new API counts
+        total_errors = new_errors + old_errors
+        total_warnings = new_warnings + old_warnings
+        
         # Determine exit code: errors = 1 (red), warnings only = 2 (yellow), clean = 0 (green)
-        if new_errors > 0:
+        # Debug: Log counts for troubleshooting
+        if total_errors > 0 or total_warnings > 0:
+            log(f"[DEBUG] Error/Warning counts - Old API: {old_errors} errors, {old_warnings} warnings | New API: {new_errors} errors, {new_warnings} warnings | Total: {total_errors} errors, {total_warnings} warnings")
+        
+        if total_errors > 0:
             exit_code = 1
-        elif new_warnings > 0 or old_total_warnings > 0:
+        elif total_warnings > 0:
             exit_code = 2
         else:
             exit_code = 0
@@ -502,11 +549,10 @@ def main() -> None:
         # Old summary printing is now redundant but kept for compatibility
         
         # Log exit status before prompt
-        total_warnings_count = new_errors + new_warnings + old_total_warnings
         if exit_code == 1:
-            log(f"Exiting with code 1 ({new_errors} error(s)) - systray will show red error icon")
+            log(f"Exiting with code 1 ({total_errors} error(s)) - systray will show red error icon")
         elif exit_code == 2:
-            log(f"Exiting with code 2 ({total_warnings_count} warning(s)) - systray will show yellow warning icon")
+            log(f"Exiting with code 2 ({total_warnings} warning(s)) - systray will show yellow warning icon")
         else:
             log("Exiting with code 0 (success) - systray will show idle icon")
         

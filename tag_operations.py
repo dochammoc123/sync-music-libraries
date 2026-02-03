@@ -228,8 +228,11 @@ def check_file_size_warning(audio_path: Path) -> Optional[Tuple[str, str]]:
         except Exception:
             pass
         
-        # Calculate expected bitrate based on sample rate and format (NOT actual file bitrate)
-        # Truncated files will have artificially low bitrates, so we need expected values
+        # Calculate expected bitrate based on format
+        # For lossy formats (MP3, M4A, AAC): use actual bitrate if available (more accurate)
+        # For lossless formats (FLAC): use expected bitrate based on sample rate
+        # Truncated files may have incorrect bitrate metadata, but for lossy formats,
+        # using actual bitrate is more accurate than assuming all MP3s are 320kbps
         expected_bitrate = None
         if format_name == "flac" and sample_rate:
             # FLAC: estimate based on sample rate (higher sample rate = higher bitrate)
@@ -244,25 +247,43 @@ def check_file_size_warning(audio_path: Path) -> Optional[Tuple[str, str]]:
                 # Fallback: calculate from sample rate
                 expected_bitrate = int(sample_rate * channels * 24 * 0.6)
         elif format_name in ("mp3", "m4a", "aac"):
-            # Lossy formats: use typical bitrates (MP3: 320kbps, M4A/AAC: 256kbps)
-            expected_bitrate = 320000 if format_name == "mp3" else 256000
+            # Lossy formats: prefer actual bitrate if available (MP3s can be 128kbps, 192kbps, 256kbps, 320kbps, VBR, etc.)
+            # Only fall back to typical bitrates if actual bitrate can't be determined
+            if bitrate and bitrate > 0:
+                expected_bitrate = bitrate
+            else:
+                # Fallback: use typical bitrates (MP3: 320kbps, M4A/AAC: 256kbps)
+                expected_bitrate = 320000 if format_name == "mp3" else 256000
         
-        # Use expected bitrate (not actual file bitrate) to detect truncation
+        # Use expected bitrate to detect truncation
         expected_size = estimate_expected_file_size(duration, sample_rate, channels, format_name, expected_bitrate)
         if not expected_size:
             return None
         
         # Check size ratio and return appropriate warning level
-        # WARN: < 85% of expected (likely truncated)
-        # INFO: 85-96% of expected (suspicious - may be missing end, like Royals at 95.9%)
+        # Thresholds vary by format:
+        # - FLAC: Compression varies significantly (50-70% typical), so use lower thresholds
+        #   WARN: < 75% of expected (likely truncated)
+        #   INFO: 75-90% of expected (suspicious but may be normal compression variation)
+        # - Lossy formats (MP3, M4A, AAC): Bitrate is more predictable
+        #   WARN: < 85% of expected (likely truncated)
+        #   INFO: 85-96% of expected (suspicious - may be missing end)
         size_ratio = file_size / expected_size if expected_size > 0 else 1.0
         
-        if size_ratio < 0.96:
+        # Set thresholds based on format
+        if format_name == "flac":
+            warn_threshold = 0.75  # 75% for FLAC (compression varies significantly)
+            info_threshold = 0.90  # 90% for FLAC (above this is normal)
+        else:
+            warn_threshold = 0.85  # 85% for lossy formats (bitrate is more predictable)
+            info_threshold = 0.96  # 96% for lossy formats
+        
+        if size_ratio < info_threshold:
             bitrate_str = f" @ {expected_bitrate/1000:.0f}kbps expected" if expected_bitrate else f" @ {sample_rate}Hz" if sample_rate else ""
             message = f"File size ({file_size:,} bytes) is {size_ratio*100:.0f}% of expected ({expected_size:,} bytes) for {duration:.1f}s{bitrate_str} - may be truncated or corrupted"
-            if size_ratio < 0.85:
+            if size_ratio < warn_threshold:
                 return ("WARN", message)
-            elif size_ratio < 0.96:
+            elif size_ratio < info_threshold:
                 return ("INFO", message)
         
         return None
@@ -284,20 +305,57 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
         # File might be corrupted, wrong format, or unreadable
         # Log warning but return None - path-based fallback will be handled at directory level
         from logging_utils import log
+        from config import DOWNLOADS_DIR, MUSIC_ROOT
+        
+        # Determine if this is a new file in downloads (WARN) or existing file in music root (INFO)
+        is_in_downloads = False
+        try:
+            path_resolved = path.resolve()
+            downloads_resolved = DOWNLOADS_DIR.resolve()
+            # Check if path is within downloads directory
+            try:
+                path.relative_to(downloads_resolved)
+                is_in_downloads = True
+            except ValueError:
+                # Path is not relative to downloads, check string comparison as fallback
+                path_str = str(path_resolved)
+                downloads_str = str(downloads_resolved)
+                # Normalize paths for comparison (handle both forward and backslashes)
+                path_normalized = path_str.replace("\\", "/").lower()
+                downloads_normalized = downloads_str.replace("\\", "/").lower()
+                if path_normalized.startswith(downloads_normalized):
+                    is_in_downloads = True
+        except Exception:
+            # If path resolution fails, try string comparison as fallback
+            path_str = str(path).replace("\\", "/").lower()
+            downloads_str = str(DOWNLOADS_DIR).replace("\\", "/").lower()
+            if downloads_str in path_str or path_str.startswith(downloads_str):
+                is_in_downloads = True
+        
+        # New corrupt files in downloads are a problem (WARN)
+        # Existing corrupt files in music root will be overwritten (INFO)
+        is_warning = is_in_downloads
+        
         try:
             from structured_logging import logmsg
-            # Only log warning if album context is set (during processing, not during scanning)
-            # This prevents duplicate warnings and ensures they appear only under album context
             msg = f"Could not read tags from {str(path)}: {str(e)}"
             if logmsg.current_album_label is not None:
-                # Log as warning when we have album context (appears in summary)
-                logmsg.warn(msg)
+                if is_warning:
+                    # Log as warning for corrupt files in downloads (new files being processed)
+                    logmsg.warn(msg)
+                else:
+                    # Log as info for corrupt files in music root (will be overwritten)
+                    logmsg.info(msg)
             else:
                 # Log as verbose when no album context (appears in detail log only, not console)
                 logmsg.verbose(msg)
         except Exception:
             pass  # Fallback if structured logging not available
-        log(f"[WARN] Could not read tags from {path}: {e}")
+        
+        if is_warning:
+            log(f"[WARN] Could not read tags from {path}: {e} (corrupt file in downloads)")
+        else:
+            log(f"[INFO] Could not read tags from {path}: {e} (file will be overwritten if upgrade available)")
         return None
 
     try:

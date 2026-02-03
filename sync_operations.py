@@ -123,9 +123,9 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
                         level, message = size_warning
                         log(f"  [UPDATE {level}] {src.name}: {message}")
                         if level == "WARN":
-                            logmsg.warn("%item%: {message}", message=message)
+                            logmsg.warn("%item%: {warning_msg}", warning_msg=message)
                         elif level == "ERROR":
-                            logmsg.error("%item%: {message}", message=message)
+                            logmsg.error("%item%: {error_msg}", error_msg=message)
                     
                     if dest.exists():
                         from tag_operations import get_sample_rate

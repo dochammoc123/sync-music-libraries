@@ -75,8 +75,15 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
             name = f.name
             suffix = f.suffix.lower()
             
-            # Set item context once per iteration (for all logs in this iteration)
-            item_key = logmsg.set_item(str(f.name))
+            # Set item context with relative path from downloads root
+            try:
+                rel_path = f.relative_to(DOWNLOADS_DIR)
+                item_id = str(rel_path)
+            except ValueError:
+                # Fallback to filename if relative path can't be calculated
+                item_id = f.name
+            
+            item_key = logmsg.set_item(item_id)
             try:
                 # Handle artwork files in DOWNLOADS_DIR root:
                 # - If the artwork was matched/used for this album, remove it
@@ -163,9 +170,22 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                     try:
                         contents = list(subdir.iterdir())
                         if not contents:
-                            log(f"[CLEANUP] Removing empty download folder: {subdir}")
-                            if not dry_run:
-                                subdir.rmdir()
+                            # Set item context with relative path from downloads root
+                            try:
+                                rel_path = subdir.relative_to(DOWNLOADS_DIR)
+                                folder_item_id = str(rel_path)
+                            except ValueError:
+                                # Fallback to folder name if relative path can't be calculated
+                                folder_item_id = subdir.name
+                            
+                            folder_item_key = logmsg.set_item(folder_item_id)
+                            try:
+                                logmsg.info("Removing empty download folder: %item%")
+                                log(f"[CLEANUP] Removing empty download folder: {subdir}")
+                                if not dry_run:
+                                    subdir.rmdir()
+                            finally:
+                                logmsg.unset_item(folder_item_key)
                     except (OSError, PermissionError, FileNotFoundError):
                         pass  # Skip if we can't access it
         except (OSError, PermissionError):
@@ -191,7 +211,14 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                     # Set item context once per iteration (for all logs in this iteration)
                     item_key = None
                     if f.is_file():
-                        item_key = logmsg.set_item(str(f.name))
+                        # Try to use relative path from downloads root, fallback to filename
+                        try:
+                            rel_path = f.relative_to(DOWNLOADS_DIR)
+                            item_id = str(rel_path)
+                        except ValueError:
+                            # File is outside downloads root, use filename
+                            item_id = f.name
+                        item_key = logmsg.set_item(item_id)
                         
                         # Handle artwork files in DOWNLOADS_DIR root:
                         # - If the artwork was matched/used for this album, remove it
@@ -260,7 +287,15 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                 if remaining:
                     break
 
-            folder_item_key = logmsg.set_item(str(current.name))
+            # Set item context with relative path from downloads root
+            try:
+                rel_path = current.relative_to(DOWNLOADS_DIR)
+                folder_item_id = str(rel_path)
+            except ValueError:
+                # Fallback to folder name if relative path can't be calculated
+                folder_item_id = current.name
+            
+            folder_item_key = logmsg.set_item(folder_item_id)
             logmsg.info("Removing empty download folder: %item%")
             log(f"[CLEANUP] Removing empty download folder: {current}")
             try:
@@ -373,7 +408,7 @@ def move_album_from_downloads(
                 if size_warning:
                     level, message = size_warning
                     log(f"  [{level}] {src.name}: {message}")
-                    logmsg.warn("{file}: {message}", file=src.name, message=message)
+                    logmsg.warn("{file}: {warning_msg}", file=src.name, warning_msg=message)
                 
                 # Always check source file properties
                 from tag_operations import get_sample_rate, get_audio_duration, get_tags, check_file_size_warning
@@ -580,98 +615,102 @@ def move_album_from_downloads(
                 # Copy best art to cover.jpg (convert format if needed, upgrade if larger)
                 if predownloaded_art:
                     from artwork import get_image_size
-                art_size = get_image_size(predownloaded_art)
-                size_str = f" ({art_size[0]}x{art_size[1]})" if art_size else ""
-                
-                # Check if we should upgrade existing cover.jpg
-                # Only upgrade if new image has MORE pixels (larger dimensions)
-                # Same pixel dimensions = same quality, regardless of file size (which is just encoding/compression)
-                should_upgrade = True
-                existing_size = None
-                art_item_key = logmsg.set_item(str(predownloaded_art))
-                if cover_dest.exists():
-                    existing_size = get_image_size(cover_dest)
-                    if art_size and existing_size:
-                        existing_pixels = existing_size[0] * existing_size[1]
-                        new_pixels = art_size[0] * art_size[1]
-                        if new_pixels <= existing_pixels:
-                            should_upgrade = False
-                            logmsg.info("Keeping existing cover.jpg (existing: {existing_px}px, new: {new_px}px - same or smaller dimensions)", existing_px=existing_pixels, new_px=new_pixels)
-                
-                if should_upgrade:
-                    if existing_size:
-                        logmsg.info("Upgrading cover.jpg with %item%{size_str}", size_str=size_str)
-                    else:
-                        logmsg.info("Using %item%{size_str} for cover.jpg", size_str=size_str)
+                    art_size = get_image_size(predownloaded_art)
+                    size_str = f" ({art_size[0]}x{art_size[1]})" if art_size else ""
                     
-                    # Convert to JPG if needed (PNG, etc.)
-                    if predownloaded_art.suffix.lower() in {".png", ".gif", ".webp"}:
-                        try:
-                            from PIL import Image
-                            with Image.open(predownloaded_art) as img:
-                                # Convert RGBA to RGB if needed (for PNG with transparency)
-                                if img.mode in ("RGBA", "LA", "P"):
-                                    rgb_img = Image.new("RGB", img.size, (255, 255, 255))
-                                    if img.mode == "P":
-                                        img = img.convert("RGBA")
-                                    rgb_img.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
-                                    img = rgb_img
-                                # Save with quality=95 and optimize to strip metadata and reduce file size
-                                img.save(cover_dest, "JPEG", quality=95, optimize=True)
-                                logmsg.verbose("Converted {ext} to cover.jpg (optimized)", ext=predownloaded_art.suffix)
-                        except Exception as e:
-                            logmsg.warn("Could not convert %item% to JPG, copying as-is: {error}", error=str(e))
-                            shutil.copy2(predownloaded_art, cover_dest)
-                    else:
-                        # For existing JPEGs, optimize only if significantly larger (likely has metadata)
-                        # Otherwise, preserve original to avoid quality loss from re-encoding
-                        if predownloaded_art.suffix.lower() in {".jpg", ".jpeg"}:
-                            src_size = predownloaded_art.stat().st_size
-                            # Only optimize if file is unusually large (likely has metadata or inefficient encoding)
-                            # Threshold: if > 1MB for a typical cover, optimize it
-                            if src_size > 1_000_000:  # 1MB threshold
+                    # Check if we should upgrade existing cover.jpg
+                    # Only upgrade if new image has MORE pixels (larger dimensions)
+                    # Same pixel dimensions = same quality, regardless of file size (which is just encoding/compression)
+                    should_upgrade = True
+                    existing_size = None
+                    art_item_key = logmsg.set_item(str(predownloaded_art))
+                    try:
+                        if cover_dest.exists():
+                            existing_size = get_image_size(cover_dest)
+                            if art_size and existing_size:
+                                existing_pixels = existing_size[0] * existing_size[1]
+                                new_pixels = art_size[0] * art_size[1]
+                                if new_pixels <= existing_pixels:
+                                    should_upgrade = False
+                                    logmsg.info("Keeping existing cover.jpg (existing: {existing_px}px, new: {new_px}px - same or smaller dimensions)", existing_px=existing_pixels, new_px=new_pixels)
+                        
+                        if should_upgrade:
+                            if existing_size:
+                                logmsg.info("Upgrading cover.jpg with %item%{size_str}", size_str=size_str)
+                            else:
+                                logmsg.info("Using %item%{size_str} for cover.jpg", size_str=size_str)
+                            
+                            # Convert to JPG if needed (PNG, etc.)
+                            if predownloaded_art.suffix.lower() in {".png", ".gif", ".webp"}:
                                 try:
                                     from PIL import Image
                                     with Image.open(predownloaded_art) as img:
-                                        # Re-save with optimization to reduce file size (strips metadata, ensures consistent quality)
+                                        # Convert RGBA to RGB if needed (for PNG with transparency)
+                                        if img.mode in ("RGBA", "LA", "P"):
+                                            rgb_img = Image.new("RGB", img.size, (255, 255, 255))
+                                            if img.mode == "P":
+                                                img = img.convert("RGBA")
+                                            rgb_img.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+                                            img = rgb_img
+                                        # Save with quality=95 and optimize to strip metadata and reduce file size
                                         img.save(cover_dest, "JPEG", quality=95, optimize=True)
-                                        opt_size = cover_dest.stat().st_size
-                                        logmsg.verbose("Optimized {name} ({src_size} -> {opt_size} bytes, stripped metadata)", name=predownloaded_art.name, src_size=src_size, opt_size=opt_size)
+                                        logmsg.verbose("Converted {ext} to cover.jpg (optimized)", ext=predownloaded_art.suffix)
                                 except Exception as e:
-                                    logmsg.warn("Could not optimize {name}, copying as-is: {error}", name=predownloaded_art.name, error=str(e))
+                                    logmsg.warn("Could not convert %item% to JPG, copying as-is: {error}", error=str(e))
                                     shutil.copy2(predownloaded_art, cover_dest)
                             else:
-                                # Small file, likely already optimized - preserve original
-                                shutil.copy2(predownloaded_art, cover_dest)
-                                logmsg.verbose("Preserved original {name} (already optimized)", name=predownloaded_art.name)
-                        else:
-                            # Non-JPEG format - copy as-is (Roon/T8 can handle PNG)
-                            shutil.copy2(predownloaded_art, cover_dest)
-                            logmsg.verbose("Preserved original format: {ext}", ext=predownloaded_art.suffix)
-                    
-                    if existing_size:
-                        new_pixels = art_size[0] * art_size[1] if art_size else 0
-                        old_pixels = existing_size[0] * existing_size[1]
-                        log(f"    Upgraded cover.jpg (new: {new_pixels}px, previous: {old_pixels}px)")
-                    
-                    # Clean up the source art file if it's in the album directory (MUSIC_ROOT)
-                    # This handles pattern-matched art files like "pure-heroine-lorde.jpg" that were copied to cover.jpg
-                    # Only clean up if the source file is in the same directory as cover.jpg (not in downloads)
-                    try:
-                        from config import MUSIC_ROOT
-                        if predownloaded_art.exists() and album_dir.resolve() in predownloaded_art.resolve().parents:
-                            # Source art file is in the album directory - clean it up since we've copied it to cover.jpg
-                            logmsg.verbose("Cleaning up source art file: %item%")
-                            if not dry_run:
-                                try:
-                                    predownloaded_art.unlink()
-                                except Exception as e:
-                                    logmsg.warn("Could not delete source art file %item%: {error}", error=str(e))
-                    except Exception:
-                        # If we can't determine the path relationship, don't clean up (safer)
-                        pass
-                    logmsg.unset_item(art_item_key)
-                elif predownloaded_folder:
+                                # For existing JPEGs, optimize only if significantly larger (likely has metadata)
+                                # Otherwise, preserve original to avoid quality loss from re-encoding
+                                if predownloaded_art.suffix.lower() in {".jpg", ".jpeg"}:
+                                    src_size = predownloaded_art.stat().st_size
+                                    # Only optimize if file is unusually large (likely has metadata or inefficient encoding)
+                                    # Threshold: if > 1MB for a typical cover, optimize it
+                                    if src_size > 1_000_000:  # 1MB threshold
+                                        try:
+                                            from PIL import Image
+                                            with Image.open(predownloaded_art) as img:
+                                                # Re-save with optimization to reduce file size (strips metadata, ensures consistent quality)
+                                                img.save(cover_dest, "JPEG", quality=95, optimize=True)
+                                                opt_size = cover_dest.stat().st_size
+                                                logmsg.verbose("Optimized {name} ({src_size} -> {opt_size} bytes, stripped metadata)", name=predownloaded_art.name, src_size=src_size, opt_size=opt_size)
+                                        except Exception as e:
+                                            logmsg.warn("Could not optimize {name}, copying as-is: {error}", name=predownloaded_art.name, error=str(e))
+                                            shutil.copy2(predownloaded_art, cover_dest)
+                                    else:
+                                        # Small file, likely already optimized - preserve original
+                                        shutil.copy2(predownloaded_art, cover_dest)
+                                        logmsg.verbose("Preserved original {name} (already optimized)", name=predownloaded_art.name)
+                                else:
+                                    # Non-JPEG format - copy as-is (Roon/T8 can handle PNG)
+                                    shutil.copy2(predownloaded_art, cover_dest)
+                                    logmsg.verbose("Preserved original format: {ext}", ext=predownloaded_art.suffix)
+                            
+                            if existing_size:
+                                new_pixels = art_size[0] * art_size[1] if art_size else 0
+                                old_pixels = existing_size[0] * existing_size[1]
+                                log(f"    Upgraded cover.jpg (new: {new_pixels}px, previous: {old_pixels}px)")
+                            
+                            # Clean up the source art file if it's in the album directory (MUSIC_ROOT)
+                            # This handles pattern-matched art files like "pure-heroine-lorde.jpg" that were copied to cover.jpg
+                            # Only clean up if the source file is in the same directory as cover.jpg (not in downloads)
+                            try:
+                                from config import MUSIC_ROOT
+                                if predownloaded_art.exists() and album_dir.resolve() in predownloaded_art.resolve().parents:
+                                    # Source art file is in the album directory - clean it up since we've copied it to cover.jpg
+                                    logmsg.verbose("Cleaning up source art file: %item%")
+                                    if not dry_run:
+                                        try:
+                                            predownloaded_art.unlink()
+                                        except Exception as e:
+                                            logmsg.warn("Could not delete source art file %item%: {error}", error=str(e))
+                            except Exception:
+                                # If we can't determine the path relationship, don't clean up (safer)
+                                pass
+                    finally:
+                        # Always unset the item, whether we upgraded or not
+                        logmsg.unset_item(art_item_key)
+                
+                if predownloaded_folder:
                     # Only folder.jpg exists, use it for cover.jpg
                     if predownloaded_folder.exists():
                         art_item_key = logmsg.set_item(str(predownloaded_folder))
@@ -681,7 +720,7 @@ def move_album_from_downloads(
                             cover_dest.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(predownloaded_folder, cover_dest)
                         except (OSError, FileNotFoundError) as e:
-                            logmsg.error("Failed to copy folder.jpg to cover.jpg: {error}", error=str(e))
+                            logmsg.warn("Failed to copy folder.jpg to cover.jpg: {error}", error=str(e))
                             logmsg.verbose("Source: {src}, Destination: {dst}", src=str(predownloaded_folder), dst=str(cover_dest))
                         logmsg.unset_item(art_item_key)
                     else:
@@ -692,42 +731,46 @@ def move_album_from_downloads(
             # If it exists, preserve it (may differ from cover.jpg)
             # If creating, use same as cover.jpg (unless there's a separate predownloaded_folder)
             if not folder_dest.exists():
-                try:
-                    # Ensure parent directory exists
-                    folder_dest.parent.mkdir(parents=True, exist_ok=True)
-                    
-                    if predownloaded_folder and predownloaded_folder != predownloaded_art:
-                        # Separate folder.jpg exists in downloads - copy it
-                        if predownloaded_folder.exists():
-                            logmsg.verbose("Creating folder.jpg from separate downloads file (may differ from cover.jpg)")
-                            shutil.copy2(predownloaded_folder, folder_dest)
-                        else:
-                            logmsg.warn("predownloaded_folder does not exist for folder.jpg: {path}", path=str(predownloaded_folder))
-                    elif predownloaded_art:
-                        # Use same art as cover.jpg for folder.jpg
-                        if predownloaded_art.suffix.lower() in {".png", ".gif", ".webp"}:
-                            # Already converted to cover.jpg above, just copy it
-                            if cover_dest.exists():
-                                shutil.copy2(cover_dest, folder_dest)
+                if not dry_run:
+                    try:
+                        # Ensure parent directory exists
+                        folder_dest.parent.mkdir(parents=True, exist_ok=True)
+                        
+                        if predownloaded_folder and predownloaded_folder != predownloaded_art:
+                            # Separate folder.jpg exists in downloads - copy it
+                            if predownloaded_folder.exists():
+                                logmsg.verbose("Creating folder.jpg from separate downloads file (may differ from cover.jpg)")
+                                shutil.copy2(predownloaded_folder, folder_dest)
                             else:
-                                logmsg.warn("cover_dest does not exist for folder.jpg copy: {path}", path=str(cover_dest))
-                        else:
-                            if predownloaded_art.exists():
-                                shutil.copy2(predownloaded_art, folder_dest)
+                                logmsg.warn("predownloaded_folder does not exist for folder.jpg: {path}", path=str(predownloaded_folder))
+                        elif predownloaded_art:
+                            # Use same art as cover.jpg for folder.jpg
+                            if predownloaded_art.suffix.lower() in {".png", ".gif", ".webp"}:
+                                # Already converted to cover.jpg above, just copy it
+                                if cover_dest.exists():
+                                    shutil.copy2(cover_dest, folder_dest)
+                                else:
+                                    logmsg.warn("cover_dest does not exist for folder.jpg copy: {path}", path=str(cover_dest))
                             else:
-                                logmsg.warn("predownloaded_art does not exist for folder.jpg: {path}", path=str(predownloaded_art))
-                    elif predownloaded_folder:
-                        # Use folder.jpg for both
-                        if predownloaded_folder.exists():
-                            shutil.copy2(predownloaded_folder, folder_dest)
-                        else:
-                            logmsg.warn("predownloaded_folder does not exist for folder.jpg: {path}", path=str(predownloaded_folder))
-                    elif cover_dest.exists():
-                        # No predownloaded art, but cover.jpg exists - use it for folder.jpg
-                        shutil.copy2(cover_dest, folder_dest)
-                except (OSError, FileNotFoundError) as e:
-                    logmsg.error("Failed to create folder.jpg: {error}", error=str(e))
-                    logmsg.verbose("folder_dest: {dst}", dst=str(folder_dest))
+                                if predownloaded_art.exists():
+                                    shutil.copy2(predownloaded_art, folder_dest)
+                                else:
+                                    logmsg.warn("predownloaded_art does not exist for folder.jpg: {path}", path=str(predownloaded_art))
+                        elif predownloaded_folder:
+                            # Use folder.jpg for both
+                            if predownloaded_folder.exists():
+                                shutil.copy2(predownloaded_folder, folder_dest)
+                            else:
+                                logmsg.warn("predownloaded_folder does not exist for folder.jpg: {path}", path=str(predownloaded_folder))
+                        elif cover_dest.exists():
+                            # No predownloaded art, but cover.jpg exists - use it for folder.jpg
+                            shutil.copy2(cover_dest, folder_dest)
+                    except (OSError, FileNotFoundError) as e:
+                        logmsg.warn("Failed to create folder.jpg: {error}", error=str(e))
+                        logmsg.verbose("folder_dest: {dst}", dst=str(folder_dest))
+                else:
+                    # Dry run: just log what would be done
+                    logmsg.verbose("(DRY RUN) Would create folder.jpg")
             else:
                 logmsg.verbose("folder.jpg already exists, preserving it (may differ from cover.jpg)")
         

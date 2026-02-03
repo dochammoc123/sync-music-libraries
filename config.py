@@ -34,7 +34,7 @@ SCRIPTS_ROOT = ICLOUD / "scripts" / "sync-music-libraries"
 if SYSTEM == "Windows":
     DOWNLOADS_DIR = Path.home() / "Downloads" / "Music"
     MUSIC_ROOT = Path("//ROCK/Data/Storage/InternalStorage/Music")
-    T8_ROOT = Path("//10.0.1.31/Share/EB5E-E9D3/Music")
+    T8_ROOT = Path("//10.0.1.222/Share/EB5E-E9D3/Music")
     LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_windows.log"
     SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_windows_summary.log"
     DETAIL_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_detail_windows.log"
@@ -43,7 +43,7 @@ if SYSTEM == "Windows":
 elif SYSTEM == "Darwin":
     DOWNLOADS_DIR = Path.home() / "Downloads" / "Music"
     MUSIC_ROOT = "SMB:" / "ROCK" / "Data" / "Storage" / "InternalStorage" / "Music"
-    T8_ROOT = "SMB:" / "10.0.1.31" / "Share" / "EB5E-E9D3" / "Music"
+    T8_ROOT = "SMB:" / "10.0.1.222" / "Share" / "EB5E-E9D3" / "Music"
     LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_macos.log"
     SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_macos_summary.log"
     DETAIL_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_detail_macos.log"
@@ -118,7 +118,7 @@ ENABLE_ROON_REFRESH = True
 ROON_REFRESH_METHOD = "rock_api"
 
 # ROCK server configuration
-ROCK_SERVER_IP = "10.0.1.22"  # IP address or hostname of your ROCK server (e.g., "10.0.1.22" or "rock.local")
+ROCK_SERVER_IP = "10.0.1.221"  # IP address or hostname of your ROCK server (DHCP reserved)
 
 # ROCK API endpoint configuration
 # Based on ROCK web UI JavaScript: POST to /1/restartsoftware with empty JSON body
