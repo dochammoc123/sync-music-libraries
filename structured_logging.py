@@ -828,9 +828,20 @@ class StructuredLogger:
         indent = self._get_indent()
         prefix = self._get_prefix()
         
+        # Automatically prepend album context if available (for detail log output)
+        # This makes album context automatic - no need to manually add it to each message
+        detail_message = formatted_message
+        if use_album:
+            # Prepend album label if not already present (avoid redundancy)
+            album_prefix = f"{use_album}: "
+            if not detail_message.startswith(album_prefix):
+                # Also check if message already contains the album label elsewhere (avoid double-prefixing)
+                if album_prefix not in detail_message:
+                    detail_message = f"{album_prefix}{detail_message}"
+        
         # Format multi-line messages: first line normal, continuation lines with ".." prefix (no extra spaces)
         # Both detail log and console use the same formatting
-        msg_lines = formatted_message.split("\n")
+        msg_lines = detail_message.split("\n")
         formatted_lines = []
         for i, line in enumerate(msg_lines):
             line = line.rstrip()  # Remove trailing whitespace
@@ -893,11 +904,11 @@ class StructuredLogger:
             self.active_instance_stack[-1].detail_messages.append(formatted_output)
         
         # Automatically count item if item provided (first encounter)
-        # NOTE: Items are counted regardless of log level (info/warn/error/verbose all count)
+        # NOTE: Items are counted for info/warn/error, but NOT for verbose (verbose is for skipped/ignored items)
         # IMPORTANT: Items under the same header should be HOMOGENEOUS (all files, all albums, etc.)
         # Conditional headers with a single item are fine - header appears if/when that item is logged.
         # If you need a header to always appear regardless of items, use always_show=True when creating the header.
-        if use_item:
+        if use_item and level != "verbose":
             self._increment_current_count(use_item)
     
     def info(self, message: str, album: Optional[str] = None, **kwargs) -> None:
@@ -910,8 +921,9 @@ class StructuredLogger:
             album: Optional album label (overrides current album context, "" = global)
             **kwargs: Additional named parameters for {var} placeholder replacement
         
-        Note: Item context must be set via set_item() before calling. The item= parameter
-        has been removed to prevent bugs where counting is bypassed.
+        Note: Item context must be set via set_item() before calling if using %item% placeholder.
+        To log without counting: Don't call set_item() and don't use %item% in the message 
+        (use {var} placeholders instead).
         """
         self._log_detail(message, "info", album, **kwargs)
     
@@ -948,7 +960,7 @@ class StructuredLogger:
     def verbose(self, message: str, album: Optional[str] = None, **kwargs) -> None:
         """
         Log a verbose/trace-level detail message (file only, not console).
-        Identical to info() in all respects (counting, header messages, etc.) except console output.
+        Similar to info() but does NOT count items (useful for skipped/ignored items).
         Useful for detailed tracing that's available in logs but doesn't clutter console output.
         
         Args:
@@ -956,9 +968,12 @@ class StructuredLogger:
             album: Optional album label (overrides current album context, "" = global)
             **kwargs: Additional named parameters for {var} placeholder replacement
         
-        Note: Item context must be set via set_item() before calling. The item= parameter
-        has been removed to prevent bugs where counting is bypassed. Verbose messages are
-        written to the detail log file only, not to console.
+        Note: Item context must be set via set_item() before calling if using %item% placeholder.
+        Items logged with verbose() are NOT counted in header counts.
+        
+        To log an info message without counting: Don't call set_item() and don't use %item% 
+        in the message (use {var} placeholders instead).
+        Verbose messages are written to the detail log file only, not to console.
         """
         self._log_detail(message, "verbose", album, console=False, **kwargs)
     
@@ -1078,15 +1093,21 @@ class StructuredLogger:
                 instances = album_groups[album_label]
                 instances.sort(key=lambda x: (x[0].level, x[1].creation_order))
                 
+                # Check if Step 1 is in the global headers (it should be at level 0)
+                # If so, album headers should be nested under Step 1 (level 1 = first nested under Step 1)
+                # Adjust level calculation: if header is level 1 and Step 1 exists, it's nested under Step 1
+                # Level 0 headers under albums should be treated as level 1 (nested under Step 1)
+                # Level 1 headers under albums should be treated as level 2 (nested under Step 1's nested header)
                 for definition, instance in instances:
                     message = self._format_header_message(definition, instance)
                     # Format: 2 spaces per level, dashes for subheadings
-                    # Level 1 (first nested): "  - message" (2 spaces, 1 dash)
-                    # Level 2: "    -- message" (4 spaces, 2 dashes)
-                    # Level 3: "      --- message" (6 spaces, 3 dashes)
-                    # Note: definition.level is 0-based, but under albums it starts at 1
-                    indent_spaces = "  " * (definition.level + 1)  # 2 spaces per level, +1 for album
-                    num_dashes = definition.level + 1  # Number of dashes = level + 1
+                    # Headers under albums are nested under Step 1 (which is a global header)
+                    # Level 0 headers (like "Organizing tracks") should appear as level 1 under Step 1
+                    # Level 1 headers should appear as level 2, etc.
+                    # So we add 1 to the level to account for Step 1 nesting
+                    adjusted_level = definition.level + 1  # Add 1 for Step 1 nesting
+                    indent_spaces = "  " * (adjusted_level + 1)  # 2 spaces per level, +1 for album
+                    num_dashes = adjusted_level + 1  # Number of dashes = adjusted level + 1
                     dashes = "-" * num_dashes
                     lines.append(f"{indent_spaces}{dashes} {message}")
                 

@@ -160,6 +160,27 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                             logmsg.warn("Could not delete %item%: {error}", error=str(e))
                             log(f"[CLEANUP WARN] Could not delete {f}: {e}")
                     continue
+                
+                # Remove any remaining files in subdirectories (like "original", "CD1", etc.)
+                # These are leftover files that weren't processed (e.g., non-audio files, hidden files, etc.)
+                # Only remove if the file is in a subdirectory (not in the root album directory)
+                try:
+                    file_parent = f.parent
+                    # Check if file is in a subdirectory (not directly in the root album directory)
+                    if file_parent != d and file_parent.resolve() != d.resolve():
+                        # File is in a subdirectory - remove it (it's leftover from processing)
+                        logmsg.info("Removing leftover file in subdirectory: %item%")
+                        log(f"[CLEANUP] Removing leftover file in subdirectory: {f}")
+                        if not dry_run:
+                            try:
+                                f.unlink()
+                            except Exception as e:
+                                logmsg.warn("Could not delete %item%: {error}", error=str(e))
+                                log(f"[CLEANUP WARN] Could not delete {f}: {e}")
+                        continue
+                except (ValueError, OSError):
+                    # Can't determine parent relationship, skip
+                    pass
             finally:
                 logmsg.unset_item(item_key)
 
@@ -309,6 +330,36 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
             logmsg.unset_item(folder_item_key)
 
             current = current.parent
+
+
+def move_booklets_from_downloads(items: List[Tuple[Path, Dict[str, Any]]], album_dir: Path, dry_run: bool = False) -> None:
+    """
+    Look for PDF "digital booklet" files in the download directories for
+    this album and move them into the album_dir in the library.
+    
+    Example:
+        C:\\Users\\...\\Downloads\\Music\\Arcade Fire\\Reflektor\\Digital Booklet - Reflektor.pdf
+        -> \\\\ROCK\\...\\Music\\Arcade Fire\\(2013) Reflektor\\Digital Booklet - Reflektor.pdf
+    """
+    from structured_logging import logmsg
+    
+    # All the source dirs that contained the album's audio files
+    candidate_dirs = {p.parent for (p, _tags) in items}
+    
+    for d in candidate_dirs:
+        if not d.exists():
+            continue
+        
+        # Case-insensitive .pdf
+        for pdf in d.glob("*.pdf"):
+            dest = album_dir / pdf.name
+            item_key = logmsg.set_item(pdf.name)
+            logmsg.info("MOVE: %item% -> {dest}", dest=str(dest))
+            log(f"  [BOOKLET] MOVE: {pdf} -> {dest}")
+            if not dry_run:
+                dest.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(pdf), str(dest))
+            logmsg.unset_item(item_key)
 
 
 def move_album_from_downloads(
@@ -550,6 +601,9 @@ def move_album_from_downloads(
         # Pop organizing header
         logmsg.pop_header(organize_key)
     
+    # Move digital booklets (PDFs) from download directories to album folder
+    move_booklets_from_downloads(items, album_dir, dry_run)
+    
     # Push artwork header
     art_key = logmsg.push_header("Processing album artwork", "%msg%", "ARTWORK")
     try:
@@ -583,17 +637,22 @@ def move_album_from_downloads(
                 child_dirs.add(p.parent)
         
         # Check for folder.jpg: prioritize root directories (parent as source of truth)
+        # NOTE: We do NOT copy folder.jpg from CD1/CD2 subfolders to album root
+        # CD1/CD2 subfolders should keep their own folder.jpg files
         predownloaded_folder = None
         for d in sorted(root_dirs, key=lambda x: len(str(x))):
             folder_candidate = d / "folder.jpg"
             if folder_candidate.exists():
                 predownloaded_folder = folder_candidate
                 break
-        # Then check child directories
+        # Only check child directories (CD1/CD2) if no root folder.jpg found
+        # But we won't copy it to album root - it stays in the subfolder
         if not predownloaded_folder:
             for d in sorted(child_dirs, key=lambda x: len(str(x))):
                 folder_candidate = d / "folder.jpg"
                 if folder_candidate.exists():
+                    # Found folder.jpg in CD1/CD2 - don't copy to album root, leave it there
+                    # Only use it if we need to create cover.jpg and no other art exists
                     predownloaded_folder = folder_candidate
                     break
 
@@ -720,7 +779,18 @@ def move_album_from_downloads(
                 
                 if predownloaded_folder:
                     # Only folder.jpg exists, use it for cover.jpg
-                    if predownloaded_folder.exists():
+                    # But if it's in a CD1/CD2 subfolder, don't copy it to album root
+                    # Check if predownloaded_folder is in a subdirectory (CD1/CD2)
+                    is_in_subfolder = False
+                    try:
+                        rel = predownloaded_folder.relative_to(album_dir)
+                        if len(rel.parts) > 1:  # In a subdirectory (CD1/CD2)
+                            is_in_subfolder = True
+                    except ValueError:
+                        pass
+                    
+                    if predownloaded_folder.exists() and not is_in_subfolder:
+                        # Only copy if it's in the root album directory, not in CD1/CD2
                         art_item_key = logmsg.set_item(str(predownloaded_folder))
                         logmsg.info("Using folder.jpg for cover.jpg")
                         try:
@@ -731,21 +801,34 @@ def move_album_from_downloads(
                             logmsg.warn("Failed to copy folder.jpg to cover.jpg: {error}", error=str(e))
                             logmsg.verbose("Source: {src}, Destination: {dst}", src=str(predownloaded_folder), dst=str(cover_dest))
                         logmsg.unset_item(art_item_key)
+                    elif is_in_subfolder:
+                        # folder.jpg is in CD1/CD2 - leave it there, don't copy to album root
+                        logmsg.verbose("Found folder.jpg in subfolder (CD1/CD2), leaving it there: {path}", path=str(predownloaded_folder))
                     else:
                         logmsg.warn("predownloaded_folder does not exist: {path}", path=str(predownloaded_folder))
             
             # Determine source for folder.jpg:
-            # Only create folder.jpg if it doesn't exist
-            # If it exists, preserve it (may differ from cover.jpg)
-            # If creating, use same as cover.jpg (unless there's a separate predownloaded_folder)
+            # Only create folder.jpg in album root if it doesn't exist
+            # If it exists in CD1/CD2 subfolders, leave it there (don't copy to album root)
+            # If creating in album root, use same as cover.jpg (unless there's a separate predownloaded_folder in root)
             if not folder_dest.exists():
+                # Check if predownloaded_folder is in a subdirectory (CD1/CD2)
+                is_folder_in_subfolder = False
+                if predownloaded_folder:
+                    try:
+                        rel = predownloaded_folder.relative_to(album_dir)
+                        if len(rel.parts) > 1:  # In a subdirectory (CD1/CD2)
+                            is_folder_in_subfolder = True
+                    except ValueError:
+                        pass
+                
                 if not dry_run:
                     try:
                         # Ensure parent directory exists
                         folder_dest.parent.mkdir(parents=True, exist_ok=True)
                         
-                        if predownloaded_folder and predownloaded_folder != predownloaded_art:
-                            # Separate folder.jpg exists in downloads - copy it
+                        if predownloaded_folder and predownloaded_folder != predownloaded_art and not is_folder_in_subfolder:
+                            # Separate folder.jpg exists in downloads root - copy it to album root
                             if predownloaded_folder.exists():
                                 logmsg.verbose("Creating folder.jpg from separate downloads file (may differ from cover.jpg)")
                                 shutil.copy2(predownloaded_folder, folder_dest)
@@ -764,8 +847,8 @@ def move_album_from_downloads(
                                     shutil.copy2(predownloaded_art, folder_dest)
                                 else:
                                     logmsg.warn("predownloaded_art does not exist for folder.jpg: {path}", path=str(predownloaded_art))
-                        elif predownloaded_folder:
-                            # Use folder.jpg for both
+                        elif predownloaded_folder and not is_folder_in_subfolder:
+                            # Use folder.jpg for both (only if in root, not CD1/CD2)
                             if predownloaded_folder.exists():
                                 shutil.copy2(predownloaded_folder, folder_dest)
                             else:
@@ -1216,10 +1299,10 @@ def upgrade_albums_to_flac_only(dry_run: bool = False) -> None:
     BUT: If FLAC files are corrupt (can't read tags) or truncated, remove the FLAC
     and keep the MP3/other format instead, as any incoming file is an "upgrade".
     """
-    from logging_utils import add_album_warning_label, album_label_from_dir
+    from logging_utils import album_label_from_dir
+    from structured_logging import logmsg
     from tag_operations import get_tags, check_file_size_warning
     
-    log(f"\n[UPGRADE] Enforcing FLAC-only where FLAC exists...")
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
         p = Path(dirpath)
         exts = {Path(name).suffix.lower()
@@ -1228,6 +1311,9 @@ def upgrade_albums_to_flac_only(dry_run: bool = False) -> None:
         if ".flac" not in exts:
             continue
 
+        # Set album context
+        album_key = logmsg.set_album(p)
+        
         did_cleanup = False
         flac_files = []
         other_audio_files = []
@@ -1257,9 +1343,13 @@ def upgrade_albums_to_flac_only(dry_run: bool = False) -> None:
                     if ext != ".flac"
                 )
                 if has_replacement:
+                    item_key = logmsg.set_item(flac_file.name)
+                    logmsg.warn("Cannot read tags, will remove FLAC (replacement exists): %item%")
                     log(f"  [FLAC CORRUPT] Cannot read tags from {flac_file.name}, will remove FLAC (replacement exists)")
                     corrupt_flacs.append(flac_file)
+                    logmsg.unset_item(item_key)
                 else:
+                    logmsg.verbose("Cannot read tags, keeping FLAC (no replacement found): {file}", file=flac_file.name)
                     log(f"  [FLAC CORRUPT] Cannot read tags from {flac_file.name}, keeping it (no replacement found)")
                 continue
             
@@ -1277,61 +1367,123 @@ def upgrade_albums_to_flac_only(dry_run: bool = False) -> None:
                 if has_replacement:
                     # Remove if WARN (definitely truncated) or INFO (suspicious, like Royals at 95.9%)
                     # Any incoming file is an "upgrade" over a truncated FLAC
+                    item_key = logmsg.set_item(flac_file.name)
+                    logmsg.warn("File truncated, will remove FLAC (replacement exists): %item% - {message}", message=message)
                     log(f"  [FLAC TRUNCATED] {flac_file.name}: {message}, will remove FLAC (replacement exists)")
                     corrupt_flacs.append(flac_file)
+                    logmsg.unset_item(item_key)
                 else:
+                    logmsg.verbose("File truncated, keeping FLAC (no replacement found): {file} - {message}", file=flac_file.name, message=message)
                     log(f"  [FLAC TRUNCATED] {flac_file.name}: {message}, keeping it (no replacement found)")
                 continue
 
         # Remove corrupt/truncated FLAC files (only if replacement exists)
         for corrupt_flac in corrupt_flacs:
+            item_key = logmsg.set_item(corrupt_flac.name)
+            logmsg.info("DELETE: %item% (corrupt FLAC, replacement exists)")
             log(f"  DELETE (corrupt FLAC, replacement exists): {corrupt_flac}")
             did_cleanup = True
             if not dry_run:
                 try:
                     corrupt_flac.unlink()
                 except OSError as e:
+                    logmsg.warn("Could not delete %item%: {error}", error=str(e))
                     log(f"    [WARN] Could not delete {corrupt_flac}: {e}")
+                    from logging_utils import add_album_warning_label
                     label = album_label_from_dir(p)
                     add_album_warning_label(label, f"[WARN] Could not delete corrupt FLAC {corrupt_flac}: {e}")
+            logmsg.unset_item(item_key)
 
         # Only remove non-FLAC files if there's a valid FLAC for that specific track
         # Don't remove a non-FLAC file if its corresponding FLAC was just removed (corrupt/truncated)
+        # IMPORTANT: Check for FLACs in the parent album directory and all subdirectories
+        # This handles cases where MP4s are in album root and FLACs are in CD1/CD2 (or vice versa)
         valid_flacs = [f for f in flac_files if f not in corrupt_flacs]
         removed_flac_stems = {f.stem for f in corrupt_flacs}  # Track which FLACs were removed
         
+        # Collect all valid FLAC stems from this directory and all subdirectories
+        # This ensures we match MP4s in album root with FLACs in CD1/CD2 subdirectories
+        # Use case-insensitive comparison for filename matching
+        parent_album_dir = p
+        all_valid_flac_stems = {}  # Dict: lowercase_stem -> original_stem (for case-insensitive matching)
+        for flac_file in valid_flacs:
+            stem_lower = flac_file.stem.lower()
+            all_valid_flac_stems[stem_lower] = flac_file.stem
+        
+        # Also check subdirectories for FLACs (for multi-disc albums)
+        for subdir in dirnames:
+            subdir_path = p / subdir
+            if subdir_path.is_dir():
+                try:
+                    for subfile in subdir_path.iterdir():
+                        if subfile.is_file() and subfile.suffix.lower() == ".flac":
+                            # Check if this FLAC is valid (not corrupt)
+                            sub_tags = get_tags(subfile)
+                            if sub_tags is not None:
+                                # Check for truncation
+                                sub_size_warning = check_file_size_warning(subfile)
+                                if sub_size_warning is None:
+                                    stem_lower = subfile.stem.lower()
+                                    all_valid_flac_stems[stem_lower] = subfile.stem
+                except (OSError, PermissionError):
+                    # Skip if we can't access the subdirectory
+                    pass
+        
         for other_file in other_audio_files:
-            # Check if there's a valid FLAC for this specific track (same base name)
+            # Check if there's a valid FLAC for this specific track (same base name, case-insensitive)
+            # Check both current directory and subdirectories
             base_name = other_file.stem
-            has_valid_flac = any(
-                (f.stem == base_name and f not in corrupt_flacs)
-                for f in flac_files
-            )
+            base_name_lower = base_name.lower()
+            has_valid_flac = base_name_lower in all_valid_flac_stems
             
             # Only remove if there's a valid FLAC for this track
             # Don't remove if the FLAC for this track was just removed (corrupt/truncated)
-            if has_valid_flac and base_name not in removed_flac_stems:
-                log(f"  DELETE (non-FLAC, valid FLAC exists for this track): {other_file}")
+            # Check removed_flac_stems case-insensitively too
+            removed_flac_stems_lower = {s.lower() for s in removed_flac_stems}
+            if has_valid_flac and base_name_lower not in removed_flac_stems_lower:
+                item_key = logmsg.set_item(other_file.name)
+                logmsg.info("DELETE: %item% (non-FLAC, valid FLAC exists for this track)")
+                log(f"  DELETE: {other_file.name} (non-FLAC, valid FLAC exists for this track)")
                 did_cleanup = True
                 if not dry_run:
                     try:
                         other_file.unlink()
                     except OSError as e:
+                        logmsg.warn("Could not delete %item%: {error}", error=str(e))
                         log(f"    [WARN] Could not delete {other_file}: {e}")
+                        from logging_utils import add_album_warning_label
                         label = album_label_from_dir(p)
                         add_album_warning_label(label, f"[WARN] Could not delete {other_file}: {e}")
+                logmsg.unset_item(item_key)
             else:
                 # Keep the non-FLAC file - either no FLAC exists for this track, or the FLAC was corrupt/removed
-                if base_name in removed_flac_stems:
-                    log(f"  KEEP (non-FLAC, FLAC for this track was corrupt/removed): {other_file}")
+                if base_name_lower in removed_flac_stems_lower:
+                    logmsg.verbose("KEEP: {file} (non-FLAC, FLAC for this track was corrupt/removed)", file=other_file.name)
+                    log(f"  KEEP: {other_file.name} (non-FLAC, FLAC for this track was corrupt/removed)")
                 else:
-                    log(f"  KEEP (no valid FLAC for this track): {other_file}")
+                    logmsg.verbose("KEEP: {file} (no valid FLAC for this track)", file=other_file.name)
+                    log(f"  KEEP: {other_file.name} (no valid FLAC for this track)")
 
+        # Check if we still have both FLAC and non-FLAC files after cleanup (warning case)
+        remaining_audio_files = [f for f in p.iterdir() if f.is_file() and f.suffix.lower() in AUDIO_EXT]
+        remaining_flacs = [f for f in remaining_audio_files if f.suffix.lower() == ".flac"]
+        remaining_non_flacs = [f for f in remaining_audio_files if f.suffix.lower() != ".flac"]
+        
+        if remaining_flacs and remaining_non_flacs:
+            # After cleanup, we still have both FLAC and non-FLAC files
+            # This could indicate case mismatch or different track names
+            logmsg.warn("Album still contains both FLAC and non-FLAC files after cleanup (possible case mismatch or different track names)")
+            log(f"  [WARN] Album still contains both FLAC and non-FLAC files after cleanup")
+            from logging_utils import add_album_warning_label
+            add_album_warning_label(label, "Album still contains both FLAC and non-FLAC files after cleanup (possible case mismatch or different track names)")
+        
         if did_cleanup:
             from logging_utils import add_album_event_label
             label = album_label_from_dir(p)
             if corrupt_flacs:
+                logmsg.info("FLAC-only cleanup (removed {count} corrupt FLAC(s)).", count=len(corrupt_flacs))
                 add_album_event_label(label, f"FLAC-only cleanup (removed {len(corrupt_flacs)} corrupt FLAC(s)).")
-            else:
-                add_album_event_label(label, "FLAC-only cleanup.")
+            # Removed redundant "FLAC-only cleanup." message when no corrupt FLACs
+        
+        logmsg.unset_album(album_key)
 

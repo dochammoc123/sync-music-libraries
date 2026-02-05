@@ -211,7 +211,7 @@ def setup_tray():
 
     menu = pystray.Menu(
         item("Run (normal)", on_run_normal),
-        item("Run (normal-checksums)", on_run_normal_checksums),
+        #item("Run (normal-checksums)", on_run_normal_checksums),
         item("Run (embed)", on_run_embed),
         item("Run (restore)", on_run_restore),
         item("DRY Run (normal)", on_run_normal_dry),

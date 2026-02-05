@@ -453,6 +453,18 @@ def main() -> None:
         artist_dirs_processed = set()
         for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
             dir_path = Path(dirpath)
+            
+            # Only process directories that are direct children of MUSIC_ROOT (artist folders)
+            # Skip album directories (which may have CD1/CD2 subfolders) and deeper levels
+            try:
+                rel_path = dir_path.relative_to(MUSIC_ROOT)
+                # If path has more than 1 part, it's not an artist folder (e.g., "Artist/Album" or "Artist/Album/CD1")
+                if len(rel_path.parts) != 1:
+                    continue
+            except ValueError:
+                # Not under MUSIC_ROOT, skip
+                continue
+            
             # Check if this is an artist folder (has album subdirectories with audio files)
             has_albums = False
             try:
@@ -460,6 +472,7 @@ def main() -> None:
                     if subdir.is_dir():
                         try:
                             # Check if subdir has audio files (it's an album)
+                            # Look for audio files directly in the subdir (not in sub-subdirs like CD1/CD2)
                             for audio_file in subdir.iterdir():
                                 if audio_file.is_file() and audio_file.suffix.lower() in {".flac", ".mp3", ".m4a", ".aac", ".ogg", ".wav"}:
                                     has_albums = True

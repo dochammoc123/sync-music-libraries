@@ -16,6 +16,22 @@ from config import LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, SUMMARY_LOG_FILE, 
 
 logger = logging.getLogger("library_sync")
 
+
+class SafeRotatingFileHandler(RotatingFileHandler):
+    """
+    RotatingFileHandler that gracefully handles Windows file locking issues.
+    If rotation fails due to file being locked, it continues logging without rotation.
+    """
+    def doRollover(self):
+        """Override doRollover to handle Windows file locking gracefully."""
+        try:
+            super().doRollover()
+        except (PermissionError, OSError):
+            # On Windows, if the log file is locked (by another process or log viewer),
+            # rotation will fail. Continue logging without rotation.
+            # The log will grow beyond maxBytes, but the script won't crash.
+            pass
+
 # ANSI color codes for console output
 class Colors:
     """ANSI color codes for terminal output."""
@@ -103,7 +119,7 @@ def setup_logging() -> None:
     # File handler without colors (old API writes to old log file only, no console)
     if LOG_FILE is not None:
         LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        fh = RotatingFileHandler(
+        fh = SafeRotatingFileHandler(
             LOG_FILE,
             maxBytes=LOG_MAX_BYTES,
             backupCount=LOG_BACKUP_COUNT,
