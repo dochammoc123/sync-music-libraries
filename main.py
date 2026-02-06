@@ -14,7 +14,7 @@ import argparse
 import sys
 
 from artwork import (
-    embed_art_into_flacs,
+    embed_art_into_audio_files,
     embed_missing_art_global,
     fixup_missing_art,
     init_musicbrainz,
@@ -422,17 +422,19 @@ def main() -> None:
 
         if EMBED_ALL:
             log("\n[EMBED ALL] Embedding cover.jpg into all FLACs in all albums (advanced mode).")
+            header_key = logmsg.set_header("Step 4.5: Embed all artwork", "%msg% (%count% items)", key=header_key)
             from pathlib import Path
             import os
             for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
-                embed_art_into_flacs(Path(dirpath), DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
+                embed_art_into_audio_files(Path(dirpath), DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
 
         if EMBED_FROM_UPDATES and albums_with_new_cover:
             log("\n[EMBED FROM UPDATES] Embedding new cover.jpg from UPDATE overlay into updated albums...")
+            header_key = logmsg.set_header("Step 4.6: Embed artwork from updates", "%msg% (%count% items)", key=header_key)
             from logging_utils import album_label_from_dir, add_album_event_label
             for album_dir in sorted(albums_with_new_cover):
                 log(f"  [EMBED FROM UPDATE] Album: {album_dir}")
-                embed_art_into_flacs(album_dir, DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
+                embed_art_into_audio_files(album_dir, DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
                 label = album_label_from_dir(album_dir)
                 add_album_event_label(label, "Embedded new art from overlay.")
 

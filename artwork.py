@@ -590,9 +590,12 @@ def ensure_cover_and_folder(
     if cover_path.exists() and folder_path.exists():
         return
 
+    from structured_logging import logmsg
+    
     # If folder.jpg exists, copy it to cover.jpg (don't overwrite folder.jpg)
     if folder_path.exists():
         if not cover_path.exists():
+            logmsg.verbose("folder.jpg exists, creating cover.jpg from it")
             log("  folder.jpg exists, creating cover.jpg from it")
             if not dry_run:
                 shutil.copy2(folder_path, cover_path)
@@ -601,10 +604,12 @@ def ensure_cover_and_folder(
     # If cover.jpg exists, copy it to folder.jpg (don't overwrite cover.jpg)
     if cover_path.exists():
         if not folder_path.exists():
+            logmsg.verbose("cover.jpg exists, creating folder.jpg from it")
             log("  cover.jpg exists, creating folder.jpg from it")
             if not dry_run:
                 try:
                     shutil.copy2(cover_path, folder_path)
+                    logmsg.verbose("folder.jpg created successfully")
                     log("  ✓ folder.jpg created successfully")
                 except Exception as e:
                     log(f"  [WARN] Failed to create folder.jpg: {e}")
@@ -615,15 +620,19 @@ def ensure_cover_and_folder(
     # Neither exists - try to create cover.jpg from embedded art or web
     if not skip_cover_creation:
         if not cover_path.exists():
+            logmsg.verbose("No cover.jpg; attempting to export embedded art…")
             log("  No cover.jpg; attempting to export embedded art…")
             first_file = album_files[0][0]
             if export_embedded_art_to_cover(first_file, cover_path, dry_run):
+                logmsg.verbose("cover.jpg created from embedded art.")
                 log("  cover.jpg created from embedded art.")
                 if label:
                     add_album_event_label(label, "Found art (embedded).")
             else:
+                logmsg.verbose("No embedded art; attempting web fetch…")
                 log("  No embedded art; attempting web fetch…")
                 if fetch_art_from_web(artist, album, cover_path, dry_run):
+                    logmsg.verbose("cover.jpg downloaded from web.")
                     log("  cover.jpg downloaded from web.")
                     if label:
                         add_album_event_label(label, "Found art (web).")
@@ -632,15 +641,16 @@ def ensure_cover_and_folder(
                     log(f"  {msg}")
                     if label:
                         add_album_warning_label(label, msg)
-                        from structured_logging import logmsg
                         logmsg.warn("Could not obtain artwork.")
     
     # After creating/finding cover.jpg, ensure folder.jpg exists in album root
     if cover_path.exists() and not folder_path.exists():
+        logmsg.verbose("Creating folder.jpg from cover.jpg")
         log("  Creating folder.jpg from cover.jpg")
         if not dry_run:
             try:
                 shutil.copy2(cover_path, folder_path)
+                logmsg.verbose("folder.jpg created successfully")
                 log("  ✓ folder.jpg created successfully")
             except Exception as e:
                 log(f"  [WARN] Failed to create folder.jpg: {e}")
@@ -662,10 +672,12 @@ def ensure_cover_and_folder(
                 if subdir.is_dir() and subdir.name.upper().startswith("CD"):
                     subfolder_folder = subdir / "folder.jpg"
                     if not subfolder_folder.exists():
+                        logmsg.verbose("Creating folder.jpg in {subdir}/ from album root", subdir=subdir.name)
                         log(f"  Creating folder.jpg in {subdir.name}/ from album root")
                         if not dry_run:
                             try:
                                 shutil.copy2(source_for_subfolders, subfolder_folder)
+                                logmsg.verbose("folder.jpg created in {subdir}/", subdir=subdir.name)
                                 log(f"  ✓ folder.jpg created in {subdir.name}/")
                             except Exception as e:
                                 log(f"  [WARN] Failed to create folder.jpg in {subdir.name}/: {e}")
@@ -673,32 +685,111 @@ def ensure_cover_and_folder(
                                     add_album_warning_label(label, f"Failed to create folder.jpg in {subdir.name}/: {e}")
 
 
-def embed_art_into_flacs(album_dir: Path, dry_run: bool = False, backup_enabled: bool = True) -> None:
+def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_enabled: bool = True) -> None:
     """
-    Embed cover.jpg into each FLAC in album_dir, backing up FLACs first.
+    Embed cover.jpg into each audio file in album_dir, backing up files first.
     Used for EMBED_FROM_UPDATES albums (force new art) or EMBED_ALL.
+    Supports FLAC, MP3, MP4/M4A, and other formats.
     """
+    from structured_logging import logmsg
+    from logging_utils import album_label_from_dir
+    from config import AUDIO_EXT
+    from mutagen import File as MutagenFile
+    from mutagen.mp3 import MP3
+    
     cover_path = album_dir / "cover.jpg"
     if not cover_path.exists():
         log(f"  [EMBED] No cover.jpg in {album_dir}, skipping.")
         return
+    
+    # Set album context for structured logging
+    album_key = logmsg.set_album(album_dir)
+    
     img_data = cover_path.read_bytes()
     for dirpath, dirnames, filenames in os.walk(album_dir):
         for name in filenames:
             p = Path(dirpath) / name
-            if p.suffix.lower() == ".flac":
-                backup_flac_if_needed(p, dry_run, backup_enabled)
+            if p.suffix.lower() not in AUDIO_EXT:
+                continue
+            
+            item_key = logmsg.set_item(p.name)
+            backup_audio_file_if_needed(p, dry_run, backup_enabled)
+            
+            if dry_run:
+                logmsg.info("Would embed artwork into %item% (force update)")
+                log(f"  EMBED: would update embedded art in {p}")
+            else:
+                logmsg.info("Embedding artwork into %item% (force update)")
                 log(f"  EMBED: updating embedded art in {p}")
-                if not dry_run:
-                    audio = FLAC(str(p))
-                    audio.clear_pictures()
-                    pic = Picture()
-                    pic.data = img_data
-                    pic.type = 3
-                    pic.mime = "image/jpeg"
-                    pic.desc = "Cover"
-                    audio.add_picture(pic)
-                    audio.save()
+                
+                embedded = False
+                # Try FLAC first
+                if p.suffix.lower() == ".flac":
+                    try:
+                        audio = FLAC(str(p))
+                        audio.clear_pictures()
+                        pic = Picture()
+                        pic.data = img_data
+                        pic.type = 3
+                        pic.mime = "image/jpeg"
+                        pic.desc = "Cover"
+                        audio.add_picture(pic)
+                        audio.save()
+                        embedded = True
+                    except Exception:
+                        pass
+                
+                # Try MP3
+                if not embedded and p.suffix.lower() == ".mp3":
+                    try:
+                        audio = MP3(str(p))
+                        if audio.tags is None:
+                            audio.add_tags()
+                        # Remove existing APIC frames
+                        audio.tags.delall("APIC")
+                        audio.tags.add(APIC(
+                            encoding=3,  # UTF-8
+                            mime="image/jpeg",
+                            type=3,  # Cover (front)
+                            desc="Cover",
+                            data=img_data
+                        ))
+                        audio.save()
+                        embedded = True
+                    except Exception:
+                        pass
+                
+                # Try MP4/M4A
+                if not embedded and p.suffix.lower() in {".m4a", ".mp4", ".m4v"}:
+                    try:
+                        audio = MP4(str(p))
+                        cover = MP4Cover(img_data, imageformat=MP4Cover.FORMAT_JPEG)
+                        audio['covr'] = [cover]
+                        audio.save()
+                        embedded = True
+                    except Exception:
+                        pass
+                
+                # Try generic MutagenFile for other formats
+                if not embedded:
+                    try:
+                        audio = MutagenFile(str(p))
+                        if audio is not None and hasattr(audio, "pictures"):
+                            audio.clear_pictures()
+                            pic = Picture()
+                            pic.data = img_data
+                            pic.type = 3
+                            pic.mime = "image/jpeg"
+                            pic.desc = "Cover"
+                            audio.add_picture(pic)
+                            audio.save()
+                            embedded = True
+                    except Exception:
+                        pass
+            
+            logmsg.unset_item(item_key)
+    
+    logmsg.unset_album(album_key)
 
 
 def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True) -> None:
@@ -833,14 +924,22 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
         if not cover_path.exists():
             continue
         
-        # Skip if we've already processed this album (e.g., from CD1 subdirectory)
+        # Determine if we're in a subdirectory (CD1, CD2, etc.)
+        is_subdirectory = (current_dir != parent_album_dir)
+        
         # Use parent album directory for album context
         album_key = logmsg.set_album(parent_album_dir)
         album_label = album_label_from_dir(parent_album_dir)
-        if album_label in processed_albums:
+        
+        # Only skip if we've already processed the parent album directory itself
+        # (not subdirectories - we want to process files in both parent and subdirectories)
+        if not is_subdirectory and album_label in processed_albums:
             logmsg.unset_album(album_key)
             continue
-        processed_albums.add(album_label)
+        
+        # Mark parent album directory as processed (only once, when we first encounter it)
+        if not is_subdirectory:
+            processed_albums.add(album_label)
         
         cover_data = None
         embedded_any = False
@@ -991,7 +1090,6 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                         audio.clear_pictures()
                         audio.add_picture(pic)
                         audio.save()
-                        logmsg.info("Embedded art into %item% (FLAC)")
                         log(f"    ✓ Embedded art into {p.name} (FLAC)")
                         total_embedded += 1
                         embedded = True
@@ -1020,7 +1118,6 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                             data=cover_data
                         ))
                         audio.save()
-                        logmsg.info("Embedded art into %item% (MP3)")
                         log(f"    ✓ Embedded art into {p.name} (MP3)")
                         total_embedded += 1
                         embedded = True
@@ -1036,7 +1133,6 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                             data=cover_data
                         ))
                         audio.save()
-                        logmsg.info("Embedded art into %item% (MP3)")
                         log(f"    ✓ Embedded art into {p.name} (MP3)")
                         total_embedded += 1
                         embedded = True
@@ -1061,7 +1157,6 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                         cover = MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)
                         audio['covr'] = [cover]
                         audio.save()
-                        logmsg.info("Embedded art into %item% (MP4/M4A)")
                         log(f"    ✓ Embedded art into {p.name} (MP4/M4A)")
                         total_embedded += 1
                         embedded = True
@@ -1090,7 +1185,6 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                                 pic.desc = "Cover"
                                 audio.add_picture(pic)
                                 audio.save()
-                                logmsg.info("Embedded art into %item% (generic)")
                                 log(f"    ✓ Embedded art into {p.name} (generic)")
                                 total_embedded += 1
                                 embedded = True
@@ -1123,7 +1217,7 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
         if embedded_any:
             from logging_utils import add_album_event_label
             logmsg.info("Embedded missing art.")
-            add_album_event_label(album_label_from_dir(album_dir), "Embedded missing art.")
+            add_album_event_label(album_label, "Embedded missing art.")
         
         logmsg.unset_album(album_key)
     

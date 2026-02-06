@@ -468,7 +468,7 @@ class StructuredLogger:
     
     def set_header(
         self, 
-        msg: str,
+        msg: Optional[str],
         message_template: Optional[str] = None,
         count_placeholder: str = "%count%",
         key: Optional[str] = None,
@@ -476,40 +476,47 @@ class StructuredLogger:
     ) -> Optional[str]:
         """
         Set/replace the current header at the current level.
-        Shortcut for: pop_header(key) (if key provided) + push_header() at same level.
+        Automatically closes the previous header if one exists.
         
-        Special case: If msg is None, this is syntactic sugar for pop_header(key).
-        - set_header(None, key=header_key) - pops the specified header
-        - set_header(None, key=None) - only allowed if stack is empty (no-op)
+        Behavior:
+        - If msg is not None: Automatically pops previous header (if any), then pushes new header
+        - If msg is None: Only pops header (requires key for validation)
+        - If key is provided: Validates it matches the top of stack before popping
+        - If key is None and stack is not empty: Raises error (safety check)
         
         Args:
             msg: Message for detail log. Also used as template if message_template is None.
-                If None, performs pop_header(key) instead.
+                If None, only performs pop_header (requires key for validation).
             message_template: Optional header message template for summary log.
                 If None, msg is used as the template.
             count_placeholder: Placeholder for count (default: "%count%")
-            key: Optional header_key from previous set_header() call.
-                If None and stack not empty, raises error (bug prevention).
+            key: Optional header_key for validation when popping.
+                If provided, validates it matches the top of stack.
+                If None and stack not empty, raises error (safety check).
             always_show: If True, header appears in summary even if count is 0 (default: False)
         
         Returns:
-            str: header_key to use with next set_header() call, or None if msg is None
+            str: header_key to use for validation in next set_header() call, or None if msg is None
         """
-        # If key provided, pop current header (pop_header does all error checking)
-        # This works for both msg=None (pop only) and msg!=None (pop then push)
-        if key is not None:
-            self.pop_header(key)
-        else:
-            # Bug prevention: If stack is not empty, key must have been provided
-            if self.active_definition_stack:
+        # If we have a previous header, pop it first
+        if self.active_definition_stack:
+            if key is not None:
+                # Validate key matches top of stack
+                top_key = self.active_definition_stack[-1]
+                if top_key != key:
+                    raise ValueError(f"Header key mismatch: expected {top_key}, got {key}")
+                self.pop_header(key)
+            else:
+                # Safety check: require key when stack is not empty
                 raise ValueError("Cannot set_header without key when header already exists on stack. Provide key from previous set_header() call.")
         
-        if msg is not None:
-            # Push new header (push_header does all error checking including %item% safeguard)
-            template = message_template if message_template is not None else msg
-            return self.push_header(msg, template, None, count_placeholder, always_show=always_show)
-        # msg is None: return None (no header to push, already popped if key provided)
-        return None
+        # If msg is None, we're done (just popped)
+        if msg is None:
+            return None
+        
+        # Push new header (push_header does all error checking including %item% safeguard)
+        template = message_template if message_template is not None else msg
+        return self.push_header(msg, template, None, count_placeholder, always_show=always_show)
     
     def _format_immediate_replacements(self, message: str) -> str:
         """
@@ -1089,27 +1096,41 @@ class StructuredLogger:
             for album_label in sorted(album_groups.keys()):
                 lines.append(f"* {album_label}")  # Album header with *
                 
-                # Get instances for this album (sort by level and creation_order for chronological order)
+                # Get instances for this album
                 instances = album_groups[album_label]
-                instances.sort(key=lambda x: (x[0].level, x[1].creation_order))
-                
-                # Check if Step 1 is in the global headers (it should be at level 0)
-                # If so, album headers should be nested under Step 1 (level 1 = first nested under Step 1)
-                # Adjust level calculation: if header is level 1 and Step 1 exists, it's nested under Step 1
-                # Level 0 headers under albums should be treated as level 1 (nested under Step 1)
-                # Level 1 headers under albums should be treated as level 2 (nested under Step 1's nested header)
+                # Group instances by header_key (step) first, then sort within each step
+                # This ensures Step 1 instances don't appear under Step 3
+                step_groups: Dict[str, List[Tuple[HeaderDefinition, HeaderInstance]]] = {}
                 for definition, instance in instances:
-                    message = self._format_header_message(definition, instance)
-                    # Format: 2 spaces per level, dashes for subheadings
-                    # Headers under albums are nested under Step 1 (which is a global header)
-                    # Level 0 headers (like "Organizing tracks") should appear as level 1 under Step 1
-                    # Level 1 headers should appear as level 2, etc.
-                    # So we add 1 to the level to account for Step 1 nesting
-                    adjusted_level = definition.level + 1  # Add 1 for Step 1 nesting
-                    indent_spaces = "  " * (adjusted_level + 1)  # 2 spaces per level, +1 for album
-                    num_dashes = adjusted_level + 1  # Number of dashes = adjusted level + 1
-                    dashes = "-" * num_dashes
-                    lines.append(f"{indent_spaces}{dashes} {message}")
+                    if definition.header_key not in step_groups:
+                        step_groups[definition.header_key] = []
+                    step_groups[definition.header_key].append((definition, instance))
+                
+                # Sort steps by creation order of first instance in each step
+                sorted_steps = sorted(step_groups.items(), key=lambda x: min(inst[1].creation_order for inst in x[1]))
+                
+                # Write instances grouped by step
+                for header_key, step_instances in sorted_steps:
+                    # Sort instances within this step by level and creation_order
+                    step_instances.sort(key=lambda x: (x[0].level, x[1].creation_order))
+                    
+                    # Check if Step 1 is in the global headers (it should be at level 0)
+                    # If so, album headers should be nested under Step 1 (level 1 = first nested under Step 1)
+                    # Adjust level calculation: if header is level 1 and Step 1 exists, it's nested under Step 1
+                    # Level 0 headers under albums should be treated as level 1 (nested under Step 1)
+                    # Level 1 headers under albums should be treated as level 2 (nested under Step 1's nested header)
+                    for definition, instance in step_instances:
+                        message = self._format_header_message(definition, instance)
+                        # Format: 2 spaces per level, dashes for subheadings
+                        # Headers under albums are nested under Step 1 (which is a global header)
+                        # Level 0 headers (like "Organizing tracks") should appear as level 1 under Step 1
+                        # Level 1 headers should appear as level 2, etc.
+                        # So we add 1 to the level to account for Step 1 nesting
+                        adjusted_level = definition.level + 1  # Add 1 for Step 1 nesting
+                        indent_spaces = "  " * (adjusted_level + 1)  # 2 spaces per level, +1 for album
+                        num_dashes = adjusted_level + 1  # Number of dashes = adjusted level + 1
+                        dashes = "-" * num_dashes
+                        lines.append(f"{indent_spaces}{dashes} {message}")
                 
                 # Add warnings for this album
                 if album_label in self.album_warnings:

@@ -150,7 +150,7 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                         continue
 
                 # Remove files with cleanup filenames (system junk files)
-                elif name in CLEANUP_FILENAMES:
+                if name in CLEANUP_FILENAMES:
                     logmsg.info("Removing file: %item%")
                     log(f"[CLEANUP] Removing file: {f}")
                     if not dry_run:
@@ -169,6 +169,7 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                     # Check if file is in a subdirectory (not directly in the root album directory)
                     if file_parent != d and file_parent.resolve() != d.resolve():
                         # File is in a subdirectory - remove it (it's leftover from processing)
+                        # This catches any files that didn't match the above criteria (e.g., text files, unknown extensions, etc.)
                         logmsg.info("Removing leftover file in subdirectory: %item%")
                         log(f"[CLEANUP] Removing leftover file in subdirectory: {f}")
                         if not dry_run:
@@ -181,35 +182,60 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                 except (ValueError, OSError):
                     # Can't determine parent relationship, skip
                     pass
+                
+                # If we get here, the file is in the root album directory and doesn't match any cleanup criteria
+                # This shouldn't happen often, but log it for debugging
+                logmsg.verbose("Skipping file in root album directory (not processed): %item%")
+                log(f"[CLEANUP] Skipping file in root album directory (not processed): {f}")
             finally:
                 logmsg.unset_item(item_key)
 
         # Remove empty subdirectories first (deepest first)
+        # Use rglob to find all subdirectories recursively, then sort by depth (deepest first)
         try:
-            for subdir in sorted(d.rglob("*"), key=lambda p: len(str(p)), reverse=True):
-                if subdir.is_dir():
-                    try:
-                        contents = list(subdir.iterdir())
-                        if not contents:
-                            # Set item context with relative path from downloads root
-                            try:
-                                rel_path = subdir.relative_to(DOWNLOADS_DIR)
-                                folder_item_id = str(rel_path)
-                            except ValueError:
-                                # Fallback to folder name if relative path can't be calculated
-                                folder_item_id = subdir.name
-                            
-                            folder_item_key = logmsg.set_item(folder_item_id)
-                            try:
-                                logmsg.info("Removing empty download folder: %item%")
-                                log(f"[CLEANUP] Removing empty download folder: {subdir}")
-                                if not dry_run:
-                                    subdir.rmdir()
-                            finally:
-                                logmsg.unset_item(folder_item_key)
-                    except (OSError, PermissionError, FileNotFoundError):
-                        pass  # Skip if we can't access it
-        except (OSError, PermissionError):
+            # Collect all subdirectories first
+            subdirs = []
+            for item in d.rglob("*"):
+                if item.is_dir():
+                    subdirs.append(item)
+            
+            # Sort by path length (deepest first) so we remove nested folders before parent folders
+            subdirs.sort(key=lambda p: len(str(p)), reverse=True)
+            
+            for subdir in subdirs:
+                try:
+                    # Check if directory still exists (might have been removed as parent of deeper folder)
+                    if not subdir.exists():
+                        continue
+                    
+                    contents = list(subdir.iterdir())
+                    if not contents:
+                        # Directory is empty - remove it
+                        # Set item context with relative path from downloads root
+                        try:
+                            rel_path = subdir.relative_to(DOWNLOADS_DIR)
+                            folder_item_id = str(rel_path)
+                        except ValueError:
+                            # Fallback to folder name if relative path can't be calculated
+                            folder_item_id = subdir.name
+                        
+                        folder_item_key = logmsg.set_item(folder_item_id)
+                        try:
+                            logmsg.info("Removing empty download folder: %item%")
+                            log(f"[CLEANUP] Removing empty download folder: {subdir}")
+                            if not dry_run:
+                                subdir.rmdir()
+                        finally:
+                            logmsg.unset_item(folder_item_key)
+                    else:
+                        # Directory still has contents - log for debugging
+                        logmsg.verbose("Skipping non-empty folder: {folder} (contents: {count} items)", folder=subdir.name, count=len(contents))
+                        log(f"[CLEANUP] Skipping non-empty folder: {subdir} (contents: {len(contents)} items)")
+                except (OSError, PermissionError, FileNotFoundError) as e:
+                    logmsg.verbose("Could not access folder {folder}: {error}", folder=subdir.name, error=str(e))
+                    pass  # Skip if we can't access it
+        except (OSError, PermissionError) as e:
+            logmsg.verbose("Error during folder cleanup: {error}", error=str(e))
             pass
 
         # Then walk up and remove empty parent directories
@@ -1313,6 +1339,7 @@ def upgrade_albums_to_flac_only(dry_run: bool = False) -> None:
 
         # Set album context
         album_key = logmsg.set_album(p)
+        label = album_label_from_dir(p)  # Get label for old API warnings
         
         did_cleanup = False
         flac_files = []
@@ -1390,7 +1417,6 @@ def upgrade_albums_to_flac_only(dry_run: bool = False) -> None:
                     logmsg.warn("Could not delete %item%: {error}", error=str(e))
                     log(f"    [WARN] Could not delete {corrupt_flac}: {e}")
                     from logging_utils import add_album_warning_label
-                    label = album_label_from_dir(p)
                     add_album_warning_label(label, f"[WARN] Could not delete corrupt FLAC {corrupt_flac}: {e}")
             logmsg.unset_item(item_key)
 
@@ -1452,7 +1478,6 @@ def upgrade_albums_to_flac_only(dry_run: bool = False) -> None:
                         logmsg.warn("Could not delete %item%: {error}", error=str(e))
                         log(f"    [WARN] Could not delete {other_file}: {e}")
                         from logging_utils import add_album_warning_label
-                        label = album_label_from_dir(p)
                         add_album_warning_label(label, f"[WARN] Could not delete {other_file}: {e}")
                 logmsg.unset_item(item_key)
             else:
