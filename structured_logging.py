@@ -61,13 +61,13 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from logging_utils import logger, ALBUM_SUMMARY, add_album_event_label, add_album_warning_label, album_label_from_tags, Colors, ColoredFormatter, PlainFormatter, ICONS
+from logging_utils import logger, album_label_from_tags, Colors, ColoredFormatter, PlainFormatter, ICONS
 from config import DETAIL_LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, SYSTEM, STRUCTURED_SUMMARY_LOG_FILE
 
 # Detail log writer (separate from summary) - file handler only
 _detail_logger = logging.getLogger("library_sync_detail")
 
-# Console logger for structured logging (console output only, new API only)
+# Console logger for structured logging (console output only)
 _console_logger = logging.getLogger("library_sync_console")
 
 
@@ -895,7 +895,7 @@ class StructuredLogger:
         
         # Write to appropriate logger(s)
         if console:
-            # Write to console logger (new API console output only) - with ".." prefix on continuation lines
+            # Write to console logger (console output only) - with ".." prefix on continuation lines
             log_method = {
                 "info": _console_logger.info,
                 "verbose": _console_logger.info,  # Same as info level
@@ -910,10 +910,10 @@ class StructuredLogger:
             # Write to detail logger only (file only, no console) - with ".." prefix on continuation lines
             _detail_logger.info(formatted_output)
         
-        # Track warnings/errors for summary (new API tracking)
+        # Track warnings/errors for summary
         if level in ("warn", "error"):
             if use_album:
-                # Track in new API structure
+                # Track in structured logging
                 if use_album not in self.album_warnings:
                     self.album_warnings[use_album] = []
                 self.album_warnings[use_album].append((level, formatted_message))
@@ -922,10 +922,9 @@ class StructuredLogger:
                     self._count_errors += 1
                 elif level == "warn":
                     self._count_warnings += 1
-                # Also add to old API for now (during migration)
-                add_album_warning_label(use_album, formatted_message, level=level)
+                # Warning tracked in structured logging
             else:
-                # Track in new API structure - store the original message (before ".." formatting)
+                # Track in structured logging - store the original message (before ".." formatting)
                 self.global_warnings.append((level, formatted_message))
                 # Update counts
                 if level == "error":
@@ -933,7 +932,7 @@ class StructuredLogger:
                 elif level == "warn":
                     self._count_warnings += 1
                 # DO NOT call add_global_warning() here - it would duplicate
-                # The old API summary is written separately via write_summary_log()
+                # Warnings tracked in structured logging
         
         # Add to current header instance's detail messages
         if self.active_instance_stack:

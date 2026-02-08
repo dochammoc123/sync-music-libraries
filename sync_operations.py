@@ -9,9 +9,7 @@ from typing import Set, Tuple
 
 from config import AUDIO_EXT, BACKUP_ROOT, CLEAN_EMPTY_BACKUP_FOLDERS, MUSIC_ROOT, T8_ROOT, T8_SYNC_USE_CHECKSUMS, UPDATE_ROOT
 from logging_utils import (
-    add_album_event_label,
     album_label_from_dir,
-    add_album_warning_label,
     log,
 )
 from structured_logging import logmsg
@@ -24,13 +22,11 @@ def remove_backup_for(rel_path: Path, dry_run: bool = False) -> None:
     """
     backup_path = BACKUP_ROOT / rel_path
     if backup_path.exists():
-        log(f"[BACKUP] Removing obsolete backup: {backup_path}")
         if not dry_run:
             try:
                 backup_path.unlink()
             except Exception as e:
-                log(f"[BACKUP WARN] Could not delete backup {backup_path}: {e}")
-
+                logmsg.verbose("Could not delete obsolete backup {path}: {error}", path=str(backup_path), error=str(e))
 
 def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Path]]:
     """
@@ -66,13 +62,9 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
     if not UPDATE_ROOT.exists():
         if not dry_run:
             UPDATE_ROOT.mkdir(parents=True, exist_ok=True)
-            log(f"[UPDATE] Created UPDATE overlay root: {UPDATE_ROOT}")
-        else:
-            log(f"[UPDATE] Would create UPDATE overlay root: {UPDATE_ROOT}")
         # If dry run or if folder was just created, return early (no files to process yet)
         return updated_album_dirs, albums_with_new_cover
 
-    log(f"\n[UPDATE] Applying overlay from {UPDATE_ROOT} -> {MUSIC_ROOT}")
     
     for src in UPDATE_ROOT.rglob("*"):
         if src.is_dir():
@@ -115,7 +107,6 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
                 if src.suffix.lower() in AUDIO_EXT:
                     # Overlay is "dumb" - just copy files as-is, no smart comparisons
                     # User manually placed the file, so trust their judgment
-                    log(f"  [UPDATE AUDIO] {src} -> {dest}")
                     logmsg.info("COPY: %item% -> {dest}", dest=str(dest))
                     if not dry_run:
                         shutil.copy2(src, dest)
@@ -129,7 +120,6 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
                     image_extensions = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
                     is_image = src.suffix.lower() in image_extensions
                     
-                    log(f"  [UPDATE ASSET] {src} -> {dest}")
                     logmsg.info("COPY: %item% -> {dest}", dest=str(dest))
                     if not dry_run:
                         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -147,17 +137,14 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
                 try:
                     src.unlink()
                 except Exception as e:
-                    log(f"  [UPDATE WARN] Could not delete applied update file {src}: {e}")
                     logmsg.warn("Could not delete applied update file %item%: {error}", error=str(e))
         finally:
             # Unset album context if it was set (before next iteration or loop end)
             if current_album_key is not None:
                 logmsg.end_album(current_album_key)
 
-    # Add structured logging for updated albums (old API only - for summary log compatibility)
-    for album_dir in updated_album_dirs:
-        label = album_label_from_dir(album_dir)
-        add_album_event_label(label, "Updated from overlay.")  # Old API only
+    # Structured logging for updated albums
+    # Events tracked automatically by structured logging
 
     return updated_album_dirs, albums_with_new_cover
 
@@ -176,11 +163,7 @@ def sync_update_root_structure(dry_run: bool = False) -> None:
     if not UPDATE_ROOT.exists():
         if not dry_run:
             UPDATE_ROOT.mkdir(parents=True, exist_ok=True)
-            log(f"[UPDATE] Created UPDATE overlay root: {UPDATE_ROOT}")
-        else:
-            log(f"[UPDATE] Would create UPDATE overlay root: {UPDATE_ROOT}")
 
-    log(f"\n[UPDATE] Syncing empty overlay directory structure under {UPDATE_ROOT}")
 
     # Create directory structure (verbose - not very interesting)
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
@@ -217,7 +200,6 @@ def sync_update_root_structure(dry_run: bool = False) -> None:
                         logmsg.info("Would remove obsolete overlay directory: %item%")
                     else:
                         logmsg.info("REMOVE obsolete overlay directory: %item%")
-                    log(f"  [UPDATE] Removing obsolete overlay dir: {upd_dir}")
                     logmsg.end_item(item_key)
                 else:
                     # Not an album directory, log without item context
@@ -225,14 +207,13 @@ def sync_update_root_structure(dry_run: bool = False) -> None:
                         logmsg.info("Would remove obsolete overlay directory: {path}", path=str(upd_dir))
                     else:
                         logmsg.info("REMOVE obsolete overlay directory: {path}", path=str(upd_dir))
-                    log(f"  [UPDATE] Removing obsolete overlay dir: {upd_dir}")
             except (ValueError, IndexError):
                 # Can't parse path, log without context
                 if dry_run:
                     logmsg.info("Would remove obsolete overlay directory: {path}", path=str(upd_dir))
                 else:
                     logmsg.info("REMOVE obsolete overlay directory: {path}", path=str(upd_dir))
-                log(f"  [UPDATE] Removing obsolete overlay dir: {upd_dir}")
+                print(f"  [UPDATE] Removing obsolete overlay dir: {upd_dir}")
             
             if not dry_run:
                 try:
@@ -245,7 +226,6 @@ def sync_update_root_structure(dry_run: bool = False) -> None:
                     if f.is_file():
                         item_key = logmsg.begin_item(f.name)
                         logmsg.info("REMOVE stray file from overlay: %item%")
-                        log(f"  [UPDATE] Removing stray file from overlay: {f}")
                         try:
                             f.unlink()
                         except OSError:
@@ -273,10 +253,8 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
         use_checksums = T8_SYNC_USE_CHECKSUMS
 
     if T8_ROOT is None:
-        log("\n[T8 SYNC] T8_ROOT is None, skipping sync.")
         return
 
-    log(f"\n[T8 SYNC] Mirroring {MUSIC_ROOT} -> {T8_ROOT}")
     
     # Header is already set by main.py (Step 5), so we don't set it here
 
@@ -350,7 +328,6 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
                                 if src_checksum is None or dst_checksum is None:
                                     # Couldn't compute checksum - copy to be safe
                                     logmsg.warn("Could not compute checksum for %item%, will copy")
-                                    log(f"  [T8 SYNC WARN] Could not compute checksum for {src_file.name}, will copy")
                                     should_copy = True
                                 elif src_checksum == dst_checksum:
                                     # Files are identical - skip
@@ -374,7 +351,6 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
                     except OSError as e:
                         # If we can't stat/read files, try to copy anyway
                         logmsg.warn("Could not check destination %item%: {error}, will attempt copy", error=str(e))
-                        log(f"  [T8 SYNC WARN] Could not check destination {dst_file}: {e}, will attempt copy")
                         should_copy = True
                 
                 if should_copy:
@@ -388,7 +364,6 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
                             logmsg.info("COPY: {artist}: %item% to T8", artist=artist_name)
                         else:
                             logmsg.info("COPY: %item% to T8")
-                    log(f"  COPY: {src_file} -> {dst_file}")
                     if not dry_run:
                         try:
                             shutil.copy2(src_file, dst_file)
@@ -397,21 +372,17 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
                                 logmsg.warn("Failed to copy {artist}: %item% to T8: {error}", artist=artist_name, error=str(e))
                             else:
                                 logmsg.warn("Failed to copy %item% to T8: {error}", error=str(e))
-                            log(f"    [T8 SYNC ERROR] Failed to copy {src_file.name}: {e}")
-                            add_album_warning_label(album_label_from_dir(src_dir), f"[WARN] Failed to copy {src_file.name} to T8: {e}")
+                            print(f"    [T8 SYNC ERROR] Failed to copy {src_file.name}: {e}")
                 elif skip_reason:
                     if artist_name:
                         logmsg.verbose("SKIP: {artist}: %item% ({reason})", artist=artist_name, reason=skip_reason)
                     else:
                         logmsg.verbose("SKIP: %item% ({reason})", reason=skip_reason)
-                    log(f"  SKIP: {src_file.name} ({skip_reason})")
             except Exception as e:
                 if artist_name:
                     logmsg.warn("Error processing {artist}: %item%: {error}", artist=artist_name, error=str(e))
                 else:
                     logmsg.warn("Error processing %item%: {error}", error=str(e))
-                log(f"  [T8 SYNC ERROR] Error processing {src_file.name}: {e}")
-                add_album_warning_label(album_label_from_dir(src_dir), f"[WARN] Error syncing {src_file.name} to T8: {e}")
             finally:
                 logmsg.end_item(item_key)
         
@@ -446,13 +417,12 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
                     logmsg.info("Would delete %item% from T8 (no source)")
                 else:
                     logmsg.info("DELETE: %item% from T8 (no source)")
-                log(f"  DELETE on T8 (no source): {dst_file}")
                 if not dry_run:
                     try:
                         dst_file.unlink()
                     except OSError as e:
                         logmsg.warn("Could not delete %item% from T8: {error}", error=str(e))
-                        log(f"    [WARN] Could not delete {dst_file}: {e}")
+                        print(f"    [WARN] Could not delete {dst_file}: {e}")
                 logmsg.end_item(item_key)
 
         # Remove empty directories
@@ -461,7 +431,6 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
                 logmsg.verbose("Would remove empty directory on T8: {path}", path=str(dst_dir))
             else:
                 logmsg.verbose("REMOVE empty dir on T8: {path}", path=str(dst_dir))
-            log(f"  REMOVE empty dir on T8: {dst_dir}")
             if not dry_run:
                 try:
                     dst_dir.rmdir()
@@ -483,15 +452,13 @@ def sync_backups(dry_run: bool = False, use_checksums: bool = None) -> None:
     Uses fast comparison (size + mtime) by default, or checksums if use_checksums=True.
     """
     from config import BACKUP_ROOT, MUSIC_ROOT, CLEAN_EMPTY_BACKUP_FOLDERS, T8_SYNC_USE_CHECKSUMS
-    from logging_utils import log, album_label_from_dir, add_album_event_label, add_album_warning_label
+    from logging_utils import album_label_from_dir
     from structured_logging import logmsg
     
     if use_checksums is None:
         use_checksums = T8_SYNC_USE_CHECKSUMS
     
-    log(f"\n[SYNC BACKUP] Syncing backup folder with live files...")
     if not BACKUP_ROOT.exists():
-        log("  No backup root found; nothing to sync.")
         return
     
     def file_checksum(path: Path) -> str:
@@ -503,7 +470,6 @@ def sync_backups(dry_run: bool = False, use_checksums: bool = None) -> None:
                     hash_md5.update(chunk)
             return hash_md5.hexdigest()
         except Exception as e:
-            log(f"    [WARN] Could not calculate checksum for {path}: {e}")
             return None
     
     backups_processed = 0
@@ -516,7 +482,6 @@ def sync_backups(dry_run: bool = False, use_checksums: bool = None) -> None:
         backup_walk = os.walk(BACKUP_ROOT, topdown=False)
     except (OSError, PermissionError) as e:
         logmsg.error("Could not access backup root directory: {error}", error=str(e))
-        log(f"  [SYNC BACKUP ERROR] Could not access backup root: {e}")
         return
     
     for dirpath, dirnames, filenames in backup_walk:
@@ -598,18 +563,15 @@ def sync_backups(dry_run: bool = False, use_checksums: bool = None) -> None:
                         logmsg.info("Would remove backup %item% (files identical)")
                     else:
                         logmsg.info("REMOVE backup %item% (files identical)")
-                    log(f"  [SYNC BACKUP] Files identical, removing backup: {backup_file.name}")
                     if not dry_run:
                         try:
                             backup_file.unlink()
                             backups_removed += 1
                         except Exception as e:
                             logmsg.warn("Could not remove backup %item%: {error}", error=str(e))
-                            log(f"    [WARN] Could not remove backup {backup_file}: {e}")
                 else:
                     # Files are different - keep backup (files differ, backup may be needed)
                     logmsg.verbose("KEEP backup %item% (files differ)")
-                    log(f"  [SYNC BACKUP] Files differ, keeping backup: {backup_file.name}")
             else:
                 # Backup exists but live file doesn't - delete orphan backup
                 # If file was deleted from Music, backup is orphaned and shouldn't overwrite potential new original
@@ -617,16 +579,13 @@ def sync_backups(dry_run: bool = False, use_checksums: bool = None) -> None:
                     logmsg.info("Would remove orphan backup %item% (live file missing)")
                 else:
                     logmsg.info("REMOVE orphan backup %item% (live file missing)")
-                log(f"  [SYNC BACKUP] Live file missing, removing orphan backup: {backup_file.name}")
                 if not dry_run:
                     try:
                         backup_file.unlink()
                         backups_removed += 1
                     except Exception as e:
                         logmsg.warn("Could not delete orphan backup %item%: {error}", error=str(e))
-                        log(f"    [WARN] Could not delete orphan backup {backup_file}: {e}")
-                        label = album_label_from_dir(backup_file.parent)
-                        add_album_warning_label(label, f"[WARN] Could not delete orphan backup {backup_file.name}: {e}")
+                        logmsg.warn("Could not delete orphan backup {file}: {error}", file=backup_file.name, error=str(e))
             
             logmsg.end_item(item_key)
         
@@ -655,12 +614,12 @@ def sync_backups(dry_run: bool = False, use_checksums: bool = None) -> None:
                     break
 
                 logmsg.verbose("Removing empty backup folder: {path}", path=str(current))
-                log(f"  [CLEANUP] Removing empty backup folder: {current}")
+                print(f"  [CLEANUP] Removing empty backup folder: {current}")
                 try:
                     current.rmdir()
                 except OSError as e:
                     logmsg.warn("Could not remove empty backup folder {path}: {error}", path=str(current), error=str(e))
-                    log(f"    [CLEANUP WARN] Could not remove {current}: {e}")
+                    print(f"    [CLEANUP WARN] Could not remove {current}: {e}")
                     break
 
                 # Move up to parent directory
@@ -669,7 +628,6 @@ def sync_backups(dry_run: bool = False, use_checksums: bool = None) -> None:
     # Note: Empty backup root cleanup is handled in startup permission checks
     # No need to handle it here - if it's empty, it was already removed at startup
     
-    log(f"[SYNC BACKUP] Processed {backups_processed} backups: {backups_removed} removed, {backups_restored} restored")
 
 
 def restore_flacs_from_backups(dry_run: bool = False) -> None:
@@ -684,11 +642,9 @@ def restore_flacs_from_backups(dry_run: bool = False) -> None:
     
     if not BACKUP_ROOT.exists():
         logmsg.info("No backup root found; nothing to restore.")
-        log("  No backup root found; nothing to restore.")
         logmsg.header(None, key=restore_key)
         return
 
-    log(f"\n[RESTORE] Restoring FLACs from backup under {BACKUP_ROOT}")
     
     # Track current album for context
     current_album_dir = None
@@ -722,13 +678,11 @@ def restore_flacs_from_backups(dry_run: bool = False) -> None:
                         dest_mtime = dest.stat().st_mtime
                         if backup_size == dest_size and abs(backup_mtime - dest_mtime) < 2.0:
                             logmsg.verbose("SKIP: %item% (files appear identical (size: {size} bytes, mtime diff: {diff}s))", size=backup_size, diff=abs(backup_mtime - dest_mtime))
-                            log(f"  SKIP: {dest.name} (files appear identical (size: {backup_size} bytes, mtime diff: {abs(backup_mtime - dest_mtime):.1f}s))")
                             continue
                     except (OSError, FileNotFoundError):
                         pass  # Can't compare, proceed with restore
                 
                 logmsg.info("RESTORE: %item%")
-                log(f"  RESTORE: {backup_file} -> {dest}")
                 if not dry_run:
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(backup_file, dest)
@@ -736,9 +690,7 @@ def restore_flacs_from_backups(dry_run: bool = False) -> None:
                         backup_file.unlink()
                     except OSError as e:
                         logmsg.warn("Could not delete backup %item%: {error}", error=str(e))
-                        log(f"    [WARN] Could not delete backup {backup_file}: {e}")
-                        label = album_label_from_dir(dest.parent)
-                        add_album_warning_label(label, f"[WARN] Could not delete backup {backup_file}: {e}")
+                        logmsg.warn("Could not delete backup {file}: {error}", file=backup_file.name, error=str(e))
             finally:
                 logmsg.end_item(item_key)
 
@@ -772,11 +724,9 @@ def restore_flacs_from_backups(dry_run: bool = False) -> None:
                 item_key = logmsg.begin_item(item_id)
                 try:
                     logmsg.verbose("Removing empty backup folder: %item%")
-                    log(f"  [CLEANUP] Removing empty backup folder: {current}")
                     current.rmdir()
                 except OSError as e:
                     logmsg.warn("Could not remove empty backup folder %item%: {error}", error=str(e))
-                    log(f"    [CLEANUP WARN] Could not remove {current}: {e}")
                     logmsg.end_item(item_key)
                     break
                 finally:
@@ -796,15 +746,13 @@ def restore_flacs_from_backups(dry_run: bool = False) -> None:
                 contents = list(BACKUP_ROOT.iterdir())
                 if not contents:
                     logmsg.verbose("Backup root is empty, removing it (will be recreated on next backup)")
-                    log(f"  [CLEANUP] Backup root is empty, removing it (will be recreated on next backup)")
                     try:
                         BACKUP_ROOT.rmdir()
                     except OSError as e:
                         logmsg.warn("Could not remove empty backup root: {error}", error=str(e))
-                        log(f"  [CLEANUP WARN] Could not remove empty backup root {BACKUP_ROOT}: {e}")
         except Exception as e:
             logmsg.warn("Could not check backup root: {error}", error=str(e))
-            log(f"  [CLEANUP WARN] Could not check backup root: {e}")
+            print(f"  [CLEANUP WARN] Could not check backup root: {e}")
     
     # Close restore header
     logmsg.header(None, key=restore_key)

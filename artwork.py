@@ -30,8 +30,6 @@ from config import (
     WEB_ART_LOOKUP_TIMEOUT,
 )
 from logging_utils import (
-    add_album_event_label,
-    add_album_warning_label,
     album_label_from_dir,
     log,
 )
@@ -73,7 +71,6 @@ def export_embedded_art_to_cover(first_file: Path, cover_path: Path, dry_run: bo
                     return True
         except Exception as e:
             # Log but don't fail - try other methods
-            log(f"    [ART WARN] Could not extract MP4 cover: {e}")
             pass
 
     # MP3 files (ID3/APIC)
@@ -111,19 +108,17 @@ def fetch_art_from_web(artist: str, album: str, cover_path: Path, dry_run: bool 
 
         for attempt in range(1, WEB_ART_LOOKUP_RETRIES + 1):
             try:
-                log(f"    [WEB] Fetch attempt {attempt}/{WEB_ART_LOOKUP_RETRIES}...")
                 r = requests.get(url, timeout=WEB_ART_LOOKUP_TIMEOUT)
                 if r.status_code == 200:
                     if not dry_run:
                         cover_path.write_bytes(r.content)
                     return True
             except Exception as e:
-                log(f"    [WEB WARN] Attempt {attempt} failed: {e}")
+                logmsg.verbose("Web art fetch attempt {attempt} failed: {error}", attempt=attempt, error=str(e))
 
         return False
 
     except Exception as e:
-        log(f"  [WARN] Art lookup failed for {artist} - {album}: {e}")
         return False
 
 
@@ -203,11 +198,9 @@ def fetch_artist_image_from_web(artist: str, artist_dir: Path, dry_run: bool = F
         # Last.fm API: http://ws.audioscrobbler.com/2.0/?method=artist.getinfo&artist={artist}&api_key={key}
         
         # For now, return False - we'll need to implement based on available services
-        log(f"  [ARTIST ART] MusicBrainz found artist {artist} (MBID: {artist_mbid}), but artist image fetching not yet implemented")
         return False
         
     except Exception as e:
-        log(f"  [WARN] Artist image lookup failed for {artist}: {e}")
         return False
 
 
@@ -254,7 +247,6 @@ def ensure_artist_images(artist_dir: Path, artist: str, dry_run: bool = False) -
                     logmsg.info("Would create artist.jpg from folder.jpg")
                 else:
                     logmsg.info("Creating artist.jpg from folder.jpg")
-                log(f"  [ARTIST ART] folder.jpg exists, creating artist.jpg from it")
                 if not dry_run:
                     shutil.copy2(folder_path, artist_path)
             need_to_ensure = False
@@ -266,7 +258,6 @@ def ensure_artist_images(artist_dir: Path, artist: str, dry_run: bool = False) -
                     logmsg.info("Would create folder.jpg from artist.jpg")
                 else:
                     logmsg.info("%item%: Creating folder.jpg from artist.jpg")
-                log(f"  [ARTIST ART] artist.jpg exists, creating folder.jpg from it")
                 if not dry_run:
                     shutil.copy2(artist_path, folder_path)
             need_to_ensure = False
@@ -310,78 +301,71 @@ def ensure_artist_images(artist_dir: Path, artist: str, dry_run: bool = False) -
             
             # Select best (largest by pixel dimensions)
             if candidates:
-            candidates.sort(key=lambda x: (x[1][0] * x[1][1], x[1][2]), reverse=True)
-            best_image, best_size, source = candidates[0]
-            best_pixels = best_size[0] * best_size[1]
-            
-            # Check if we should upgrade existing artist.jpg
-            should_upgrade = True
-            existing_size = None
-            if artist_path.exists():
-                existing_size = get_image_size(artist_path)
-                if existing_size:
-                    existing_pixels = existing_size[0] * existing_size[1]
-                    if best_pixels <= existing_pixels:
-                        should_upgrade = False
-                        logmsg.verbose("Keeping existing artist.jpg (existing: {existing}px, new: {new}px - same or smaller dimensions)", existing=existing_pixels, new=best_pixels)
-                        log(f"  [ARTIST ART] Keeping existing artist.jpg (existing: {existing_pixels}px, new: {best_pixels}px - same or smaller dimensions)")
-            
-            if should_upgrade:
-                if artist_path.exists() and existing_size:
-                    existing_pixels = existing_size[0] * existing_size[1]
-                    if dry_run:
-                        logmsg.info("Would upgrade artist.jpg (new: {new}px, previous: {prev}px) from {source}", new=best_pixels, prev=existing_pixels, source=source)
-                    else:
-                        logmsg.info("%item%: Upgrading artist.jpg (new: {new}px, previous: {prev}px) from {source}", new=best_pixels, prev=existing_pixels, source=source)
-                    log(f"  [ARTIST ART] Found image in {source}: {best_image.name} ({best_size[0]}x{best_size[1]}, {best_size[2]} bytes)")
-                    log(f"    Upgrading artist.jpg (new: {best_pixels}px, previous: {existing_pixels}px)")
-                else:
-                    if dry_run:
-                        logmsg.info("Would create artist.jpg from {source}: {file}", source=source, file=best_image.name)
-                    else:
-                        logmsg.info("%item%: Creating artist.jpg from {source}: {file}", source=source, file=best_image.name)
-                    log(f"  [ARTIST ART] Found image in {source}: {best_image.name} ({best_size[0]}x{best_size[1]}, {best_size[2]} bytes)")
-                    log(f"    Creating artist.jpg from {best_image.name}")
+                candidates.sort(key=lambda x: (x[1][0] * x[1][1], x[1][2]), reverse=True)
+                best_image, best_size, source = candidates[0]
+                best_pixels = best_size[0] * best_size[1]
                 
-                if not dry_run:
-                    # Convert to JPEG if needed
-                    if best_image.suffix.lower() in {".png", ".gif", ".webp"}:
-                        try:
-                            from PIL import Image
-                            with Image.open(best_image) as img:
-                                # Convert RGBA to RGB if needed
-                                if img.mode in ("RGBA", "LA", "P"):
-                                    rgb_img = Image.new("RGB", img.size, (255, 255, 255))
-                                    if img.mode == "P":
-                                        img = img.convert("RGBA")
-                                    rgb_img.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
-                                    img = rgb_img
+                # Check if we should upgrade existing artist.jpg
+                should_upgrade = True
+                existing_size = None
+                if artist_path.exists():
+                    existing_size = get_image_size(artist_path)
+                    if existing_size:
+                        existing_pixels = existing_size[0] * existing_size[1]
+                        if best_pixels <= existing_pixels:
+                            should_upgrade = False
+                            logmsg.verbose("Keeping existing artist.jpg (existing: {existing}px, new: {new}px - same or smaller dimensions)", existing=existing_pixels, new=best_pixels)
+                
+                if should_upgrade:
+                    if artist_path.exists() and existing_size:
+                        existing_pixels = existing_size[0] * existing_size[1]
+                        if dry_run:
+                            logmsg.info("Would upgrade artist.jpg (new: {new}px, previous: {prev}px) from {source}", new=best_pixels, prev=existing_pixels, source=source)
+                        else:
+                            logmsg.info("%item%: Upgrading artist.jpg (new: {new}px, previous: {prev}px) from {source}", new=best_pixels, prev=existing_pixels, source=source)
+                    else:
+                        if dry_run:
+                            logmsg.info("Would create artist.jpg from {source}: {file}", source=source, file=best_image.name)
+                        else:
+                            logmsg.info("%item%: Creating artist.jpg from {source}: {file}", source=source, file=best_image.name)
+                    
+                    if not dry_run:
+                        # Convert to JPEG if needed
+                        if best_image.suffix.lower() in {".png", ".gif", ".webp"}:
+                            try:
+                                from PIL import Image
+                                with Image.open(best_image) as img:
+                                    # Convert RGBA to RGB if needed
+                                    if img.mode in ("RGBA", "LA", "P"):
+                                        rgb_img = Image.new("RGB", img.size, (255, 255, 255))
+                                        if img.mode == "P":
+                                            img = img.convert("RGBA")
+                                        rgb_img.paste(img, mask=img.split()[-1] if img.mode in ("RGBA", "LA") else None)
+                                        img = rgb_img
+                                    artist_path.parent.mkdir(parents=True, exist_ok=True)
+                                    img.save(artist_path, "JPEG", quality=95, optimize=True)
+                            except Exception as e:
+                                logmsg.warn("Could not convert {file} to JPEG: {error}", file=best_image.name, error=str(e))
                                 artist_path.parent.mkdir(parents=True, exist_ok=True)
-                                img.save(artist_path, "JPEG", quality=95, optimize=True)
-                        except Exception as e:
-                            logmsg.warn("Could not convert {file} to JPEG: {error}", file=best_image.name, error=str(e))
-                            log(f"    [WARN] Could not convert {best_image.name} to JPEG: {e}")
+                                shutil.copy2(best_image, artist_path)
+                        else:
+                            # Already JPEG - copy it
                             artist_path.parent.mkdir(parents=True, exist_ok=True)
                             shutil.copy2(best_image, artist_path)
-                    else:
-                        # Already JPEG - copy it
-                        artist_path.parent.mkdir(parents=True, exist_ok=True)
-                        shutil.copy2(best_image, artist_path)
-                    
-                    # Also create folder.jpg from same source (use artist.jpg, not cover.jpg)
-                    if not folder_path.exists():
-                        logmsg.verbose("Creating folder.jpg from artist.jpg")
-                        shutil.copy2(artist_path, folder_path)
-                    
-                    # Clean up source file if it's from downloads or overlay (not from existing artist folder)
-                    if source in ("downloads", "overlay"):
-                        try:
-                            best_image.unlink()
-                            logmsg.verbose("Cleaned up source file: {file}", file=best_image.name)
-                            log(f"    Cleaned up source file: {best_image.name}")
-                        except Exception as e:
-                            logmsg.warn("Could not delete source file {file}: {error}", file=best_image.name, error=str(e))
-                            log(f"    [WARN] Could not delete source file {best_image.name}: {e}")
+                        
+                        # Also create folder.jpg from same source (use artist.jpg, not cover.jpg)
+                        if not folder_path.exists():
+                            logmsg.verbose("Creating folder.jpg from artist.jpg")
+                            shutil.copy2(artist_path, folder_path)
+                        
+                        # Clean up source file if it's from downloads or overlay (not from existing artist folder)
+                        if source in ("downloads", "overlay"):
+                            try:
+                                best_image.unlink()
+                                logmsg.verbose("Cleaned up source file: {file}", file=best_image.name)
+                                print(f"    Cleaned up source file: {best_image.name}")
+                            except Exception as e:
+                                logmsg.warn("Could not delete source file {file}: {error}", file=best_image.name, error=str(e))
         
         # Clean up non-standard artist image files (anything that's not artist.jpg or folder.jpg)
         # This ensures only the standard files are synced to T8 in Step 9
@@ -398,10 +382,8 @@ def ensure_artist_images(artist_dir: Path, artist: str, dry_run: bool = False) -
                             if not dry_run:
                                 img_file.unlink()
                             logmsg.verbose("Removing non-standard artist image: {file}", file=img_file.name)
-                            log(f"    [ARTIST ART] Removing non-standard artist image: {img_file.name}")
                         except Exception as e:
                             logmsg.warn("Could not delete non-standard artist image {file}: {error}", file=img_file.name, error=str(e))
-                            log(f"    [WARN] Could not delete non-standard artist image {img_file.name}: {e}")
     finally:
         # Always unset item context, even if we return early or encounter an exception
         logmsg.end_item(item_key)
@@ -585,7 +567,6 @@ def find_predownloaded_art_source_for_album(items: List[Tuple[Path, Dict[str, An
         candidates.sort(key=lambda x: (x[1][0] * x[1][1], x[1][2]), reverse=True)
         best_art = candidates[0][0]
         best_size = candidates[0][1]
-        log(f"  [ART] Selected best art: {best_art.name} ({best_size[0]}x{best_size[1]}, {best_size[2]} bytes)")
         return best_art
     
     return None
@@ -607,8 +588,8 @@ def backup_audio_file_if_needed(audio_path: Path, dry_run: bool = False, backup_
     if backup_path.exists():
         # Backup already exists - skip to avoid overwriting original backup
         # This handles cases where file is modified multiple times (tags, then art)
+        print(f"  BACKUP: {audio_path} -> {backup_path}")
         return
-    log(f"  BACKUP: {audio_path} -> {backup_path}")
     if not dry_run:
         import shutil
         backup_path.parent.mkdir(parents=True, exist_ok=True)
@@ -651,7 +632,7 @@ def ensure_cover_and_folder(
     if folder_path.exists():
         if not cover_path.exists():
             logmsg.verbose("folder.jpg exists, creating cover.jpg from it")
-            log("  folder.jpg exists, creating cover.jpg from it")
+            print("  folder.jpg exists, creating cover.jpg from it")
             if not dry_run:
                 shutil.copy2(folder_path, cover_path)
         return
@@ -660,57 +641,51 @@ def ensure_cover_and_folder(
     if cover_path.exists():
         if not folder_path.exists():
             logmsg.verbose("cover.jpg exists, creating folder.jpg from it")
-            log("  cover.jpg exists, creating folder.jpg from it")
+            print("  cover.jpg exists, creating folder.jpg from it")
             if not dry_run:
                 try:
                     shutil.copy2(cover_path, folder_path)
                     logmsg.verbose("folder.jpg created successfully")
-                    log("  ✓ folder.jpg created successfully")
                 except Exception as e:
-                    log(f"  [WARN] Failed to create folder.jpg: {e}")
                     if label:
-                        add_album_warning_label(label, f"Failed to create folder.jpg: {e}")
+                        from structured_logging import logmsg
+                        logmsg.warn("Failed to create folder.jpg: {error}", error=str(e))
         return
 
     # Neither exists - try to create cover.jpg from embedded art or web
     if not skip_cover_creation:
         if not cover_path.exists():
             logmsg.verbose("No cover.jpg; attempting to export embedded art…")
-            log("  No cover.jpg; attempting to export embedded art…")
+            print("  No cover.jpg; attempting to export embedded art…")
             first_file = album_files[0][0]
             if export_embedded_art_to_cover(first_file, cover_path, dry_run):
                 logmsg.verbose("cover.jpg created from embedded art.")
-                log("  cover.jpg created from embedded art.")
-                if label:
-                    add_album_event_label(label, "Found art (embedded).")
+                print("  cover.jpg created from embedded art.")
+                # Event tracked automatically by structured logging
             else:
                 logmsg.verbose("No embedded art; attempting web fetch…")
-                log("  No embedded art; attempting web fetch…")
+                print("  No embedded art; attempting web fetch…")
                 if fetch_art_from_web(artist, album, cover_path, dry_run):
                     logmsg.verbose("cover.jpg downloaded from web.")
-                    log("  cover.jpg downloaded from web.")
-                    if label:
-                        add_album_event_label(label, "Found art (web).")
+                    print("  cover.jpg downloaded from web.")
+                    # Event tracked automatically by structured logging
                 else:
                     msg = "[WARN] Could not obtain artwork."
-                    log(f"  {msg}")
-                    if label:
-                        add_album_warning_label(label, msg)
-                        logmsg.warn("Could not obtain artwork.")
+                    print(f"  {msg}")
+                    logmsg.warn("Could not obtain artwork.")
     
     # After creating/finding cover.jpg, ensure folder.jpg exists in album root
     if cover_path.exists() and not folder_path.exists():
         logmsg.verbose("Creating folder.jpg from cover.jpg")
-        log("  Creating folder.jpg from cover.jpg")
+        print("  Creating folder.jpg from cover.jpg")
         if not dry_run:
             try:
                 shutil.copy2(cover_path, folder_path)
                 logmsg.verbose("folder.jpg created successfully")
-                log("  ✓ folder.jpg created successfully")
+                print("  ✓ folder.jpg created successfully")
             except Exception as e:
-                log(f"  [WARN] Failed to create folder.jpg: {e}")
-                if label:
-                    add_album_warning_label(label, f"Failed to create folder.jpg: {e}")
+                from structured_logging import logmsg
+                logmsg.warn("Failed to create folder.jpg: {error}", error=str(e))
     
     # Ensure CD1/CD2 subdirectories have folder.jpg (not cover.jpg) if they don't already
     # Use album root cover.jpg or folder.jpg as source
@@ -728,16 +703,15 @@ def ensure_cover_and_folder(
                     subfolder_folder = subdir / "folder.jpg"
                     if not subfolder_folder.exists():
                         logmsg.verbose("Creating folder.jpg in {subdir}/ from album root", subdir=subdir.name)
-                        log(f"  Creating folder.jpg in {subdir.name}/ from album root")
+                        print(f"  Creating folder.jpg in {subdir.name}/ from album root")
                         if not dry_run:
                             try:
                                 shutil.copy2(source_for_subfolders, subfolder_folder)
                                 logmsg.verbose("folder.jpg created in {subdir}/", subdir=subdir.name)
-                                log(f"  ✓ folder.jpg created in {subdir.name}/")
                             except Exception as e:
-                                log(f"  [WARN] Failed to create folder.jpg in {subdir.name}/: {e}")
                                 if label:
-                                    add_album_warning_label(label, f"Failed to create folder.jpg in {subdir.name}/: {e}")
+                                    from structured_logging import logmsg
+                                    logmsg.warn("Failed to create folder.jpg in {subdir}/: {error}", subdir=subdir.name, error=str(e))
 
 
 def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_enabled: bool = True) -> None:
@@ -754,7 +728,6 @@ def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_en
     
     cover_path = album_dir / "cover.jpg"
     if not cover_path.exists():
-        log(f"  [EMBED] No cover.jpg in {album_dir}, skipping.")
         return
     
     # Set album context for structured logging
@@ -772,10 +745,8 @@ def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_en
             
             if dry_run:
                 logmsg.info("Would embed artwork into %item% (force update)")
-                log(f"  EMBED: would update embedded art in {p}")
             else:
                 logmsg.info("Embedding artwork into %item% (force update)")
-                log(f"  EMBED: updating embedded art in {p}")
                 
                 embedded = False
                 # Try FLAC first
@@ -858,7 +829,6 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True) 
     from pathlib import Path
     import os
     
-    log("\n[ADD TAGS] Adding missing tags to files without tags...")
     total_processed = 0
     total_added = 0
     
@@ -891,7 +861,6 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True) 
         
         # If we have album metadata and files without tags, add tags to them
         if album_metadata and files_without_tags:
-            log(f"  [ADD TAGS] Found {len(files_without_tags)} file(s) without tags in {album_dir.name}")
             for audio_file in files_without_tags:
                 # Extract track number and title from filename
                 import re
@@ -923,14 +892,9 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True) 
                     "title": title,
                 }
                 
-                log(f"  [ADD TAGS] Adding tags to {audio_file.name}: {tags_to_write}")
                 if write_tags_to_file(audio_file, tags_to_write, dry_run, backup_enabled):
-                    log(f"    ✓ Added tags to {audio_file.name}")
                     total_added += 1
-                else:
-                    log(f"    [WARN] Could not add tags to {audio_file.name}")
-    
-    log(f"[ADD TAGS] Processed {total_processed} files, added tags to {total_added} files")
+                # else: warning already logged via logmsg.warn() if available
 
 
 def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True, embed_if_missing: bool = True) -> None:
@@ -1038,7 +1002,6 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                         if len(audio.pictures) > 0:
                             has_embedded_art = True
                             logmsg.verbose("%item% already has embedded art, skipping")
-                            log(f"  [EMBED] {p.name} already has embedded art, skipping")
                     except Exception:
                         # Not actually FLAC, try other formats
                         pass
@@ -1054,7 +1017,6 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                                 if key.startswith("APIC"):
                                     has_embedded_art = True
                                     logmsg.verbose("%item% already has embedded art, skipping")
-                                    log(f"  [EMBED] {p.name} already has embedded art, skipping")
                                     break
                     except Exception:
                         pass
@@ -1066,7 +1028,6 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                         if 'covr' in audio:
                             has_embedded_art = True
                             logmsg.verbose("%item% already has embedded art, skipping")
-                            log(f"  [EMBED] {p.name} already has embedded art, skipping")
                     except Exception:
                         pass
                 
@@ -1078,13 +1039,11 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                             if hasattr(audio, "pictures") and len(audio.pictures) > 0:
                                 has_embedded_art = True
                                 logmsg.verbose("%item% already has embedded art, skipping")
-                                log(f"  [EMBED] {p.name} already has embedded art, skipping")
                     except Exception:
                         pass
                         
             except Exception as e:
                 logmsg.warn("Could not check embedded art for %item%: {error}", error=str(e))
-                log(f"  [EMBED WARN] Could not check embedded art for {p}: {e}")
                 # Don't skip - try to embed anyway if we can determine format later
 
             if has_embedded_art:
@@ -1098,7 +1057,6 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                     if 'covr' in audio:
                         has_embedded_art = True
                         logmsg.verbose("%item% already has embedded art, skipping")
-                        log(f"  [EMBED] {p.name} already has embedded art, skipping")
                 except Exception:
                     pass  # Will try to embed below
                 
@@ -1111,7 +1069,6 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                     cover_data = cover_path.read_bytes()
                 except Exception as e:
                     logmsg.warn("Could not read cover.jpg: {error}", error=str(e))
-                    log(f"  [EMBED WARN] Could not read cover.jpg in {album_dir}: {e}")
                     logmsg.end_item(item_key)
                     break
 
@@ -1119,13 +1076,11 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
 
             if dry_run:
                 logmsg.info("[DRY RUN] Would embed art into %item% (missing embedded art)")
-                log(f"  [EMBED] [DRY RUN] Would embed art into {p.name} (missing embedded art)")
                 total_embedded += 1
                 logmsg.end_item(item_key)
                 continue
 
             logmsg.info("Embedding art into %item% (missing embedded art)")
-            log(f"  [EMBED] Embedding art into {p.name} (missing embedded art)")
 
             backup_audio_file_if_needed(p, dry_run, backup_enabled)
 
@@ -1145,7 +1100,7 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                         audio.clear_pictures()
                         audio.add_picture(pic)
                         audio.save()
-                        log(f"    ✓ Embedded art into {p.name} (FLAC)")
+                        print(f"    ✓ Embedded art into {p.name} (FLAC)")
                         total_embedded += 1
                         embedded = True
                     except Exception as e:
@@ -1154,7 +1109,6 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                             if len(error_msg) > 200:
                                 error_msg = error_msg[:197] + "..."
                             logmsg.warn("File has .flac extension but is not valid FLAC, trying other formats: {error}", error=error_msg)
-                            log(f"    [WARN] File has .flac extension but is not valid FLAC, trying other formats: {e}")
                         else:
                             raise
                 
@@ -1173,7 +1127,7 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                             data=cover_data
                         ))
                         audio.save()
-                        log(f"    ✓ Embedded art into {p.name} (MP3)")
+                        print(f"    ✓ Embedded art into {p.name} (MP3)")
                         total_embedded += 1
                         embedded = True
                     except ID3NoHeaderError:
@@ -1188,7 +1142,7 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                             data=cover_data
                         ))
                         audio.save()
-                        log(f"    ✓ Embedded art into {p.name} (MP3)")
+                        print(f"    ✓ Embedded art into {p.name} (MP3)")
                         total_embedded += 1
                         embedded = True
                     except Exception as e:
@@ -1199,7 +1153,6 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                             if len(error_msg) > 200:
                                 error_msg = error_msg[:197] + "..."
                             logmsg.warn("File has .mp3 extension but is not valid MP3, trying other formats: {error}", error=error_msg)
-                            log(f"    [WARN] File has .mp3 extension but is not valid MP3, trying other formats: {error_msg}")
                         else:
                             raise
                 
@@ -1212,7 +1165,7 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                         cover = MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)
                         audio['covr'] = [cover]
                         audio.save()
-                        log(f"    ✓ Embedded art into {p.name} (MP4/M4A)")
+                        print(f"    ✓ Embedded art into {p.name} (MP4/M4A)")
                         total_embedded += 1
                         embedded = True
                     except Exception as e:
@@ -1222,7 +1175,6 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                             if len(error_msg) > 200:
                                 error_msg = error_msg[:197] + "..."
                             logmsg.warn("Could not embed art into MP4/M4A file %item%: {error}", error=error_msg)
-                            log(f"    [WARN] Could not embed art into {p.name} (MP4/M4A): {e}")
                         else:
                             raise
                 
@@ -1240,12 +1192,11 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                                 pic.desc = "Cover"
                                 audio.add_picture(pic)
                                 audio.save()
-                                log(f"    ✓ Embedded art into {p.name} (generic)")
+                                print(f"    ✓ Embedded art into {p.name} (generic)")
                                 total_embedded += 1
                                 embedded = True
                             else:
                                 logmsg.warn("Format {ext} does not support embedded art", ext=p.suffix)
-                                log(f"  [EMBED WARN] Format {p.suffix} does not support embedded art")
                     except Exception as e:
                         # Don't log the exception object directly (may contain binary data)
                         error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
@@ -1253,11 +1204,9 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                         if len(error_msg) > 200:
                             error_msg = error_msg[:197] + "..."
                         logmsg.warn("Could not embed art using generic method: {error}", error=error_msg)
-                        log(f"  [EMBED WARN] Could not embed art using generic method: {error_msg}")
                 
                 if not embedded:
                     logmsg.warn("Could not determine format or embed art into %item%")
-                    log(f"  [EMBED WARN] Could not determine format or embed art into {p.name}")
             except Exception as e:
                 # Don't log the exception object directly (may contain binary data)
                 error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
@@ -1265,17 +1214,13 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                 if len(error_msg) > 200:
                     error_msg = error_msg[:197] + "..."
                 logmsg.warn("Failed to embed art into %item%: {error}", error=error_msg)
-                log(f"  [EMBED WARN] Failed to embed art into {p}: {error_msg}")
             
             logmsg.end_item(item_key)
 
-        if embedded_any:
-            from logging_utils import add_album_event_label
-            add_album_event_label(album_label, "Embedded missing art.")
+        # Events tracked automatically by structured logging
         
         logmsg.end_album(album_key)
     
-    log(f"[EMBED] Checked {total_checked} files, embedded art into {total_embedded} files")
 
 
 def fixup_missing_art(dry_run: bool = False) -> None:
@@ -1288,10 +1233,9 @@ def fixup_missing_art(dry_run: bool = False) -> None:
     """
     from config import AUDIO_EXT, MUSIC_ROOT
     from tag_operations import get_tags
-    from logging_utils import album_label_from_tags, add_album_event_label, add_album_warning_label
+    from logging_utils import album_label_from_tags
     from structured_logging import logmsg
     
-    log("\n[ART FIXUP] Scanning library for albums missing cover.jpg...")
     
     # Track processed albums to avoid duplicates (e.g., CD1 and CD2 subdirectories)
     processed_albums = set()
@@ -1341,28 +1285,24 @@ def fixup_missing_art(dry_run: bool = False) -> None:
         # Set album context
         album_key = logmsg.begin_album(album_dir)
 
-        log(f"  [ART FIXUP] Missing cover: {artist} - {album}")
 
         if export_embedded_art_to_cover(first_audio_path, cover_path, dry_run):
             # Set item context to the created cover file (more interesting than source FLAC)
             item_key = logmsg.begin_item(cover_path.name)
             logmsg.info("Extracted embedded art to %item%")
-            log("    Extracted embedded art.")
             logmsg.end_item(item_key)
-            add_album_event_label(label, "Found missing art (embedded).")
+            # Event tracked automatically by structured logging
             logmsg.end_album(album_key)
             continue
 
         if fetch_art_from_web(artist, album, cover_path, dry_run):
             logmsg.info("Downloaded cover via web")
-            log("    Downloaded cover via web.")
-            add_album_event_label(label, "Found missing art (web).")
+            # Event tracked automatically by structured logging
             logmsg.end_album(album_key)
             continue
 
         logmsg.warn("Could not obtain artwork")
         msg = "[WARN] Could not obtain artwork."
-        log(f"    {msg}")
-        add_album_warning_label(label, msg)
+        # Warning already logged via logmsg.warn() above
         logmsg.end_album(album_key)
 

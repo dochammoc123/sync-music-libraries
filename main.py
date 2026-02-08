@@ -32,13 +32,10 @@ from config import (
 )
 from file_operations import process_downloads, upgrade_albums_to_flac_only
 from logging_utils import (
-    add_global_warning,
-    log,
     notify_run_summary,
     print_summary_log_to_stdout,
     setup_logging,
     show_summary_log_in_viewer,
-    write_summary_log,
 )
 from sync_operations import (
     apply_updates_from_overlay,
@@ -107,9 +104,9 @@ def main() -> None:
         EMBED_IF_MISSING = False
         EMBED_FROM_UPDATES = False
 
-    setup_logging()  # Old API: file only (no console)
+    setup_logging()  # File only (no console)
     from structured_logging import setup_detail_logging
-    setup_detail_logging()  # New API: detail file + console
+    setup_detail_logging()  # Detail file + console
     
     # Add run divider to detail log file (use public API)
     from structured_logging import logmsg
@@ -127,7 +124,7 @@ def main() -> None:
             exit_code: Exit code (default 1)
             is_error: If True, log as error; if False, log as warning (e.g., for DRY_RUN scenarios)
         """
-        log(error_msg)
+        print(error_msg, file=sys.stderr)
         # Strip "ERROR:" or "WARNING:" prefix if present
         clean_msg = error_msg
         if clean_msg.startswith("ERROR:") or clean_msg.startswith("WARNING:"):
@@ -138,10 +135,6 @@ def main() -> None:
             logmsg.error(clean_msg)
         else:
             logmsg.warn(clean_msg)
-        # Also add to old API global warnings for old summary file
-        level = "error" if is_error else "warn"
-        add_global_warning(clean_msg, level=level)
-        write_summary_log(args.mode, DRY_RUN)
         logmsg.write_summary(args.mode, DRY_RUN)
         notify_run_summary(args.mode)
         # Keep console open for user to review
@@ -234,7 +227,7 @@ def main() -> None:
             )
             exit_with_error(error_msg, exit_code=1, is_error=True)
     
-    log("\nSafety check: Verifying directory permissions...")
+    print("\nSafety check: Verifying directory permissions...")
     logmsg.verbose("Verifying directory permissions...")
     check_directory_permissions(MUSIC_ROOT, "MUSIC_ROOT (ROON)", must_exist=True)
     check_directory_permissions(BACKUP_ROOT, "BACKUP_ROOT", must_exist=False)  # May not exist yet
@@ -252,13 +245,13 @@ def main() -> None:
     check_directory_permissions(UPDATE_ROOT, "UPDATE_ROOT", must_exist=False)  # May not exist yet
     if T8_ROOT is not None:
         check_directory_permissions(T8_ROOT, "T8_ROOT", must_exist=False)  # May not exist yet
-    log("Directory permissions check passed.\n")
+    print("Directory permissions check passed.\n")
     logmsg.verbose("Directory permissions check passed.\n")
     
-    log(f"Starting script in mode: {args.mode}")
-    log(f"DRY_RUN = {DRY_RUN}")
-    log(f"EMBED_ALL = {EMBED_ALL}")
-    log(f"T8_SYNC_USE_CHECKSUMS = {args.t8_checksums}")
+    print(f"Starting script in mode: {args.mode}")
+    print(f"DRY_RUN = {DRY_RUN}")
+    print(f"EMBED_ALL = {EMBED_ALL}")
+    print(f"T8_SYNC_USE_CHECKSUMS = {args.t8_checksums}")
     
     # Log startup info as always_show headers (appears in both detail log and summary)
     from structured_logging import logmsg
@@ -272,12 +265,12 @@ def main() -> None:
         logmsg.header(None, key=header_key)
 
     # Safety check: Verify both ROON and T8 drives have at least 1TB total capacity
-    log("\nSafety check: Verifying disk capacity on target drives...")
+    print("\nSafety check: Verifying disk capacity on target drives...")
     min_tb = MIN_DISK_CAPACITY_BYTES / (1024 ** 4)  # Convert to TB for display
     
     try:
         # Check ROON (MUSIC_ROOT) drive
-        log(f"  Checking ROON drive: {MUSIC_ROOT}")
+        print(f"  Checking ROON drive: {MUSIC_ROOT}")
         # Check if this is a network share - they often report incorrect capacity
         is_network_share = (
             (SYSTEM == "Windows" and str(MUSIC_ROOT).startswith("\\\\")) or
@@ -289,16 +282,16 @@ def main() -> None:
             try:
                 test_access = MUSIC_ROOT if MUSIC_ROOT.exists() else MUSIC_ROOT.parent
                 if test_access.exists():
-                    log(f"  INFO: ROON drive ({MUSIC_ROOT}) is accessible (network share - capacity check skipped)")
+                    print(f"  INFO: ROON drive ({MUSIC_ROOT}) is accessible (network share - capacity check skipped)")
                     logmsg.verbose("ROON drive is a network share - capacity check skipped (network shares may not report capacity reliably)")
                     # Don't check capacity for network shares - they're unreliable
                     pass
                 else:
                     # Path not accessible
                     if DRY_RUN:
-                        log(f"  WARNING: ROON drive ({MUSIC_ROOT}) appears to be inaccessible.")
-                        log(f"  DRY RUN: Continuing with warning (drive may be offline).")
-                        add_global_warning(f"ROON drive inaccessible in DRY RUN - continuing with warning (drive may be offline)")
+                        print(f"  WARNING: ROON drive ({MUSIC_ROOT}) appears to be inaccessible.")
+                        print(f"  DRY RUN: Continuing with warning (drive may be offline).")
+                        logmsg.warn("ROON drive inaccessible in DRY RUN - continuing with warning (drive may be offline)")
                         logmsg.warn("ROON drive appears to be inaccessible in DRY RUN - continuing with warning")
                     else:
                         error_msg = (
@@ -310,9 +303,9 @@ def main() -> None:
             except Exception as e:
                 # In dry-run, allow it to continue with warning (might be a temporary network issue)
                 if DRY_RUN:
-                    log(f"  WARNING: Could not access ROON drive ({MUSIC_ROOT}) in DRY RUN: {e}")
-                    log(f"  DRY RUN: Continuing with warning (path may be temporarily inaccessible).")
-                    add_global_warning(f"ROON drive access check failed in DRY RUN - continuing with warning: {e}")
+                    print(f"  WARNING: Could not access ROON drive ({MUSIC_ROOT}) in DRY RUN: {e}")
+                    print(f"  DRY RUN: Continuing with warning (path may be temporarily inaccessible).")
+                    logmsg.warn("ROON drive access check failed in DRY RUN - continuing with warning: {error}", error=str(e))
                     logmsg.warn("ROON drive access check failed in DRY RUN - continuing with warning: {error}", error=str(e))
                 else:
                     error_msg = (
@@ -324,15 +317,15 @@ def main() -> None:
             # Not a network share - do capacity check
             has_capacity, capacity_gb, checked_path = check_disk_capacity(MUSIC_ROOT, MIN_DISK_CAPACITY_BYTES)
             if has_capacity:
-                log(f"  ROON drive ({checked_path}): {capacity_gb:.2f} GB capacity ({capacity_gb / 1024:.2f} TB) - OK")
+                print(f"  ROON drive ({checked_path}): {capacity_gb:.2f} GB capacity ({capacity_gb / 1024:.2f} TB) - OK")
             else:
                 # Capacity check failed
-                log(f"  WARNING: ROON drive ({checked_path}) capacity is too small.")
+                print(f"  WARNING: ROON drive ({checked_path}) capacity is too small.")
                 if DRY_RUN:
-                    log(f"  Required: {min_tb:.2f} TB minimum")
-                    log(f"  Actual: {capacity_gb:.2f} GB ({capacity_gb / 1024:.2f} TB)")
-                    log(f"  DRY RUN: Allowing operation to continue (no changes will be made).")
-                    add_global_warning(f"ROON drive capacity too small ({capacity_gb:.2f} GB) - continuing in DRY RUN mode")
+                    print(f"  Required: {min_tb:.2f} TB minimum")
+                    print(f"  Actual: {capacity_gb:.2f} GB ({capacity_gb / 1024:.2f} TB)")
+                    print(f"  DRY RUN: Allowing operation to continue (no changes will be made).")
+                    logmsg.warn("ROON drive capacity too small ({capacity} GB) - continuing in DRY RUN mode", capacity=capacity_gb)
                     logmsg.warn("ROON drive capacity too small in DRY RUN - continuing with warning: {capacity} GB", capacity=capacity_gb)
                 else:
                     error_msg = (
@@ -345,7 +338,7 @@ def main() -> None:
         
         # Check T8 drive
         if T8_ROOT is not None:
-            log(f"  Checking T8 drive: {T8_ROOT}")
+            print(f"  Checking T8 drive: {T8_ROOT}")
             # Check if this is a network share - they often report incorrect capacity
             is_network_share = (
                 (SYSTEM == "Windows" and str(T8_ROOT).startswith("\\\\")) or
@@ -357,16 +350,16 @@ def main() -> None:
                 try:
                     test_access = T8_ROOT if T8_ROOT.exists() else T8_ROOT.parent
                     if test_access.exists():
-                        log(f"  INFO: T8 drive ({T8_ROOT}) is accessible (network share - capacity check skipped)")
+                        print(f"  INFO: T8 drive ({T8_ROOT}) is accessible (network share - capacity check skipped)")
                         logmsg.verbose("T8 drive is a network share - capacity check skipped (network shares may not report capacity reliably)")
                         # Don't check capacity for network shares - they're unreliable
                         pass
                     else:
                         # Path not accessible - in dry-run, allow with warning (for testing when T8 is offline)
                         if DRY_RUN:
-                            log(f"  WARNING: T8 drive ({T8_ROOT}) appears to be inaccessible.")
-                            log(f"  DRY RUN: Continuing with warning (drive may be offline or IP changed).")
-                            add_global_warning(f"T8 drive inaccessible in DRY RUN - continuing with warning (drive may be offline)")
+                            print(f"  WARNING: T8 drive ({T8_ROOT}) appears to be inaccessible.")
+                            print(f"  DRY RUN: Continuing with warning (drive may be offline or IP changed).")
+                            logmsg.warn("T8 drive inaccessible in DRY RUN - continuing with warning (drive may be offline)")
                             logmsg.warn("T8 drive appears to be inaccessible in DRY RUN - continuing with warning")
                         else:
                             error_msg = (
@@ -378,9 +371,9 @@ def main() -> None:
                 except Exception as e:
                     # In dry-run, allow it to continue with warning (might be a temporary network issue)
                     if DRY_RUN:
-                        log(f"  WARNING: Could not access T8 drive ({T8_ROOT}) in DRY RUN: {e}")
-                        log(f"  DRY RUN: Continuing with warning (path may be temporarily inaccessible).")
-                        add_global_warning(f"T8 drive access check failed in DRY RUN - continuing with warning: {e}")
+                        print(f"  WARNING: Could not access T8 drive ({T8_ROOT}) in DRY RUN: {e}")
+                        print(f"  DRY RUN: Continuing with warning (path may be temporarily inaccessible).")
+                        logmsg.warn("T8 drive access check failed in DRY RUN - continuing with warning: {error}", error=str(e))
                         logmsg.warn("T8 drive access check failed in DRY RUN - continuing with warning: {error}", error=str(e))
                     else:
                         error_msg = (
@@ -392,16 +385,16 @@ def main() -> None:
                 # Not a network share - do capacity check
                 has_capacity, capacity_gb, checked_path = check_disk_capacity(T8_ROOT, MIN_DISK_CAPACITY_BYTES)
                 if has_capacity:
-                    log(f"  T8 drive ({checked_path}): {capacity_gb:.2f} GB capacity ({capacity_gb / 1024:.2f} TB) - OK")
+                    print(f"  T8 drive ({checked_path}): {capacity_gb:.2f} GB capacity ({capacity_gb / 1024:.2f} TB) - OK")
                 else:
                     # Drive too small (likely a system drive)
                     # In dry-run mode, allow it to continue with warning (no changes will be made anyway)
                     if DRY_RUN:
-                        log(f"  WARNING: T8 drive ({checked_path}) capacity is too small.")
-                        log(f"  Required: {min_tb:.2f} TB minimum")
-                        log(f"  Actual: {capacity_gb:.2f} GB ({capacity_gb / 1024:.2f} TB)")
-                        log(f"  DRY RUN: Allowing operation to continue (no changes will be made).")
-                        add_global_warning(f"T8 drive capacity too small ({capacity_gb:.2f} GB) - continuing in DRY RUN mode")
+                        print(f"  WARNING: T8 drive ({checked_path}) capacity is too small.")
+                        print(f"  Required: {min_tb:.2f} TB minimum")
+                        print(f"  Actual: {capacity_gb:.2f} GB ({capacity_gb / 1024:.2f} TB)")
+                        print(f"  DRY RUN: Allowing operation to continue (no changes will be made).")
+                        logmsg.warn("T8 drive capacity too small ({capacity} GB) - continuing in DRY RUN mode", capacity=capacity_gb)
                         logmsg.warn("T8 drive capacity too small in DRY RUN - continuing with warning: {capacity} GB", capacity=capacity_gb)
                     else:
                         error_msg = (
@@ -412,7 +405,7 @@ def main() -> None:
                         )
                         exit_with_error(error_msg, exit_code=1, is_error=True)
         
-        log("Disk capacity check passed.\n")
+        print("Disk capacity check passed.\n")
     except Exception as e:
         error_msg = f"ERROR: Exception during disk capacity check: {e}"
         from logging_utils import logger
@@ -429,66 +422,42 @@ def main() -> None:
         if RESTORE_FROM_BACKUP_MODE:
             restore_flacs_from_backups(DRY_RUN)
             
-            log("\nSync backup folder (remove identical backups, remove orphan backups)...")
+            print("\nSync backup folder (remove identical backups, remove orphan backups)...")
             from structured_logging import logmsg
             header_key = logmsg.header("Sync backup folder", "%msg% (%count% items)")
             from sync_operations import sync_backups
             sync_backups(DRY_RUN, use_checksums=None)  # Uses T8_SYNC_USE_CHECKSUMS from config
             logmsg.header(None, key=header_key)
             
-            log("\nSync master library to T8...")
+            print("\nSync master library to T8...")
             header_key = logmsg.header("Sync master library to T8", "%msg% (%count% files copied)")
             sync_music_to_t8(DRY_RUN, use_checksums=args.t8_checksums)
             logmsg.header(None, key=header_key)
-            log("Restore mode complete.")
+            print("Restore mode complete.")
             
-            log("\nRefresh ROON library...")
+            print("\nRefresh ROON library...")
             from roon_refresh import refresh_roon_library
             roon_refresh_success = refresh_roon_library(DRY_RUN)
             if not roon_refresh_success:
-                add_global_warning("ROON library refresh failed - you may need to manually restart ROON to see new files")
+                logmsg.warn("ROON library refresh failed - you may need to manually restart ROON to see new files")
             
-            write_summary_log(args.mode, DRY_RUN)
             from structured_logging import logmsg
             logmsg.write_summary(args.mode, DRY_RUN)
             notify_run_summary(args.mode)
             
             # Calculate exit code
             # Exit codes: 0 = clean (idle icon), 2 = warnings (yellow icon), 1 = errors (red icon)
-            from logging_utils import ALBUM_SUMMARY, GLOBAL_WARNINGS
             from structured_logging import logmsg
             
-            # Count warnings/errors from old API (distinguish errors from warnings by [ERROR] prefix)
-            old_errors = 0
-            old_warnings = 0
-            
-            # Count errors and warnings in album summaries
-            for v in ALBUM_SUMMARY.values():
-                for warning in v.get("warnings", []):
-                    if warning.startswith("[ERROR]"):
-                        old_errors += 1
-                    else:
-                        old_warnings += 1
-            
-            # Count errors and warnings in global warnings
-            for warning in GLOBAL_WARNINGS:
-                if warning.startswith("[ERROR]"):
-                    old_errors += 1
-                else:
-                    old_warnings += 1
-            
-            # Get counts from new structured logging API (consolidated)
-            new_errors = logmsg.count_errors
-            new_warnings = logmsg.count_warnings
-            
-            # Combine old and new API counts
-            total_errors = new_errors + old_errors
-            total_warnings = new_warnings + old_warnings
+            # Count warnings/errors from structured logging system
+            total_errors = logmsg.count_errors()
+            total_warnings = logmsg.count_warnings()
             
             # Determine exit code: errors = 1 (red), warnings only = 2 (yellow), clean = 0 (green)
             # Debug: Log counts for troubleshooting
             if total_errors > 0 or total_warnings > 0:
-                log(f"[DEBUG] Error/Warning counts - Old API: {old_errors} errors, {old_warnings} warnings | New API: {new_errors} errors, {new_warnings} warnings | Total: {total_errors} errors, {total_warnings} warnings")
+                # Debug counts removed - already logged via logmsg if available
+                pass
             
             if total_errors > 0:
                 exit_code = 1
@@ -501,15 +470,16 @@ def main() -> None:
             try:
                 print_summary_log_to_stdout()
             except Exception as e:
-                log(f"[WARN] Could not print summary log: {e}")
+                # Error already logged via logmsg if available
+                pass
             
             # Log exit status before prompt
             if exit_code == 1:
-                log(f"Exiting with code 1 ({total_errors} error(s)) - systray will show red error icon")
+                print(f"Exiting with code 1 ({total_errors} error(s)) - systray will show red error icon")
             elif exit_code == 2:
-                log(f"Exiting with code 2 ({total_warnings} warning(s)) - systray will show yellow warning icon")
+                print(f"Exiting with code 2 ({total_warnings} warning(s)) - systray will show yellow warning icon")
             else:
-                log("Exiting with code 0 (success) - systray will show idle icon")
+                print("Exiting with code 0 (success) - systray will show idle icon")
             
             # Keep console open for user to review
             if sys.platform == "win32":
@@ -523,30 +493,25 @@ def main() -> None:
             sys.exit(exit_code)
 
         # Step 1: Process new downloads (organize + art, no cleanup)
-        log("\nStep 1: Process new downloads (organize + art)...")
         from structured_logging import logmsg
         # Step header processes MULTIPLE albums (each album gets its own instance)
         header_key = logmsg.header("Step 1: Process new downloads", "%msg%")
         process_downloads(DRY_RUN)
         logmsg.header(None, key=header_key)  # Close Step 1 header
 
-        log("\nStep 2: Apply UPDATE overlay (files from Update -> Music)...")
         header_key = logmsg.header("Step 2: Apply UPDATE overlay", "%msg% (%count% items)", key=header_key)
         updated_album_dirs, albums_with_new_cover = apply_updates_from_overlay(DRY_RUN)
         logmsg.header(None, key=header_key)  # Close Step 2 header
 
-        log("\nStep 3: Upgrade albums to FLAC-only where FLAC exists...")
         header_key = logmsg.header("Step 3: Upgrade albums to FLAC-only", "%msg% (%count% items)", key=header_key)
         upgrade_albums_to_flac_only(DRY_RUN)
         logmsg.header(None, key=header_key)  # Close Step 3 header
 
-        log("\nStep 4: Embed missing artwork (only FLACs with no embedded art)...")
         header_key = logmsg.header("Step 4: Embed missing artwork", "%msg% (%count% items)", key=header_key)
         embed_missing_art_global(DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED, EMBED_IF_MISSING)
         logmsg.header(None, key=header_key)  # Close Step 4 header
 
         if EMBED_ALL:
-            log("\n[EMBED ALL] Embedding cover.jpg into all FLACs in all albums (advanced mode).")
             header_key = logmsg.header("Step 4.5: Embed all artwork", "%msg% (%count% items)", key=header_key)
             import os
             for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
@@ -554,27 +519,19 @@ def main() -> None:
             logmsg.header(None, key=header_key)  # Close Step 4.5 header
 
         if EMBED_FROM_UPDATES and albums_with_new_cover:
-            log("\n[EMBED FROM UPDATES] Embedding new cover.jpg from UPDATE overlay into updated albums...")
             header_key = logmsg.header("Step 4.6: Embed artwork from updates", "%msg% (%count% items)", key=header_key)
-            from logging_utils import album_label_from_dir, add_album_event_label
             for album_dir in sorted(albums_with_new_cover):
-                log(f"  [EMBED FROM UPDATE] Album: {album_dir}")
                 embed_art_into_audio_files(album_dir, DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
-                label = album_label_from_dir(album_dir)
-                add_album_event_label(label, "Embedded new art from overlay.")
             logmsg.header(None, key=header_key)  # Close Step 4.6 header
 
-        log("\nStep 5: Final missing-art fixup...")
         header_key = logmsg.header("Step 5: Final missing-art fixup", "%msg% (%count% items)", key=header_key)
         fixup_missing_art(DRY_RUN)
         logmsg.header(None, key=header_key)  # Close Step 5 header
 
-        log("\nStep 6: Sync empty UPDATE overlay directory structure...")
         header_key = logmsg.header("Step 6: Sync empty UPDATE overlay directory structure", "%msg%", key=header_key)
         sync_update_root_structure(DRY_RUN)
         logmsg.header(None, key=header_key)  # Close Step 6 header
 
-        log("\nStep 7: Ensure artist images (folder.jpg and artist.jpg) in artist folders...")
         header_key = logmsg.header("Step 7: Ensure artist images", "%msg% (%count% artists)", key=header_key)
         from artwork import ensure_artist_images
         import os
@@ -628,100 +585,60 @@ def main() -> None:
                     artist_dirs_processed.add(dir_path)
         logmsg.header(None, key=header_key)  # Close Step 7 header
 
-        log("\nStep 8: Sync backup folder (remove identical backups, remove orphan backups)...")
         header_key = logmsg.header("Step 8: Sync backup folder", "%msg% (%count% items)", key=header_key)
         from sync_operations import sync_backups
         sync_backups(DRY_RUN, use_checksums=None)  # Uses T8_SYNC_USE_CHECKSUMS from config
         logmsg.header(None, key=header_key)  # Close Step 8 header
 
-        log("\nStep 9: Sync master library to T8...")
         header_key = logmsg.header("Step 9: Sync master library to T8", "%msg% (%count% items)", key=header_key)
         sync_music_to_t8(DRY_RUN, use_checksums=args.t8_checksums)
         logmsg.header(None, key=header_key)  # Close Step 9 header
 
-        log("\nStep 10: Cleanup downloads folder...")
         header_key = logmsg.header("Step 10: Cleanup downloads folder", "%msg%", key=header_key)
         from file_operations import cleanup_downloads_folder
         cleanup_downloads_folder(DRY_RUN)
         logmsg.header(None, key=header_key)  # Close Step 10 header
 
-        log("\nStep 11: Refresh ROON library...")
         header_key = logmsg.header("Step 11: Refresh ROON library", "%msg%", key=header_key)
         from roon_refresh import refresh_roon_library
         roon_refresh_success = refresh_roon_library(DRY_RUN)
         if not roon_refresh_success:
-            add_global_warning("ROON library refresh failed - you may need to manually restart ROON to see new files")
+            logmsg.warn("ROON library refresh failed - you may need to manually restart ROON to see new files")
         logmsg.header(None, key=header_key)  # Close Step 11 header
 
         # Finalization steps (detail log only, not console)
         from structured_logging import logmsg
-        log("\nStep 12: Writing summary log...")
         header_key = logmsg.header("Step 12: Writing summary log", "%msg%", verbose=True, key=None)
         try:
-            # Write old API summary (for compatibility during migration)
-            write_summary_log(args.mode, DRY_RUN)
-            logmsg.verbose("Old API summary log written successfully")
-        except Exception as e:
-            logmsg.error("Failed to write old API summary log: {error}", error=str(e))
-            log(f"  [ERROR] Failed to write old API summary log: {e}")
-        
-        try:
-            # Write new structured summary
+            # Write structured summary
             logmsg.write_summary(args.mode, DRY_RUN)
-            logmsg.verbose("Structured summary log written successfully")
+            logmsg.verbose("Summary log written successfully")
         except Exception as e:
-            logmsg.error("Failed to write structured summary log: {error}", error=str(e))
-            log(f"  [ERROR] Failed to write structured summary log: {e}")
+            logmsg.error("Failed to write summary log: {error}", error=str(e))
         logmsg.header(None, key=header_key)  # Close Step 12 header
 
-        log("\nStep 13: Run summary notification...")
         header_key = logmsg.header("Step 13: Run summary notification", "%msg%", verbose=True, key=header_key)
         try:
             notify_run_summary(args.mode)
             logmsg.verbose("Summary notification sent successfully")
         except Exception as e:
             logmsg.error("Failed to send summary notification: {error}", error=str(e))
-            log(f"  [ERROR] Failed to send summary notification: {e}")
         logmsg.header(None, key=header_key)  # Close Step 13 header
                
-        log("\nRun complete.")
+        print("\nRun complete.")
 
         # Exit with appropriate code based on warnings/errors
         # Exit codes: 0 = clean (idle icon), 2 = warnings (yellow icon), 1 = errors (red icon)
         # Calculate exit code FIRST before doing any operations that might fail
-        from logging_utils import ALBUM_SUMMARY, GLOBAL_WARNINGS
         from structured_logging import logmsg
         
-        # Count warnings/errors from old API (distinguish errors from warnings by [ERROR] prefix)
-        old_errors = 0
-        old_warnings = 0
-        
-        # Count errors and warnings in album summaries
-        for v in ALBUM_SUMMARY.values():
-            for warning in v.get("warnings", []):
-                if warning.startswith("[ERROR]"):
-                    old_errors += 1
-                else:
-                    old_warnings += 1
-        
-        # Count errors and warnings in global warnings
-        for warning in GLOBAL_WARNINGS:
-            if warning.startswith("[ERROR]"):
-                old_errors += 1
-            else:
-                old_warnings += 1
-        
-        # Get counts from new structured logging API (consolidated)
-        new_errors = logmsg.count_errors
-        new_warnings = logmsg.count_warnings
-        
-        # Combine old and new API counts
-        total_errors = new_errors + old_errors
-        total_warnings = new_warnings + old_warnings
+        # Get counts from structured logging API
+        total_errors = logmsg.count_errors()
+        total_warnings = logmsg.count_warnings()
         
         # Determine exit code: errors = 1 (red), warnings only = 2 (yellow), clean = 0 (green)
         # Debug: Always log counts for troubleshooting (even if 0, helps diagnose issues)
-        log(f"[DEBUG] Error/Warning counts - Old API: {old_errors} errors, {old_warnings} warnings | New API: {new_errors} errors, {new_warnings} warnings | Total: {total_errors} errors, {total_warnings} warnings")
+        print(f"[DEBUG] Error/Warning counts: {total_errors} errors, {total_warnings} warnings")
         
         if total_errors > 0:
             exit_code = 1
@@ -730,16 +647,15 @@ def main() -> None:
         else:
             exit_code = 0
         
-        # Summary is already printed by logmsg.write_summary() (new API)
-        # Old summary printing is now redundant but kept for compatibility
+        # Summary is already printed by logmsg.write_summary()
         
         # Log exit status
         if exit_code == 1:
-            log(f"Exiting with code 1 ({total_errors} error(s)) - systray will show red error icon")
+            print(f"Exiting with code 1 ({total_errors} error(s)) - systray will show red error icon")
         elif exit_code == 2:
-            log(f"Exiting with code 2 ({total_warnings} warning(s)) - systray will show yellow warning icon")
+            print(f"Exiting with code 2 ({total_warnings} warning(s)) - systray will show yellow warning icon")
         else:
-            log("Exiting with code 0 (success) - systray will show idle icon")
+            print("Exiting with code 0 (success) - systray will show idle icon")
         
         # IMPORTANT: Set exit code early and flush logs before user interaction
         # This ensures the correct exit code is used even if user closes the window
@@ -749,11 +665,9 @@ def main() -> None:
         
         # Final safety check: ensure exit_code is valid before exiting
         if exit_code not in (0, 1, 2):
-            log(f"[ERROR] Invalid exit code {exit_code}, defaulting to 1")
             exit_code = 1
         
         # Log final exit code one more time for debugging
-        log(f"[DEBUG] Final exit code: {exit_code} (about to call sys.exit)")
         sys.stdout.flush()
         sys.stderr.flush()
         
@@ -778,7 +692,6 @@ def main() -> None:
                     pass
         except Exception as e:
             # If anything fails here, log it but preserve the exit_code
-            log(f"[WARN] Error during final cleanup: {e} - preserving exit code {exit_code}")
             sys.stdout.flush()
             sys.stderr.flush()
         
@@ -795,7 +708,6 @@ def main() -> None:
         
         # Write summaries (error already logged above, don't duplicate in exit_with_error)
         try:
-            write_summary_log(args.mode, DRY_RUN)
             logmsg.write_summary(args.mode, DRY_RUN)
             notify_run_summary(args.mode)
         except Exception as summary_error:

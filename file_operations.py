@@ -16,7 +16,6 @@ from config import (
     MUSIC_ROOT,
 )
 from logging_utils import (
-    add_album_event_label,
     album_label_from_tags,
     log,
 )
@@ -85,7 +84,6 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                 remaining = [f.name for f in d.rglob("*")]
             except FileNotFoundError:
                 remaining = []
-            log(f"[CLEANUP DRY] Would inspect {d} (remaining: {remaining})")
             continue
 
         # Recursively process all files in root directory and subdirectories
@@ -138,12 +136,10 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                             should_remove = True
                             removal_reason = "processed audio file"
                             logmsg.info("Removing processed audio file in subdirectory: %item%")
-                            log(f"[CLEANUP] Removing processed audio file in subdirectory: {f}")
                         else:
                             # Audio file in subdirectory that wasn't processed - warn and skip
                             removal_reason = "not in processed list"
                             logmsg.warn("Skipping unprocessed audio file in subdirectory: %item% (not in processed list)", item=f.name)
-                            log(f"[CLEANUP WARN] Skipping unprocessed audio file in subdirectory: {f} (not in processed list)")
                             continue
                     elif is_artwork_file:
                         # For artwork files in subdirectories, always remove them (they're leftovers)
@@ -154,17 +150,14 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                         if any(f.resolve() == art.resolve() for art in used_artwork):
                             removal_reason = "used artwork file"
                             logmsg.info("Removing used artwork file in subdirectory: %item%")
-                            log(f"[CLEANUP] Removing used artwork file in subdirectory: {f}")
                         else:
                             removal_reason = "unused artwork file (leftover)"
                             logmsg.info("Removing unused artwork file in subdirectory: %item%")
-                            log(f"[CLEANUP] Removing unused artwork file in subdirectory: {f}")
                     else:
                         # Non-audio, non-artwork file in subdirectory - remove it (leftover from processing)
                         should_remove = True
                         removal_reason = "leftover file"
                         logmsg.info("Removing leftover file in subdirectory: %item%")
-                        log(f"[CLEANUP] Removing leftover file in subdirectory: {f}")
                     
                     if should_remove:
                         if dry_run:
@@ -175,7 +168,6 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                                 f.unlink()
                             except Exception as e:
                                 logmsg.warn("Could not delete %item%: {error}", error=str(e))
-                                log(f"[CLEANUP WARN] Could not delete {f}: {e}")
                     continue
                 
                 if is_artwork_file and is_in_downloads_root:
@@ -184,17 +176,14 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                     if any(f.resolve() == art.resolve() for art in used_artwork):
                         # This artwork was matched and used - remove it
                         logmsg.info("Removing matched artwork from download root: %item%")
-                        log(f"[CLEANUP] Removing matched artwork from download root: {f.name}")
                         if not dry_run:
                             try:
                                 f.unlink()
                             except Exception as e:
                                 logmsg.warn("Could not delete %item%: {error}", error=str(e))
-                                log(f"[CLEANUP WARN] Could not delete {f}: {e}")
                     else:
                         # This artwork wasn't matched - preserve it for future albums
                         logmsg.verbose("Preserving unmatched artwork in download root (may be for future album): %item%")
-                        log(f"[CLEANUP] Preserving unmatched artwork in download root (may be for future album): {f.name}")
                     continue
 
                 # Remove processed audio files (moved, upgraded, or skipped)
@@ -206,13 +195,11 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                     if any(f.resolve() == audio.resolve() for audio in processed_audio):
                         # This audio file was processed - remove it
                         logmsg.info("Removing processed audio file: %item%")
-                        log(f"[CLEANUP] Removing processed audio file: {f.name}")
                         if not dry_run:
                             try:
                                 f.unlink()
                             except Exception as e:
                                 logmsg.warn("Could not delete %item%: {error}", error=str(e))
-                                log(f"[CLEANUP WARN] Could not delete {f}: {e}")
                         continue
 
                 # Remove files with cleanup extensions (incomplete downloads, leftover images, archives, etc.)
@@ -227,31 +214,26 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                     # Remove cleanup extension files (ZIP, partial downloads, etc.)
                     # No special case needed - just remove them regardless of location
                     logmsg.info("Removing file: %item%")
-                    log(f"[CLEANUP] Removing file: {f}")
                     if not dry_run:
                         try:
                             f.unlink()
                         except Exception as e:
                             logmsg.warn("Could not delete %item%: {error}", error=str(e))
-                            log(f"[CLEANUP WARN] Could not delete {f}: {e}")
                     continue
 
                 # Remove files with cleanup filenames (system junk files)
                 if name in CLEANUP_FILENAMES:
                     logmsg.info("Removing file: %item%")
-                    log(f"[CLEANUP] Removing file: {f}")
                     if not dry_run:
                         try:
                             f.unlink()
                         except Exception as e:
                             logmsg.warn("Could not delete %item%: {error}", error=str(e))
-                            log(f"[CLEANUP WARN] Could not delete {f}: {e}")
                     continue
                 
                 # If we get here, the file is in the root album directory and doesn't match any cleanup criteria
                 # This shouldn't happen often, but log it for debugging
                 logmsg.verbose("Skipping file in root album directory (not processed): %item%")
-                log(f"[CLEANUP] Skipping file in root album directory (not processed): {f}")
             finally:
                 logmsg.end_item(item_key)
 
@@ -287,7 +269,6 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                         folder_item_key = logmsg.begin_item(folder_item_id)
                         try:
                             logmsg.info("Removing empty download folder: %item%")
-                            log(f"[CLEANUP] Removing empty download folder: {subdir}")
                             if not dry_run:
                                 subdir.rmdir()
                         finally:
@@ -295,7 +276,6 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                     else:
                         # Directory still has contents - log for debugging
                         logmsg.verbose("Skipping non-empty folder: {folder} (contents: {count} items)", folder=subdir.name, count=len(contents))
-                        log(f"[CLEANUP] Skipping non-empty folder: {subdir} (contents: {len(contents)} items)")
                 except (OSError, PermissionError, FileNotFoundError) as e:
                     logmsg.verbose("Could not access folder {folder}: {error}", folder=subdir.name, error=str(e))
                     pass  # Skip if we can't access it
@@ -345,18 +325,15 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                             if any(f.resolve() == art.resolve() for art in used_artwork):
                                 # This artwork was matched and used - remove it
                                 logmsg.info("Removing matched artwork from download root: %item%")
-                                log(f"[CLEANUP] Removing matched artwork from download root: {f.name}")
                                 if not dry_run:
                                     try:
                                         f.unlink()
                                     except Exception as e:
                                         logmsg.warn("Could not delete %item%: {error}", error=str(e))
-                                        log(f"[CLEANUP WARN] Could not delete {f}: {e}")
                                 logmsg.end_item(item_key)
                             else:
                                 # This artwork wasn't matched - preserve it for future albums
                                 logmsg.verbose("Preserving unmatched artwork in download root (may be for future album): %item%")
-                                log(f"[CLEANUP] Preserving unmatched artwork in download root (may be for future album): {f.name}")
                                 logmsg.end_item(item_key)
                                 remaining.append(f)
                         elif is_audio_file and is_in_downloads_root:
@@ -365,13 +342,11 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                             if any(f.resolve() == audio.resolve() for audio in processed_audio):
                                 # This audio file was processed - remove it
                                 logmsg.info("Removing processed audio file from download root: %item%")
-                                log(f"[CLEANUP] Removing processed audio file from download root: {f.name}")
                                 if not dry_run:
                                     try:
                                         f.unlink()
                                     except Exception as e:
                                         logmsg.warn("Could not delete %item%: {error}", error=str(e))
-                                        log(f"[CLEANUP WARN] Could not delete {f}: {e}")
                                 logmsg.end_item(item_key)
                             else:
                                 # This audio file wasn't processed - preserve it (may be for future album)
@@ -379,13 +354,11 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                                 remaining.append(f)
                         elif f.name in CLEANUP_FILENAMES or f.suffix.lower() in CLEANUP_EXTENSIONS:
                             logmsg.info("Removing file: %item%")
-                            log(f"[CLEANUP] Removing file: {f}")
                             try:
                                 if not dry_run:
                                     f.unlink()
                             except Exception as e:
                                 logmsg.warn("Could not delete %item%: {error}", error=str(e))
-                                log(f"[CLEANUP WARN] Could not delete {f}: {e}")
                                 logmsg.end_item(item_key)
                                 remaining.append(f)
                             else:
@@ -409,13 +382,11 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
             
             folder_item_key = logmsg.begin_item(folder_item_id)
             logmsg.info("Removing empty download folder: %item%")
-            log(f"[CLEANUP] Removing empty download folder: {current}")
             try:
                 if not dry_run:
                     current.rmdir()
             except Exception as e:
                 logmsg.warn("Could not remove %item%: {error}", error=str(e))
-                log(f"[CLEANUP WARN] Could not remove {current}: {e}")
                 logmsg.end_item(folder_item_key)
                 break
             logmsg.end_item(folder_item_key)
@@ -446,7 +417,6 @@ def move_booklets_from_downloads(items: List[Tuple[Path, Dict[str, Any]]], album
             dest = album_dir / pdf.name
             item_key = logmsg.begin_item(pdf.name)
             logmsg.info("MOVE: %item% -> {dest}", dest=str(dest))
-            log(f"  [BOOKLET] MOVE: {pdf} -> {dest}")
             if not dry_run:
                 dest.parent.mkdir(parents=True, exist_ok=True)
                 shutil.move(str(pdf), str(dest))
@@ -472,13 +442,8 @@ def move_album_from_downloads(
     album_dir = make_album_dir(music_root, artist, album, year, dry_run)
     existing = album_dir.exists()
 
-    if existing:
-        add_album_event_label(label, "Updated from download.")
-    else:
-        add_album_event_label(label, "Created from download.")
+    # Events tracked automatically by structured logging
 
-    log(f"\n[DOWNLOAD] Organizing: {artist} - {album} ({year})")
-    log(f"  Target: {album_dir}")
 
     # Push organizing header (nested under album)
     organize_key = logmsg.push_header("Organizing tracks", "%msg% (%count% tracks)", "DOWNLOAD")
@@ -549,7 +514,7 @@ def move_album_from_downloads(
                 size_warning = check_file_size_warning(src)
                 if size_warning:
                     level, message = size_warning
-                    log(f"  [{level}] {src.name}: {message}")
+                    # Warning already logged via logmsg.warn() above
                     logmsg.warn("{file}: {warning_msg}", file=src.name, warning_msg=message)
                 
                 # Always check source file properties
@@ -607,7 +572,6 @@ def move_album_from_downloads(
                             else:
                                 # Both truncated, incoming is not better - skip
                                 should_move = False
-                                log(f"  SKIP: {src.name} (existing file is truncated, but incoming is also truncated and not larger)")
                                 logmsg.info("SKIP: %item% (existing file is truncated, but incoming is also truncated and not larger)")
                         else:
                             # Compare: frequency first, then file size
@@ -619,7 +583,6 @@ def move_album_from_downloads(
                                     should_move = True
                                 elif src_freq < dest_freq:
                                     should_move = False
-                                    log(f"  SKIP: {src.name} (existing has higher frequency: {dest_freq}Hz > {src_freq}Hz)")
                                     logmsg.info("SKIP: %item% (existing has higher frequency: {dest_freq}Hz > {src_freq}Hz)", dest_freq=dest_freq, src_freq=src_freq)
                                 else:
                                     # Same frequency, compare file size (more reliable than duration for detecting truncation)
@@ -633,7 +596,6 @@ def move_album_from_downloads(
                                         should_move = True
                                     else:
                                         should_move = False
-                                        log(f"  SKIP: {src.name} (same frequency {src_freq}Hz, existing file is larger or equal: {dest_size} >= {src_size} bytes)")
                                         logmsg.info("SKIP: %item% (same frequency {freq}Hz, existing file is larger or equal: {dest_size} >= {src_size} bytes)", freq=src_freq, dest_size=dest_size, src_size=src_size)
                             else:
                                 # Can't determine frequency, fall back to file size only
@@ -646,7 +608,6 @@ def move_album_from_downloads(
                                     should_move = True
                                 else:
                                     should_move = False
-                                    log(f"  SKIP: {src.name} (existing file is larger or equal: {dest_size} >= {src_size} bytes)")
                                     logmsg.info("SKIP: %item% (existing file is larger or equal: {dest_size} >= {src_size} bytes)", dest_size=dest_size, src_size=src_size)
                     except (OSError, FileNotFoundError) as e:
                         # File might have been deleted or become inaccessible between exists() check and stat()
@@ -660,11 +621,9 @@ def move_album_from_downloads(
                 
                 if should_move and upgrade_reason:
                     freq_str = f" ({src_freq}Hz vs {dest_freq}Hz)" if dest_exists and src_freq and dest_freq else ""
-                    log(f"  UPGRADE: {src.name}{freq_str} - {', '.join(upgrade_reason)}")
                     logmsg.info("UPGRADE: %item%{freq_str} - {reasons}", freq_str=freq_str, reasons=', '.join(upgrade_reason))
 
                 if should_move:
-                    log(f"  MOVE: {src} -> {dest}")
                     logmsg.info("MOVE: %item% -> {dest}", dest=str(dest))
                     if not dry_run:
                         dest.parent.mkdir(parents=True, exist_ok=True)
@@ -846,7 +805,7 @@ def move_album_from_downloads(
                             if existing_size:
                                 new_pixels = art_size[0] * art_size[1] if art_size else 0
                                 old_pixels = existing_size[0] * existing_size[1]
-                                log(f"    Upgraded cover.jpg (new: {new_pixels}px, previous: {old_pixels}px)")
+                                print(f"    Upgraded cover.jpg (new: {new_pixels}px, previous: {old_pixels}px)")
                             
                             # Clean up the source art file if it's in the album directory (MUSIC_ROOT)
                             # This handles pattern-matched art files like "pure-heroine-lorde.jpg" that were copied to cover.jpg
@@ -956,7 +915,7 @@ def move_album_from_downloads(
             else:
                 logmsg.verbose("folder.jpg already exists, preserving it (may differ from cover.jpg)")
         
-            add_album_event_label(label, "Art found pre-downloaded.")
+            # Event tracked automatically by structured logging
         else:
             # Log that we checked for artwork (so header shows something)
             # Use a generic item context for "artwork check"
@@ -1004,7 +963,6 @@ def extract_archives_in_downloads(dry_run: bool = False) -> List[Path]:
     from config import ARCHIVE_EXTENSIONS
     from structured_logging import logmsg
     
-    log(f"Scanning for archive files in downloads: {DOWNLOADS_DIR}")
     if not DOWNLOADS_DIR.exists():
         return []
     
@@ -1016,7 +974,6 @@ def extract_archives_in_downloads(dry_run: bool = False) -> List[Path]:
     if not archives_found:
         return []
     
-    log(f"Found {len(archives_found)} archive file(s) to extract.")
     
     # Push header for archive extraction
     extract_key = logmsg.push_header("Extracting archives from downloads", "%msg% (%count% files)", "EXTRACT")
@@ -1029,16 +986,13 @@ def extract_archives_in_downloads(dry_run: bool = False) -> List[Path]:
             item_key = logmsg.begin_item(str(archive_file))
             try:
                 if extract_dir.exists():
-                    log(f"  [EXTRACT] Skipping {archive_file.name} (extraction folder already exists: {extract_dir.name})")
                     logmsg.info("Skipping (extraction folder already exists: {extract_dir})", extract_dir=extract_dir.name)
                     # Still track it for cleanup if it was already extracted
                     extracted_archives.append(archive_file)
                     continue
                 
-                log(f"  [EXTRACT] Extracting {archive_file.name} to {extract_dir.name}/")
                 
                 if dry_run:
-                    log(f"    [DRY RUN] Would extract {archive_file} to {extract_dir}")
                     logmsg.info("[DRY RUN] Would extract %item% to {extract_dir}", extract_dir=str(extract_dir))
                     extracted_archives.append(archive_file)
                     continue
@@ -1050,7 +1004,6 @@ def extract_archives_in_downloads(dry_run: bool = False) -> List[Path]:
                         extract_dir.mkdir(parents=True, exist_ok=True)
                         with zipfile.ZipFile(archive_file, 'r') as zip_ref:
                             zip_ref.extractall(extract_dir)
-                        log(f"    Extracted {len(zip_ref.namelist())} file(s) from {archive_file.name}")
                         logmsg.info("Extracted {file_count} file(s) from %item%", file_count=len(zip_ref.namelist()))
                         extracted_archives.append(archive_file)
                     # Add other archive formats here as needed:
@@ -1058,16 +1011,13 @@ def extract_archives_in_downloads(dry_run: bool = False) -> List[Path]:
                     #     # Use py7zr or subprocess to extract 7z files
                     #     pass
                     else:
-                        log(f"    [WARN] Unsupported archive format: {archive_file.suffix}")
                         logmsg.warn("Unsupported archive format: {ext}", ext=archive_file.suffix)
                         continue
                         
                 except zipfile.BadZipFile:
-                    log(f"    [WARN] {archive_file.name} is not a valid ZIP file, skipping")
                     logmsg.warn("%item% is not a valid ZIP file, skipping")
                     continue
                 except Exception as e:
-                    log(f"    [WARN] Could not extract {archive_file.name}: {e}")
                     logmsg.warn("Could not extract %item%: {error}", error=str(e))
                     continue
             finally:
@@ -1087,15 +1037,12 @@ def process_downloads(dry_run: bool = False) -> None:
     extracted_archives = extract_archives_in_downloads(dry_run)
     
     # Scan for audio files
-    log(f"Scanning downloads: {DOWNLOADS_DIR}")
     audio_files = list(find_audio_files(DOWNLOADS_DIR))
     if not audio_files:
-        log("No audio files found in downloads.")
         logmsg.info("No audio files found in downloads")
         return
 
     albums = group_by_album(audio_files, downloads_root=DOWNLOADS_DIR)
-    log(f"Found {len(albums)} album(s) in downloads.")
     logmsg.verbose("Found {album_count} album(s) in downloads", album_count=len(albums))
 
     skipped_count = 0
@@ -1111,13 +1058,7 @@ def process_downloads(dry_run: bool = False) -> None:
             skipped_count += 1
             file_paths = [str(item[0]) for item in items]
             
-            log(f"\n[WARN] Skipping album {idx}/{len(albums)}: Cannot determine artist/album from tags or path structure")
-            log(f"[WARN] Files will remain in downloads folder for manual processing:")
-            for file_path in file_paths[:5]:  # Show first 5 files
-                log(f"[WARN]   - {file_path}")
-            if len(file_paths) > 5:
-                log(f"[WARN]   ... and {len(file_paths) - 5} more file(s)")
-            log(f"[WARN] Please add tags or organize files in Artist/Album folder structure, then re-run script.")
+            # Warnings already logged via logmsg.warn() above
             
             skip_key = logmsg.begin_item(f"album_{idx}")
             logmsg.warn("Cannot determine artist/album from tags or path structure")
@@ -1127,8 +1068,8 @@ def process_downloads(dry_run: bool = False) -> None:
             if len(file_paths) > 5:
                 logmsg.verbose("  ... and {remaining} more file(s)", remaining=len(file_paths) - 5)
             logmsg.info("Please add tags or organize files in Artist/Album folder structure, then re-run script")
-            from logging_utils import add_global_warning
-            add_global_warning(f"Skipped {len(file_paths)} file(s) in downloads - cannot determine artist/album (files: {', '.join([Path(f).name for f in file_paths[:3]])}...)")
+            from structured_logging import logmsg
+            logmsg.warn(f"Skipped {len(file_paths)} file(s) in downloads - cannot determine artist/album (files: {', '.join([Path(f).name for f in file_paths[:3]])}...)")
             logmsg.end_item(skip_key)
             continue
 
@@ -1140,7 +1081,6 @@ def process_downloads(dry_run: bool = False) -> None:
             logmsg.end_album(album_key_val)
     
     if skipped_count > 0:
-        log(f"\n[WARN] Skipped {skipped_count} album(s) that could not be reliably determined. Files remain in downloads for manual processing.")
         logmsg.warn("Skipped {count} album(s) that could not be reliably determined. Files remain in downloads for manual processing", count=skipped_count)
     
     # Note: Cleanup is deferred to Step 10 (Cleanup downloads folder)
@@ -1190,13 +1130,11 @@ def cleanup_downloads_folder(dry_run: bool = False, header_key: str = None) -> N
                 is_artwork_file = suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
                 if not is_artwork_file:
                     # Remove cleanup extension files (ZIP, partial downloads, etc.)
-                    log(f"[CLEANUP] Removing file from downloads root: {f.name}")
                     logmsg.info("Removing file: %item%")
                     if not dry_run:
                         try:
                             f.unlink()
                         except Exception as e:
-                            log(f"[CLEANUP WARN] Could not delete {f}: {e}")
                             logmsg.warn("Could not delete %item%: {error}", error=str(e))
                     logmsg.end_item(item_key)
                     cleanup_count += 1
@@ -1306,13 +1244,11 @@ def _process_cleanup_folder(folder_path: Path, downloads_dir: Path, music_root: 
             # Empty folder - remove it
             item_key = logmsg.begin_item(str(folder_path.relative_to(downloads_dir)))
             logmsg.info("Removing empty folder: %item%")
-            log(f"[CLEANUP] Removing empty folder: {folder_path}")
             if not dry_run:
                 try:
                     folder_path.rmdir()
                 except Exception as e:
                     logmsg.warn("Could not remove empty folder %item%: {error}", error=str(e))
-                    log(f"[CLEANUP WARN] Could not remove empty folder {folder_path}: {e}")
             logmsg.end_item(item_key)
             return
         
@@ -1344,7 +1280,6 @@ def _process_cleanup_folder(folder_path: Path, downloads_dir: Path, music_root: 
                     if suffix in AUDIO_EXT:
                         # Audio file that was skipped in Step 1 - remove it
                         logmsg.info("Removing skipped audio file: {file}", file=item.name)
-                        log(f"[CLEANUP] Removing skipped audio file: {item.name}")
                     else:
                         logmsg.verbose("Removing leftover file: {file}", file=item.name)
                     if not dry_run:
@@ -1353,13 +1288,11 @@ def _process_cleanup_folder(folder_path: Path, downloads_dir: Path, music_root: 
                         except Exception as e:
                             logmsg.warn("Could not delete {file}: {error}", file=item.name, error=str(e))
             logmsg.info("Removing folder with only cleanup files: %item%")
-            log(f"[CLEANUP] Removing folder with only cleanup files: {folder_path}")
             if not dry_run:
                 try:
                     folder_path.rmdir()
                 except Exception as e:
                     logmsg.warn("Could not remove folder %item%: {error}", error=str(e))
-                    log(f"[CLEANUP WARN] Could not remove folder {folder_path}: {e}")
             logmsg.end_item(item_key)
     except (OSError, PermissionError) as e:
         logmsg.verbose("Skipping folder {folder} due to error: {error}", folder=str(folder_path.relative_to(downloads_dir)), error=str(e))
@@ -1402,7 +1335,6 @@ def match_root_artwork_to_existing_albums(dry_run: bool = False) -> None:
     if not root_artwork_files:
         return
     
-    log(f"\n[ROOT ART] Checking {len(root_artwork_files)} artwork file(s) in downloads root for existing albums...")
     
     from structured_logging import logmsg
     
@@ -1425,7 +1357,6 @@ def match_root_artwork_to_existing_albums(dry_run: bool = False) -> None:
                         pass
         
         if not album_dirs:
-            log(f"[ROOT ART] No existing albums found in library to match against.")
             logmsg.verbose("No existing albums found in library to match against")
             return
         
@@ -1514,9 +1445,7 @@ def match_root_artwork_to_existing_albums(dry_run: bool = False) -> None:
                     
                     # Root artwork is better (or no existing artwork) - upgrade
                     logmsg.info("Matched, upgrading artwork (root: {root_px}px)", root_px=root_pixels)
-                    from logging_utils import album_label_from_dir, add_album_event_label
-                    label = album_label_from_dir(album_dir)
-                    add_album_event_label(label, f"Upgraded artwork from downloads root: {art_file.name}")
+                    # Event tracked automatically by structured logging
                     
                     if not dry_run:
                         # Copy artwork to cover.jpg
@@ -1584,7 +1513,7 @@ def upgrade_albums_to_flac_only(dry_run: bool = False) -> None:
 
         # Set album context
         album_key = logmsg.begin_album(p)
-        label = album_label_from_dir(p)  # Get label for old API warnings
+        # Label no longer needed - structured logging handles warnings automatically
         
         did_cleanup = False
         flac_files = []
@@ -1617,12 +1546,10 @@ def upgrade_albums_to_flac_only(dry_run: bool = False) -> None:
                 if has_replacement:
                     item_key = logmsg.begin_item(flac_file.name)
                     logmsg.warn("Cannot read tags, will remove FLAC (replacement exists): %item%")
-                    log(f"  [FLAC CORRUPT] Cannot read tags from {flac_file.name}, will remove FLAC (replacement exists)")
                     corrupt_flacs.append(flac_file)
                     logmsg.end_item(item_key)
                 else:
                     logmsg.verbose("Cannot read tags, keeping FLAC (no replacement found): {file}", file=flac_file.name)
-                    log(f"  [FLAC CORRUPT] Cannot read tags from {flac_file.name}, keeping it (no replacement found)")
                 continue
             
             # Check if file is truncated (size warning)
@@ -1641,28 +1568,24 @@ def upgrade_albums_to_flac_only(dry_run: bool = False) -> None:
                     # Any incoming file is an "upgrade" over a truncated FLAC
                     item_key = logmsg.begin_item(flac_file.name)
                     logmsg.warn("File truncated, will remove FLAC (replacement exists): %item% - {message}", message=message)
-                    log(f"  [FLAC TRUNCATED] {flac_file.name}: {message}, will remove FLAC (replacement exists)")
                     corrupt_flacs.append(flac_file)
                     logmsg.end_item(item_key)
                 else:
                     logmsg.verbose("File truncated, keeping FLAC (no replacement found): {file} - {msg}", file=flac_file.name, msg=message)
-                    log(f"  [FLAC TRUNCATED] {flac_file.name}: {message}, keeping it (no replacement found)")
                 continue
 
         # Remove corrupt/truncated FLAC files (only if replacement exists)
         for corrupt_flac in corrupt_flacs:
             item_key = logmsg.begin_item(corrupt_flac.name)
             logmsg.info("DELETE: %item% (corrupt FLAC, replacement exists)")
-            log(f"  DELETE (corrupt FLAC, replacement exists): {corrupt_flac}")
             did_cleanup = True
             if not dry_run:
                 try:
                     corrupt_flac.unlink()
                 except OSError as e:
                     logmsg.warn("Could not delete %item%: {error}", error=str(e))
-                    log(f"    [WARN] Could not delete {corrupt_flac}: {e}")
-                    from logging_utils import add_album_warning_label
-                    add_album_warning_label(label, f"[WARN] Could not delete corrupt FLAC {corrupt_flac}: {e}")
+                    from structured_logging import logmsg
+                    logmsg.warn("Could not delete corrupt FLAC {file}: {error}", file=corrupt_flac.name, error=str(e))
             logmsg.end_item(item_key)
 
         # Only remove non-FLAC files if there's a valid FLAC for that specific track
@@ -1714,25 +1637,21 @@ def upgrade_albums_to_flac_only(dry_run: bool = False) -> None:
             if has_valid_flac and base_name_lower not in removed_flac_stems_lower:
                 item_key = logmsg.begin_item(other_file.name)
                 logmsg.info("DELETE: %item% (non-FLAC, valid FLAC exists for this track)")
-                log(f"  DELETE: {other_file.name} (non-FLAC, valid FLAC exists for this track)")
                 did_cleanup = True
                 if not dry_run:
                     try:
                         other_file.unlink()
                     except OSError as e:
                         logmsg.warn("Could not delete %item%: {error}", error=str(e))
-                        log(f"    [WARN] Could not delete {other_file}: {e}")
-                        from logging_utils import add_album_warning_label
-                        add_album_warning_label(label, f"[WARN] Could not delete {other_file}: {e}")
+                        from structured_logging import logmsg
+                        logmsg.warn("Could not delete {file}: {error}", file=other_file.name, error=str(e))
                 logmsg.end_item(item_key)
             else:
                 # Keep the non-FLAC file - either no FLAC exists for this track, or the FLAC was corrupt/removed
                 if base_name_lower in removed_flac_stems_lower:
                     logmsg.verbose("KEEP: {file} (non-FLAC, FLAC for this track was corrupt/removed)", file=other_file.name)
-                    log(f"  KEEP: {other_file.name} (non-FLAC, FLAC for this track was corrupt/removed)")
                 else:
                     logmsg.verbose("KEEP: {file} (no valid FLAC for this track)", file=other_file.name)
-                    log(f"  KEEP: {other_file.name} (no valid FLAC for this track)")
 
         # Check if we still have both FLAC and non-FLAC files after cleanup (warning case)
         remaining_audio_files = [f for f in p.iterdir() if f.is_file() and f.suffix.lower() in AUDIO_EXT]
@@ -1743,16 +1662,13 @@ def upgrade_albums_to_flac_only(dry_run: bool = False) -> None:
             # After cleanup, we still have both FLAC and non-FLAC files
             # This could indicate case mismatch or different track names
             logmsg.warn("Album still contains both FLAC and non-FLAC files after cleanup (possible case mismatch or different track names)")
-            log(f"  [WARN] Album still contains both FLAC and non-FLAC files after cleanup")
-            from logging_utils import add_album_warning_label
-            add_album_warning_label(label, "Album still contains both FLAC and non-FLAC files after cleanup (possible case mismatch or different track names)")
+            from structured_logging import logmsg
+            logmsg.warn("Album still contains both FLAC and non-FLAC files after cleanup (possible case mismatch or different track names)")
         
         if did_cleanup:
-            from logging_utils import add_album_event_label
-            label = album_label_from_dir(p)
             if corrupt_flacs:
                 logmsg.info("FLAC-only cleanup (removed {count} corrupt FLAC(s)).", count=len(corrupt_flacs))
-                add_album_event_label(label, f"FLAC-only cleanup (removed {len(corrupt_flacs)} corrupt FLAC(s)).")
+                # Event tracked automatically by structured logging
             # Removed redundant "FLAC-only cleanup." message when no corrupt FLACs
         
         logmsg.end_album(album_key)

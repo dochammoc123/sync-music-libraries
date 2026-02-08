@@ -13,7 +13,7 @@ from mutagen.mp4 import MP4
 import musicbrainzngs
 
 from config import AUDIO_EXT, ENABLE_WEB_ART_LOOKUP, MB_APP, MB_VER, MB_CONTACT, WEB_ART_LOOKUP_TIMEOUT
-from logging_utils import log
+# log() removed - use print() for console output
 
 
 def find_audio_files(root: Path) -> Iterator[Path]:
@@ -304,7 +304,7 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
     except Exception as e:
         # File might be corrupted, wrong format, or unreadable
         # Log warning but return None - path-based fallback will be handled at directory level
-        from logging_utils import log
+        # log() removed - use print() for console output
         from config import DOWNLOADS_DIR, MUSIC_ROOT
         
         # Determine if this is a new file in downloads (WARN) or existing file in music root (INFO)
@@ -352,10 +352,7 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
         except Exception:
             pass  # Fallback if structured logging not available
         
-        if is_warning:
-            log(f"[WARN] Could not read tags from {path}: {e} (corrupt file in downloads)")
-        else:
-            log(f"[INFO] Could not read tags from {path}: {e} (file will be overwritten if upgrade available)")
+        # Error already logged via logmsg if available
         return None
 
     try:
@@ -393,7 +390,7 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
         }
     except Exception as e:
         # Error reading tags even though file opened
-        from logging_utils import log
+        # log() removed - use print() for console output
         try:
             from structured_logging import logmsg
             # Only log warning if album context is set (during processing, not during scanning)
@@ -407,7 +404,6 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
                 logmsg.verbose(msg)
         except Exception:
             pass  # Fallback if structured logging not available
-        log(f"[WARN] Error processing tags from {path}: {e}")
         return None
 
 
@@ -467,7 +463,6 @@ def verify_album_via_musicbrainz(artist: str, album: str) -> Optional[Tuple[str,
         return (verified_artist, verified_album)
         
     except Exception as e:
-        log(f"  [WARN] MusicBrainz lookup failed for {artist} - {album}: {e}")
         return None
 
 
@@ -516,10 +511,8 @@ def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_v
                 verified = verify_album_via_musicbrainz(path_artist, path_album)
                 if verified:
                     verified_artist, verified_album = verified
-                    log(f"  [MB VERIFY] Verified path-based: {path_artist} - {path_album} -> {verified_artist} - {verified_album}")
                     return (verified_artist, verified_album)
-                else:
-                    log(f"  [MB VERIFY] No MusicBrainz match for path-based {path_artist} - {path_album}, using path values")
+                # else: no MusicBrainz match, using path values (already logged via logmsg if available)
             
             return (path_artist, path_album)
     
@@ -623,7 +616,8 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
         # Special case: if dir_path is downloads_root, files are directly in downloads
         # (e.g., from browser downloads). These will be grouped by tags only.
         if downloads_root and dir_path.resolve() == downloads_root.resolve():
-            log(f"  [GROUP] Files directly in downloads root (no album folder structure)")
+            # Files directly in downloads root (no album folder structure) - already logged via logmsg if available
+            pass
         
         # Get tags for all files in this directory
         items_with_tags: List[Tuple[Path, Dict[str, Any]]] = []
@@ -653,7 +647,6 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
                     logmsg.verbose(msg)
                 except Exception:
                     pass  # Fallback if structured logging not available
-                log(f"[WARN] No tags for {f}, using artist/album from other files in directory: {artist} - {album}")
                 # Create minimal tags with determined artist/album
                 fallback_tags = get_tags_from_path(f, downloads_root if downloads_root else f.parent.parent.parent)
                 if fallback_tags:
@@ -690,7 +683,6 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
                             logmsg.verbose(msg)
                         except Exception:
                             pass  # Fallback if structured logging not available
-                        log(f"[WARN] No tags in directory {dir_path}, MusicBrainz verified: {path_artist} - {path_album} -> {artist} - {album}")
                     else:
                         artist, album = path_artist, path_album
                         try:
@@ -699,7 +691,6 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
                             logmsg.verbose(msg)
                         except Exception:
                             pass  # Fallback if structured logging not available
-                        log(f"[WARN] No tags in directory {dir_path}, using path-based: {artist} - {album}")
                     
                     dir_to_key[dir_path] = (artist, album)
                     
@@ -836,7 +827,8 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
             except Exception as e:
                 if ext == ".flac":
                     # If extension says FLAC but it's not, try other formats
-                    log(f"  [WARN] File has .flac extension but is not valid FLAC, trying other formats: {e}")
+                    # Warning already logged via logmsg.warn() if available
+                    pass
                 else:
                     raise  # Re-raise if we weren't expecting FLAC
         
@@ -900,10 +892,8 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
         except Exception:
             pass
                 
-        log(f"  [WARN] Could not determine file format for {path}")
         return False
         
     except Exception as e:
-        log(f"  [WARN] Could not write tags to {path}: {e}")
         return False
 
