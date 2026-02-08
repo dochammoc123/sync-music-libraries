@@ -34,11 +34,15 @@ def refresh_roon_library(dry_run: bool = False) -> bool:
     Returns:
         True if refresh was successful or skipped, False if refresh failed
     """
+    from structured_logging import logmsg
+    
     if not ENABLE_ROON_REFRESH:
+        logmsg.verbose("ROON refresh disabled in configuration - skipping")
         logger.info("[ROON REFRESH] Disabled in configuration - skipping")
         return True
     
     if ROON_REFRESH_METHOD == "none":
+        logmsg.verbose("ROON refresh method set to 'none' - skipping")
         logger.info("[ROON REFRESH] Method set to 'none' - skipping")
         return True
     
@@ -46,11 +50,21 @@ def refresh_roon_library(dry_run: bool = False) -> bool:
     
     try:
         if ROON_REFRESH_METHOD == "rock_api":
-            return _restart_via_rock_api(dry_run)
+            success = _restart_via_rock_api(dry_run)
+            if success:
+                if dry_run:
+                    logmsg.info("Would refresh ROON library via ROCK API")
+                else:
+                    logmsg.info("Refreshed ROON library via ROCK API")
+            else:
+                logmsg.warn("Failed to refresh ROON library via ROCK API")
+            return success
         else:
+            logmsg.warn("Unknown ROON refresh method: {method} - skipping. Use 'rock_api' or 'none'.", method=ROON_REFRESH_METHOD)
             logger.warning(f"[ROON REFRESH] Unknown method: {ROON_REFRESH_METHOD} - skipping. Use 'rock_api' or 'none'.")
             return False
     except Exception as e:
+        logmsg.error("Error during ROON refresh: {error}", error=str(e))
         logger.error(f"[ROON REFRESH] Error during refresh: {e}")
         return False
 

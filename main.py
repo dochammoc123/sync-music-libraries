@@ -12,6 +12,7 @@ Flags:
 """
 import argparse
 import sys
+from pathlib import Path
 
 from artwork import (
     embed_art_into_audio_files,
@@ -19,7 +20,16 @@ from artwork import (
     fixup_missing_art,
     init_musicbrainz,
 )
-from config import MIN_DISK_CAPACITY_BYTES, MUSIC_ROOT, SYSTEM, T8_ROOT, check_disk_capacity
+from config import (
+    BACKUP_ROOT,
+    DOWNLOADS_DIR,
+    MIN_DISK_CAPACITY_BYTES,
+    MUSIC_ROOT,
+    SYSTEM,
+    T8_ROOT,
+    UPDATE_ROOT,
+    check_disk_capacity,
+)
 from file_operations import process_downloads, upgrade_albums_to_flac_only
 from logging_utils import (
     add_global_warning,
@@ -117,7 +127,6 @@ def main() -> None:
             exit_code: Exit code (default 1)
             is_error: If True, log as error; if False, log as warning (e.g., for DRY_RUN scenarios)
         """
-        import sys  # Ensure sys is available in this scope
         log(error_msg)
         # Strip "ERROR:" or "WARNING:" prefix if present
         clean_msg = error_msg
@@ -145,6 +154,107 @@ def main() -> None:
                 pass  # stdin not available - likely running from tray launcher
         sys.exit(exit_code)
     
+    # Check permissions on all required directories before proceeding
+    def check_directory_permissions(path: Path, name: str, required: bool = True, must_exist: bool = False) -> None:
+        """
+        Check read, write, and remove permissions on a directory.
+        Exits with error if permissions are insufficient.
+        
+        Args:
+            path: Directory path to check
+            name: Human-readable name for error messages
+            required: If False and path is None, skip check
+            must_exist: If True, directory must exist; if False, will try to create it
+        """
+        if not required and path is None:
+            return
+        
+        if path is None:
+            error_msg = f"ERROR: {name} path is not configured (None)."
+            exit_with_error(error_msg, exit_code=1, is_error=True)
+        
+        logmsg.verbose(f"Checking permissions for {name}: {path}")
+        
+        # Check if directory exists or can be created
+        if not path.exists():
+            if must_exist:
+                error_msg = (
+                    f"ERROR: {name} directory does not exist: {path}\n"
+                    f"  Please create the directory or verify the path is correct."
+                )
+                exit_with_error(error_msg, exit_code=1, is_error=True)
+            
+            # Try to create the directory to test write access
+            try:
+                path.mkdir(parents=True, exist_ok=True)
+                logmsg.verbose(f"  ✓ Directory created: OK")
+            except (OSError, PermissionError) as e:
+                error_msg = (
+                    f"ERROR: Cannot access {name} directory: {path}\n"
+                    f"  Directory does not exist and cannot be created: {e}\n"
+                    f"  Please verify the path is correct and you have write permissions."
+                )
+                exit_with_error(error_msg, exit_code=1, is_error=True)
+        
+        # Test read access (list directory) - only if directory exists
+        if path.exists():
+            try:
+                list(path.iterdir())
+                logmsg.verbose(f"  ✓ Read access: OK")
+            except (OSError, PermissionError) as e:
+                error_msg = (
+                    f"ERROR: Cannot read from {name} directory: {path}\n"
+                    f"  Permission denied: {e}\n"
+                    f"  Please verify you have read permissions."
+                )
+                exit_with_error(error_msg, exit_code=1, is_error=True)
+        
+        # Test write access (create a test file)
+        test_file = path / ".permission_test"
+        try:
+            test_file.write_text("test")
+            logmsg.verbose(f"  ✓ Write access: OK")
+        except (OSError, PermissionError) as e:
+            error_msg = (
+                f"ERROR: Cannot write to {name} directory: {path}\n"
+                f"  Permission denied: {e}\n"
+                f"  Please verify you have write permissions."
+            )
+            exit_with_error(error_msg, exit_code=1, is_error=True)
+        
+        # Test remove access (delete the test file)
+        try:
+            test_file.unlink()
+            logmsg.verbose(f"  ✓ Remove access: OK")
+        except (OSError, PermissionError) as e:
+            error_msg = (
+                f"ERROR: Cannot remove files from {name} directory: {path}\n"
+                f"  Permission denied: {e}\n"
+                f"  Please verify you have delete permissions."
+            )
+            exit_with_error(error_msg, exit_code=1, is_error=True)
+    
+    log("\nSafety check: Verifying directory permissions...")
+    logmsg.verbose("Verifying directory permissions...")
+    check_directory_permissions(MUSIC_ROOT, "MUSIC_ROOT (ROON)", must_exist=True)
+    check_directory_permissions(BACKUP_ROOT, "BACKUP_ROOT", must_exist=False)  # May not exist yet
+    # If BACKUP_ROOT exists but is empty, remove it (Step 8 will recreate if needed)
+    if BACKUP_ROOT.exists():
+        try:
+            # Check if directory is empty
+            if not any(BACKUP_ROOT.iterdir()):
+                logmsg.verbose("Removing empty backup root: {path}", path=str(BACKUP_ROOT))
+                BACKUP_ROOT.rmdir()
+        except (OSError, PermissionError) as e:
+            # If we can't remove it, that's OK - Step 8 will handle it
+            logmsg.verbose("Could not remove empty backup root (will be handled in Step 8): {error}", error=str(e))
+    check_directory_permissions(DOWNLOADS_DIR, "DOWNLOADS_DIR", must_exist=False)  # May not exist yet
+    check_directory_permissions(UPDATE_ROOT, "UPDATE_ROOT", must_exist=False)  # May not exist yet
+    if T8_ROOT is not None:
+        check_directory_permissions(T8_ROOT, "T8_ROOT", must_exist=False)  # May not exist yet
+    log("Directory permissions check passed.\n")
+    logmsg.verbose("Directory permissions check passed.\n")
+    
     log(f"Starting script in mode: {args.mode}")
     log(f"DRY_RUN = {DRY_RUN}")
     log(f"EMBED_ALL = {EMBED_ALL}")
@@ -152,14 +262,14 @@ def main() -> None:
     
     # Log startup info as always_show headers (appears in both detail log and summary)
     from structured_logging import logmsg
-    header_key = logmsg.set_header(f"Starting script in mode: {args.mode}", always_show=True, key=None)
+    header_key = logmsg.header(f"Starting script in mode: {args.mode}", always_show=True, key=None)
     try:
-        header_key = logmsg.set_header(f"DRY_RUN = {DRY_RUN}", always_show=True, key=header_key)
-        header_key = logmsg.set_header(f"EMBED_ALL = {EMBED_ALL}", always_show=True, key=header_key)
-        header_key = logmsg.set_header(f"T8_SYNC_USE_CHECKSUMS = {args.t8_checksums}", always_show=True, key=header_key)
+        header_key = logmsg.header(f"DRY_RUN = {DRY_RUN}", always_show=True, key=header_key)
+        header_key = logmsg.header(f"EMBED_ALL = {EMBED_ALL}", always_show=True, key=header_key)
+        header_key = logmsg.header(f"T8_SYNC_USE_CHECKSUMS = {args.t8_checksums}", always_show=True, key=header_key)
     finally:
         # Clear header stack so Step 1 can start fresh with key=None (prevents wrong header context for any logs between)
-        logmsg.set_header(None, key=header_key)
+        logmsg.header(None, key=header_key)
 
     # Safety check: Verify both ROON and T8 drives have at least 1TB total capacity
     log("\nSafety check: Verifying disk capacity on target drives...")
@@ -318,7 +428,18 @@ def main() -> None:
     try:
         if RESTORE_FROM_BACKUP_MODE:
             restore_flacs_from_backups(DRY_RUN)
+            
+            log("\nSync backup folder (remove identical backups, remove orphan backups)...")
+            from structured_logging import logmsg
+            header_key = logmsg.header("Sync backup folder", "%msg% (%count% items)")
+            from sync_operations import sync_backups
+            sync_backups(DRY_RUN, use_checksums=None)  # Uses T8_SYNC_USE_CHECKSUMS from config
+            logmsg.header(None, key=header_key)
+            
+            log("\nSync master library to T8...")
+            header_key = logmsg.header("Sync master library to T8", "%msg% (%count% files copied)")
             sync_music_to_t8(DRY_RUN, use_checksums=args.t8_checksums)
+            logmsg.header(None, key=header_key)
             log("Restore mode complete.")
             
             log("\nRefresh ROON library...")
@@ -401,55 +522,61 @@ def main() -> None:
             
             sys.exit(exit_code)
 
-        # Step 1: Process new downloads (organize + art)
+        # Step 1: Process new downloads (organize + art, no cleanup)
         log("\nStep 1: Process new downloads (organize + art)...")
         from structured_logging import logmsg
         # Step header processes MULTIPLE albums (each album gets its own instance)
-        header_key = logmsg.set_header("Step 1: Process new downloads", "%msg%")
+        header_key = logmsg.header("Step 1: Process new downloads", "%msg%")
         process_downloads(DRY_RUN)
+        logmsg.header(None, key=header_key)  # Close Step 1 header
 
         log("\nStep 2: Apply UPDATE overlay (files from Update -> Music)...")
-        header_key = logmsg.set_header("Step 2: Apply UPDATE overlay", "%msg% (%count% items)", key=header_key)
+        header_key = logmsg.header("Step 2: Apply UPDATE overlay", "%msg% (%count% items)", key=header_key)
         updated_album_dirs, albums_with_new_cover = apply_updates_from_overlay(DRY_RUN)
+        logmsg.header(None, key=header_key)  # Close Step 2 header
 
         log("\nStep 3: Upgrade albums to FLAC-only where FLAC exists...")
-        header_key = logmsg.set_header("Step 3: Upgrade albums to FLAC-only", "%msg% (%count% items)", key=header_key)
+        header_key = logmsg.header("Step 3: Upgrade albums to FLAC-only", "%msg% (%count% items)", key=header_key)
         upgrade_albums_to_flac_only(DRY_RUN)
+        logmsg.header(None, key=header_key)  # Close Step 3 header
 
         log("\nStep 4: Embed missing artwork (only FLACs with no embedded art)...")
-        header_key = logmsg.set_header("Step 4: Embed missing artwork", "%msg% (%count% items)", key=header_key)
+        header_key = logmsg.header("Step 4: Embed missing artwork", "%msg% (%count% items)", key=header_key)
         embed_missing_art_global(DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED, EMBED_IF_MISSING)
+        logmsg.header(None, key=header_key)  # Close Step 4 header
 
         if EMBED_ALL:
             log("\n[EMBED ALL] Embedding cover.jpg into all FLACs in all albums (advanced mode).")
-            header_key = logmsg.set_header("Step 4.5: Embed all artwork", "%msg% (%count% items)", key=header_key)
-            from pathlib import Path
+            header_key = logmsg.header("Step 4.5: Embed all artwork", "%msg% (%count% items)", key=header_key)
             import os
             for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
                 embed_art_into_audio_files(Path(dirpath), DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
+            logmsg.header(None, key=header_key)  # Close Step 4.5 header
 
         if EMBED_FROM_UPDATES and albums_with_new_cover:
             log("\n[EMBED FROM UPDATES] Embedding new cover.jpg from UPDATE overlay into updated albums...")
-            header_key = logmsg.set_header("Step 4.6: Embed artwork from updates", "%msg% (%count% items)", key=header_key)
+            header_key = logmsg.header("Step 4.6: Embed artwork from updates", "%msg% (%count% items)", key=header_key)
             from logging_utils import album_label_from_dir, add_album_event_label
             for album_dir in sorted(albums_with_new_cover):
                 log(f"  [EMBED FROM UPDATE] Album: {album_dir}")
                 embed_art_into_audio_files(album_dir, DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
                 label = album_label_from_dir(album_dir)
                 add_album_event_label(label, "Embedded new art from overlay.")
+            logmsg.header(None, key=header_key)  # Close Step 4.6 header
 
-        log("\nStep 5: Sync master library to T8...")
-        header_key = logmsg.set_header("Step 5: Sync master library to T8", "%msg% (%count% items)", key=header_key)
-        sync_music_to_t8(DRY_RUN, use_checksums=args.t8_checksums)
+        log("\nStep 5: Final missing-art fixup...")
+        header_key = logmsg.header("Step 5: Final missing-art fixup", "%msg% (%count% items)", key=header_key)
+        fixup_missing_art(DRY_RUN)
+        logmsg.header(None, key=header_key)  # Close Step 5 header
 
         log("\nStep 6: Sync empty UPDATE overlay directory structure...")
-        header_key = logmsg.set_header("Step 6: Sync empty UPDATE overlay directory structure", "%msg%", key=header_key)
+        header_key = logmsg.header("Step 6: Sync empty UPDATE overlay directory structure", "%msg%", key=header_key)
         sync_update_root_structure(DRY_RUN)
+        logmsg.header(None, key=header_key)  # Close Step 6 header
 
         log("\nStep 7: Ensure artist images (folder.jpg and artist.jpg) in artist folders...")
-        header_key = logmsg.set_header("Step 7: Ensure artist images", "%msg% (%count% artists)", key=header_key)
+        header_key = logmsg.header("Step 7: Ensure artist images", "%msg% (%count% artists)", key=header_key)
         from artwork import ensure_artist_images
-        from pathlib import Path
         import os
         
         artist_dirs_processed = set()
@@ -499,32 +626,63 @@ def main() -> None:
                 if artist_name and artist_name != "Music":
                     ensure_artist_images(dir_path, artist_name, DRY_RUN)
                     artist_dirs_processed.add(dir_path)
+        logmsg.header(None, key=header_key)  # Close Step 7 header
 
         log("\nStep 8: Sync backup folder (remove identical backups, remove orphan backups)...")
-        header_key = logmsg.set_header("Step 8: Sync backup folder", "%msg% (%count% items)", key=header_key)
+        header_key = logmsg.header("Step 8: Sync backup folder", "%msg% (%count% items)", key=header_key)
         from sync_operations import sync_backups
         sync_backups(DRY_RUN, use_checksums=None)  # Uses T8_SYNC_USE_CHECKSUMS from config
+        logmsg.header(None, key=header_key)  # Close Step 8 header
 
-        log("\nStep 9: Final missing-art fixup...")
-        header_key = logmsg.set_header("Step 9: Final missing-art fixup", "%msg% (%count% items)", key=header_key)
-        fixup_missing_art(DRY_RUN)
+        log("\nStep 9: Sync master library to T8...")
+        header_key = logmsg.header("Step 9: Sync master library to T8", "%msg% (%count% items)", key=header_key)
+        sync_music_to_t8(DRY_RUN, use_checksums=args.t8_checksums)
+        logmsg.header(None, key=header_key)  # Close Step 9 header
 
-        log("\nStep 10: Refresh ROON library...")
-        header_key = logmsg.set_header("Step 10: Refresh ROON library", "%msg%", key=header_key)
+        log("\nStep 10: Cleanup downloads folder...")
+        header_key = logmsg.header("Step 10: Cleanup downloads folder", "%msg%", key=header_key)
+        from file_operations import cleanup_downloads_folder
+        cleanup_downloads_folder(DRY_RUN)
+        logmsg.header(None, key=header_key)  # Close Step 10 header
+
+        log("\nStep 11: Refresh ROON library...")
+        header_key = logmsg.header("Step 11: Refresh ROON library", "%msg%", key=header_key)
         from roon_refresh import refresh_roon_library
         roon_refresh_success = refresh_roon_library(DRY_RUN)
         if not roon_refresh_success:
             add_global_warning("ROON library refresh failed - you may need to manually restart ROON to see new files")
+        logmsg.header(None, key=header_key)  # Close Step 11 header
 
-        log("\nStep 11: Writing summary log...")
-        # Write old API summary (for compatibility during migration)
-        write_summary_log(args.mode, DRY_RUN)
-        # Write new structured summary
+        # Finalization steps (detail log only, not console)
         from structured_logging import logmsg
-        logmsg.write_summary(args.mode, DRY_RUN)
+        log("\nStep 12: Writing summary log...")
+        header_key = logmsg.header("Step 12: Writing summary log", "%msg%", verbose=True, key=None)
+        try:
+            # Write old API summary (for compatibility during migration)
+            write_summary_log(args.mode, DRY_RUN)
+            logmsg.verbose("Old API summary log written successfully")
+        except Exception as e:
+            logmsg.error("Failed to write old API summary log: {error}", error=str(e))
+            log(f"  [ERROR] Failed to write old API summary log: {e}")
+        
+        try:
+            # Write new structured summary
+            logmsg.write_summary(args.mode, DRY_RUN)
+            logmsg.verbose("Structured summary log written successfully")
+        except Exception as e:
+            logmsg.error("Failed to write structured summary log: {error}", error=str(e))
+            log(f"  [ERROR] Failed to write structured summary log: {e}")
+        logmsg.header(None, key=header_key)  # Close Step 12 header
 
-        log("\nStep 12: Run summary notification...")
-        notify_run_summary(args.mode)
+        log("\nStep 13: Run summary notification...")
+        header_key = logmsg.header("Step 13: Run summary notification", "%msg%", verbose=True, key=header_key)
+        try:
+            notify_run_summary(args.mode)
+            logmsg.verbose("Summary notification sent successfully")
+        except Exception as e:
+            logmsg.error("Failed to send summary notification: {error}", error=str(e))
+            log(f"  [ERROR] Failed to send summary notification: {e}")
+        logmsg.header(None, key=header_key)  # Close Step 13 header
                
         log("\nRun complete.")
 
@@ -586,7 +744,6 @@ def main() -> None:
         # IMPORTANT: Set exit code early and flush logs before user interaction
         # This ensures the correct exit code is used even if user closes the window
         # Flush all logs to ensure they're written before potential window close
-        import sys
         sys.stdout.flush()
         sys.stderr.flush()
         
@@ -628,7 +785,6 @@ def main() -> None:
         sys.exit(exit_code)
 
     except Exception as e:
-        import sys  # Ensure sys is available in exception handler
         from logging_utils import logger
         from structured_logging import logmsg
         
