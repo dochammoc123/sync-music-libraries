@@ -7,11 +7,18 @@ import shutil
 from pathlib import Path
 from typing import Set, Tuple
 
-from config import AUDIO_EXT, BACKUP_ROOT, CLEAN_EMPTY_BACKUP_FOLDERS, MUSIC_ROOT, T8_ROOT, T8_SYNC_USE_CHECKSUMS, UPDATE_ROOT
-from logging_utils import (
-    album_label_from_dir,
-    log,
+from config import (
+    AUDIO_EXT,
+    BACKUP_ROOT,
+    CLEAN_EMPTY_BACKUP_FOLDERS,
+    MUSIC_ROOT,
+    T8_ROOT,
+    T8_SYNC_EXCLUDE_DIRS,
+    T8_SYNC_EXCLUDE_FILES,
+    T8_SYNC_USE_CHECKSUMS,
+    UPDATE_ROOT,
 )
+from logging_utils import album_label_from_dir
 from structured_logging import logmsg
 
 
@@ -258,8 +265,11 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
     
     # Header is already set by main.py (Step 5), so we don't set it here
 
-    # Copy all files from ROON to T8
+    # Copy all files from ROON to T8 (exclude .thumbnails and similar - T8 manages its own)
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
+        # Don't descend into excluded directories
+        dirnames[:] = [d for d in dirnames if d not in T8_SYNC_EXCLUDE_DIRS]
+
         src_dir = Path(dirpath)
         rel = src_dir.relative_to(MUSIC_ROOT)
         dst_dir = T8_ROOT / rel
@@ -282,6 +292,8 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
             artist_name = rel.parts[0]
 
         for name in filenames:
+            if name in T8_SYNC_EXCLUDE_FILES:
+                continue
             src_file = src_dir / name
             dst_file = dst_dir / name
             item_key = logmsg.begin_item(name)
@@ -392,10 +404,12 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
     # Header is managed by main.py, so we don't close it here
 
     # Remove files on T8 that don't exist in ROON
-    # (This is a separate cleanup phase, not part of the main sync count)
+    # Skip excluded dirs (.thumbnails etc.) - don't delete, let T8 manage
     for dirpath, dirnames, filenames in os.walk(T8_ROOT, topdown=False):
         dst_dir = Path(dirpath)
         rel = dst_dir.relative_to(T8_ROOT)
+        if any(part in T8_SYNC_EXCLUDE_DIRS for part in rel.parts):
+            continue
         src_dir = MUSIC_ROOT / rel
 
         # Set album context if this looks like an album directory
@@ -403,30 +417,47 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
             rel_parts = list(rel.parts)
             if len(rel_parts) >= 2:  # Artist/Album structure
                 album_key = logmsg.begin_album(src_dir)
+                artist_name = None
             else:
                 album_key = None
+                # Artist-level files (artist.jpg, folder.jpg at artist root)
+                artist_name = rel.parts[0] if len(rel.parts) == 1 else None
         except (ValueError, IndexError):
             album_key = None
+            artist_name = None
 
         for name in filenames:
+            if name in T8_SYNC_EXCLUDE_FILES:
+                continue
             dst_file = dst_dir / name
             src_file = src_dir / name
             if not src_file.exists():
                 item_key = logmsg.begin_item(name)
                 if dry_run:
-                    logmsg.info("Would delete %item% from T8 (no source)")
+                    if artist_name:
+                        logmsg.info("Would delete {artist}: %item% from T8 (no source)", artist=artist_name)
+                    else:
+                        logmsg.info("Would delete %item% from T8 (no source)")
                 else:
-                    logmsg.info("DELETE: %item% from T8 (no source)")
+                    if artist_name:
+                        logmsg.info("DELETE: {artist}: %item% from T8 (no source)", artist=artist_name)
+                    else:
+                        logmsg.info("DELETE: %item% from T8 (no source)")
                 if not dry_run:
                     try:
                         dst_file.unlink()
                     except OSError as e:
-                        logmsg.warn("Could not delete %item% from T8: {error}", error=str(e))
+                        if artist_name:
+                            logmsg.warn("Could not delete {artist}: %item% from T8: {error}", artist=artist_name, error=str(e))
+                        else:
+                            logmsg.warn("Could not delete %item% from T8: {error}", error=str(e))
                         print(f"    [WARN] Could not delete {dst_file}: {e}")
                 logmsg.end_item(item_key)
 
-        # Remove empty directories
-        if not os.listdir(dst_dir):
+        # Remove empty directories (but not excluded dirs like .thumbnails)
+        if dst_dir.name in T8_SYNC_EXCLUDE_DIRS:
+            pass  # Never remove excluded dirs - T8 manages them
+        elif not os.listdir(dst_dir):
             if dry_run:
                 logmsg.verbose("Would remove empty directory on T8: {path}", path=str(dst_dir))
             else:
@@ -533,32 +564,38 @@ def sync_backups(dry_run: bool = False, use_checksums: bool = None) -> None:
             if live_file.exists():
                 # Both backup and live file exist - compare them
                 files_identical = False
-                
-                if use_checksums:
+                # If we embedded into this file this run, never remove its backup
+                # (network shares may not update mtime on write, so size+mtime can falsely match)
+                import run_state
+                if run_state.was_embedded(live_file):
+                    files_identical = False  # Keep backup - we modified it this run
+                elif use_checksums:
                     # Use checksums (slower but accurate)
                     backup_checksum = file_checksum(backup_file)
                     live_checksum = file_checksum(live_file)
-                    
                     if backup_checksum and live_checksum:
                         files_identical = (backup_checksum == live_checksum)
                     else:
-                        # Couldn't calculate checksums - assume different to be safe
                         files_identical = False
                 else:
-                    # Fast comparison: size + mtime (much faster)
+                    # Fast comparison: size + mtime (much faster than checksums)
                     try:
                         backup_stat = backup_file.stat()
                         live_stat = live_file.stat()
-                        files_identical = (
-                            backup_stat.st_size == live_stat.st_size and
-                            abs(backup_stat.st_mtime - live_stat.st_mtime) < 1.0  # Within 1 second
-                        )
+                        if live_stat.st_mtime > backup_stat.st_mtime:
+                            files_identical = False  # Live modified after backup - they differ
+                        else:
+                            files_identical = (
+                                backup_stat.st_size == live_stat.st_size and
+                                abs(backup_stat.st_mtime - live_stat.st_mtime) < 1.0
+                            )
                     except (OSError, FileNotFoundError):
-                        # Can't stat files - assume different to be safe
                         files_identical = False
                 
                 if files_identical:
-                    # Files are identical - remove backup (no need to keep it)
+                    # Files are identical - remove backup (no need to keep it).
+                    # This commonly occurs when a preceding embed/tag step failed (e.g. corrupt file):
+                    # backup was created before the attempt, embed failed silently, live file unchanged.
                     if dry_run:
                         logmsg.info("Would remove backup %item% (files identical)")
                     else:

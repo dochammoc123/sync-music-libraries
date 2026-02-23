@@ -33,8 +33,6 @@ from config import (
 from file_operations import process_downloads, upgrade_albums_to_flac_only
 from logging_utils import (
     notify_run_summary,
-    print_summary_log_to_stdout,
-    setup_logging,
     show_summary_log_in_viewer,
 )
 from sync_operations import (
@@ -104,7 +102,6 @@ def main() -> None:
         EMBED_IF_MISSING = False
         EMBED_FROM_UPDATES = False
 
-    setup_logging()  # File only (no console)
     from structured_logging import setup_detail_logging
     setup_detail_logging()  # Detail file + console
     
@@ -248,12 +245,7 @@ def main() -> None:
     print("Directory permissions check passed.\n")
     logmsg.verbose("Directory permissions check passed.\n")
     
-    print(f"Starting script in mode: {args.mode}")
-    print(f"DRY_RUN = {DRY_RUN}")
-    print(f"EMBED_ALL = {EMBED_ALL}")
-    print(f"T8_SYNC_USE_CHECKSUMS = {args.t8_checksums}")
-    
-    # Log startup info as always_show headers (appears in both detail log and summary)
+    # Log startup info as always_show headers (appears in summary at end; no duplicate print)
     from structured_logging import logmsg
     header_key = logmsg.header(f"Starting script in mode: {args.mode}", always_show=True, key=None)
     try:
@@ -408,12 +400,10 @@ def main() -> None:
         print("Disk capacity check passed.\n")
     except Exception as e:
         error_msg = f"ERROR: Exception during disk capacity check: {e}"
-        from logging_utils import logger
         from structured_logging import logmsg
         
-        logger.exception("Disk capacity check failed")
-        # Also log to new structured logging with full traceback
-        logmsg.exception("Exception during disk capacity check", exc_info=sys.exc_info())
+        # Log to structured logging with full traceback
+        logmsg.exception("Exception during disk capacity check")
         exit_with_error(error_msg)
 
     init_musicbrainz()
@@ -450,8 +440,8 @@ def main() -> None:
             from structured_logging import logmsg
             
             # Count warnings/errors from structured logging system
-            total_errors = logmsg.count_errors()
-            total_warnings = logmsg.count_warnings()
+            total_errors = logmsg.count_errors
+            total_warnings = logmsg.count_warnings
             
             # Determine exit code: errors = 1 (red), warnings only = 2 (yellow), clean = 0 (green)
             # Debug: Log counts for troubleshooting
@@ -466,13 +456,7 @@ def main() -> None:
             else:
                 exit_code = 0
             
-            # Print summary to console (before "Press Enter" prompt so user can review it)
-            try:
-                print_summary_log_to_stdout()
-            except Exception as e:
-                # Error already logged via logmsg if available
-                pass
-            
+            # Summary already printed by logmsg.write_summary() above
             # Log exit status before prompt
             if exit_code == 1:
                 print(f"Exiting with code 1 ({total_errors} error(s)) - systray will show red error icon")
@@ -493,6 +477,8 @@ def main() -> None:
             sys.exit(exit_code)
 
         # Step 1: Process new downloads (organize + art, no cleanup)
+        import run_state
+        run_state.clear()
         from structured_logging import logmsg
         # Step header processes MULTIPLE albums (each album gets its own instance)
         header_key = logmsg.header("Step 1: Process new downloads", "%msg%")
@@ -624,8 +610,6 @@ def main() -> None:
         except Exception as e:
             logmsg.error("Failed to send summary notification: {error}", error=str(e))
         logmsg.header(None, key=header_key)  # Close Step 13 header
-               
-        print("\nRun complete.")
 
         # Exit with appropriate code based on warnings/errors
         # Exit codes: 0 = clean (idle icon), 2 = warnings (yellow icon), 1 = errors (red icon)
@@ -633,13 +617,10 @@ def main() -> None:
         from structured_logging import logmsg
         
         # Get counts from structured logging API
-        total_errors = logmsg.count_errors()
-        total_warnings = logmsg.count_warnings()
+        total_errors = logmsg.count_errors
+        total_warnings = logmsg.count_warnings
         
         # Determine exit code: errors = 1 (red), warnings only = 2 (yellow), clean = 0 (green)
-        # Debug: Always log counts for troubleshooting (even if 0, helps diagnose issues)
-        print(f"[DEBUG] Error/Warning counts: {total_errors} errors, {total_warnings} warnings")
-        
         if total_errors > 0:
             exit_code = 1
         elif total_warnings > 0:
@@ -683,8 +664,7 @@ def main() -> None:
                     # Try to wait for user input - this keeps console open
                     # If stdin is not available (tray launcher), this will raise an exception
                     print()  # Add blank line before prompt
-                    print("Press Enter to close this window...")  # Use print() not log() - log() doesn't write to console
-                    print(f"(Exit code is already set to {exit_code} - closing window may show wrong icon)")  # Inform user
+                    print("Press Enter to close this window...")
                     input()
                 except (EOFError, KeyboardInterrupt, OSError, AttributeError):
                     # stdin not available or interrupted - likely running from tray launcher
@@ -698,13 +678,9 @@ def main() -> None:
         sys.exit(exit_code)
 
     except Exception as e:
-        from logging_utils import logger
         from structured_logging import logmsg
         
-        # Log to old logger (with traceback)
-        logger.exception("Fatal error during run")
-        # Also log to new structured logging with full traceback
-        logmsg.exception("Fatal error during run", exc_info=sys.exc_info())
+        logmsg.exception("Fatal error during run")
         
         # Write summaries (error already logged above, don't duplicate in exit_with_error)
         try:
@@ -712,7 +688,7 @@ def main() -> None:
             notify_run_summary(args.mode)
         except Exception as summary_error:
             # If summary writing fails, log it but continue to prompt
-            logger.exception("Error writing summary logs")
+            logmsg.exception("Error writing summary logs")
         
         # Keep console open for user to review
         if sys.platform == "win32":

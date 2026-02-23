@@ -108,9 +108,9 @@ def test_logging_setup():
     print("\nTesting logging setup...")
     
     try:
-        from logging_utils import setup_logging, log
-        setup_logging()
-        log("Test log message")
+        from structured_logging import setup_detail_logging, logmsg
+        setup_detail_logging()
+        logmsg.info("Test log message")
         print("  ✓ Logging setup works")
         return True
     except Exception as e:

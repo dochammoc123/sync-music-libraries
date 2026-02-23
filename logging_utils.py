@@ -1,23 +1,34 @@
 """
 Logging utilities for music library sync script.
-Handles logging setup, summary generation, and notifications.
+Handles summary generation and notifications.
+All logging uses structured_logging.logmsg - the old logger API has been removed.
 """
 import logging
+import logging.handlers
 import os
 import platform
 import subprocess
 import sys
-from datetime import datetime
-from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from config import LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, SUMMARY_LOG_FILE, SYSTEM, DETAIL_LOG_FILE
-
-logger = logging.getLogger("library_sync")
+from config import STRUCTURED_SUMMARY_LOG_FILE, SYSTEM
 
 
-class SafeRotatingFileHandler(RotatingFileHandler):
+def __getattr__(name: str):
+    """Raise if anyone tries to use removed APIs."""
+    if name == "logger":
+        raise AttributeError(
+            "The old 'logger' has been removed. Use structured_logging.logmsg instead."
+        )
+    if name == "print_summary_log_to_stdout":
+        raise AttributeError(
+            "print_summary_log_to_stdout has been removed. logmsg.write_summary() prints the summary."
+        )
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
+class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
     """
     RotatingFileHandler that gracefully handles Windows file locking issues.
     If rotation fails due to file being locked, it continues logging without rotation.
@@ -106,32 +117,6 @@ class PlainFormatter(logging.Formatter):
     pass
 
 
-def setup_logging() -> None:
-    """Configure old logging API: file handler only (no console)."""
-    logger.setLevel(logging.INFO)
-    
-    # Plain formatter for file (no colors)
-    file_fmt = PlainFormatter("[%(asctime)s] %(message)s", "%Y-%m-%d %H:%M:%S")
-
-    # File handler without colors (writes to log file only, no console)
-    if LOG_FILE is not None:
-        LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
-        fh = SafeRotatingFileHandler(
-            LOG_FILE,
-            maxBytes=LOG_MAX_BYTES,
-            backupCount=LOG_BACKUP_COUNT,
-            encoding="utf-8"
-        )
-        fh.setFormatter(file_fmt)
-        logger.addHandler(fh)
-
-
-# log() function removed - use print() for console output or structured logging for detailed logs
-
-
-# Old API functions removed - structured logging handles this
-
-
 def album_label_from_tags(artist: str, album: str, year: str) -> str:
     """Create an album label from tags."""
     return f"{artist} - {album} ({year})" if year else f"{artist} - {album}"
@@ -174,9 +159,6 @@ def album_label_from_dir(album_dir: Path) -> str:
         return rel.as_posix()
 
 
-# write_summary_log() removed - new structured logging system handles this via logmsg.write_summary()
-
-
 def notify_run_summary(mode: str) -> None:
     """
     Simple cross-platform notification at the end of a run,
@@ -184,8 +166,8 @@ def notify_run_summary(mode: str) -> None:
     Now just logs to console - no blocking prompts.
     """
     from structured_logging import logmsg
-    total_warnings = logmsg.count_warnings()
-    total_errors = logmsg.count_errors()
+    total_warnings = logmsg.count_warnings
+    total_errors = logmsg.count_errors
 
     if total_errors > 0:
         message = f"Mode: {mode} — finished with {total_errors} error(s) and {total_warnings} warning(s)."
@@ -221,75 +203,21 @@ def show_summary_log_in_viewer() -> None:
     Safe no-op if the file doesn't exist.
     """
     try:
-        if not SUMMARY_LOG_FILE.exists():
+        if STRUCTURED_SUMMARY_LOG_FILE is None or not STRUCTURED_SUMMARY_LOG_FILE.exists():
             return
 
         if SYSTEM == "Darwin":
             # Open with default app (TextEdit by default)
             subprocess.run(
-                ["open", str(SUMMARY_LOG_FILE)],
+                ["open", str(STRUCTURED_SUMMARY_LOG_FILE)],
                 check=False
             )
         elif SYSTEM == "Windows":
-            os.startfile(str(SUMMARY_LOG_FILE))
+            os.startfile(str(STRUCTURED_SUMMARY_LOG_FILE))
         else:
             # On other OS's, summary log location already logged via logmsg if available
             pass
     except Exception as e:
         # File viewer errors are non-critical, don't log (would require logmsg import)
-        pass
-
-
-def print_summary_log_to_stdout() -> None:
-    """
-    Print the summary log contents to stdout at the end of the run.
-    Safe no-op if file doesn't exist.
-    Adds icons and colors to the summary output.
-    """
-    try:
-        if not SUMMARY_LOG_FILE.exists():
-            return
-
-        print("\n================ SUMMARY ================")
-        with SUMMARY_LOG_FILE.open("r", encoding="utf-8") as f:
-            lines = f.readlines()
-            for line in lines:
-                line = line.rstrip('\n\r')
-                if not line:
-                    print()
-                    continue
-                
-                # Detect format:
-                # - Albums: start with "* "
-                # - Headers: start with one or more tabs followed by "- "
-                # - Warnings/Errors: start with "[WARN]" or "[ERROR]" (may have leading tabs)
-                # - Section headers: contain ":" and no leading tabs (like "Albums processed:")
-                
-                line_stripped = line.lstrip(" \t")  # Remove leading whitespace for prefix detection
-                
-                if line_stripped.startswith("[ERROR]"):
-                    # Error line - white on red
-                    print(f"{Colors.ERROR}{ICONS['error']} {line}{Colors.RESET}")
-                elif line_stripped.startswith("[WARN]"):
-                    # Warning line - black on yellow
-                    print(f"{Colors.WARNING}{ICONS['warning']} {line}{Colors.RESET}")
-                elif line.startswith("* "):
-                    # Album line - highlight differently (cyan/blue, or bold)
-                    print(f"{Colors.CYAN}{ICONS['step']} {line}{Colors.RESET}")
-                elif '\t' in line and line.lstrip('\t').startswith("- "):
-                    # Header line (tab(s) + dash) - add > icon
-                    print(f"{ICONS['step']} {line}")
-                elif ':' in line and not line.startswith("  ") and not line.startswith("\t") and not line.startswith("*"):
-                    # Section header (like "Albums processed:")
-                    print(f"{ICONS['step']} {line}")
-                elif line.startswith("  ") or line.startswith("\t"):
-                    # Other indented lines (legacy format) - add info icon
-                    print(f"{ICONS['info']} {line}")
-                else:
-                    # Regular line
-                    print(line)
-        print("=========================================\n")
-    except Exception as e:
-        # Summary log printing errors are non-critical, don't log (would require logmsg import)
         pass
 

@@ -107,6 +107,11 @@ MIN_DISK_CAPACITY_BYTES = 1_000_000_000_000  # 1TB
 # True: Accurate mode - uses MD5 checksums (slower but more reliable)
 T8_SYNC_USE_CHECKSUMS = False
 
+# T8 sync exclusions - don't copy these from ROON, don't delete them on T8
+# T8 manages its own .thumbnails and similar cache/metadata
+T8_SYNC_EXCLUDE_DIRS = {".thumbnails", ".cache", ".trash", ".Trash"}
+T8_SYNC_EXCLUDE_FILES = {".database_uuid", ".DS_Store", "Thumbs.db"}
+
 # ROON library refresh configuration
 # ROON needs to rescan its library after files are added/modified.
 # Set ENABLE_ROON_REFRESH to True to enable automatic ROON refresh after sync operations.
@@ -169,10 +174,8 @@ def check_disk_capacity(path: Path, min_bytes: int = MIN_DISK_CAPACITY_BYTES) ->
         Tuple of (has_enough_capacity: bool, capacity_gb: float, path_checked: str)
         Returns (False, 0.0, path_checked) if check fails or path is inaccessible
     """
-    import logging
     import time
-    logger = logging.getLogger("library_sync")
-    
+
     try:
         # Get the disk root path (handle UNC paths properly)
         disk_root = get_disk_root_path(path)
@@ -215,13 +218,16 @@ def check_disk_capacity(path: Path, min_bytes: int = MIN_DISK_CAPACITY_BYTES) ->
                             break
                         else:
                             # Got usage but it's 0 - might be a timing issue, retry
-                            logger.debug(f"Disk usage returned 0 for {test_path}, retrying...")
+                            from structured_logging import logmsg
+                            logmsg.verbose("Disk usage returned 0 for {path}, retrying...", path=str(test_path))
                             usage = None
                             if attempt < max_retries - 1:
                                 time.sleep(retry_delay)
                 except (OSError, PermissionError) as e:
                     last_error = e
-                    logger.debug(f"Could not get disk usage for {test_path} (attempt {attempt + 1}/{max_retries}): {e}")
+                    from structured_logging import logmsg
+                    logmsg.verbose("Could not get disk usage for {path} (attempt {attempt}/{max}): {error}",
+                        path=str(test_path), attempt=attempt + 1, max=max_retries, error=str(e))
                     if attempt < max_retries - 1 and is_unc_path:
                         time.sleep(retry_delay)
                     continue
@@ -235,7 +241,8 @@ def check_disk_capacity(path: Path, min_bytes: int = MIN_DISK_CAPACITY_BYTES) ->
             if last_error:
                 error_msg += f" (last error: {last_error})"
             if is_unc_path:
-                logger.warning(f"{error_msg} - Network share may not be accessible or may need authentication")
+                from structured_logging import logmsg
+                logmsg.warn("{msg} - Network share may not be accessible or may need authentication", msg=error_msg)
             raise OSError(error_msg)
         
         total_bytes = usage.total
@@ -247,9 +254,8 @@ def check_disk_capacity(path: Path, min_bytes: int = MIN_DISK_CAPACITY_BYTES) ->
     
     except Exception as e:
         # Log the error for debugging
-        logger.warning(f"Error checking disk capacity for {path}: {e}")
-        if logger.isEnabledFor(logging.DEBUG):
-            logger.debug(f"Full traceback:", exc_info=True)
+        from structured_logging import logmsg
+        logmsg.warn("Error checking disk capacity for {path}: {error}", path=str(path), error=str(e))
         # Path doesn't exist, not accessible, or other error
         return (False, 0.0, str(path))
 

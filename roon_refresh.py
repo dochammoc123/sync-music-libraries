@@ -6,8 +6,6 @@ ROON needs to rescan its library to pick up new/changed files.
 
 Uses ROCK server REST API to restart ROON software remotely.
 """
-import logging
-
 import requests
 
 from config import (
@@ -21,8 +19,6 @@ from config import (
     ROCK_API_COOKIES,
 )
 
-logger = logging.getLogger("library_sync")
-
 
 def refresh_roon_library(dry_run: bool = False) -> bool:
     """
@@ -34,19 +30,17 @@ def refresh_roon_library(dry_run: bool = False) -> bool:
     Returns:
         True if refresh was successful or skipped, False if refresh failed
     """
-    from structured_logging import logmsg
-    
+    from structured_logging import logmsg  # Deferred - setup_detail_logging must run first
+
     if not ENABLE_ROON_REFRESH:
         logmsg.verbose("ROON refresh disabled in configuration - skipping")
-        logger.info("[ROON REFRESH] Disabled in configuration - skipping")
         return True
     
     if ROON_REFRESH_METHOD == "none":
         logmsg.verbose("ROON refresh method set to 'none' - skipping")
-        logger.info("[ROON REFRESH] Method set to 'none' - skipping")
         return True
     
-    logger.info(f"[ROON REFRESH] Attempting to refresh ROON library using method: {ROON_REFRESH_METHOD}")
+    logmsg.info("Attempting to refresh ROON library using method: {method}", method=ROON_REFRESH_METHOD)
     
     try:
         if ROON_REFRESH_METHOD == "rock_api":
@@ -61,11 +55,9 @@ def refresh_roon_library(dry_run: bool = False) -> bool:
             return success
         else:
             logmsg.warn("Unknown ROON refresh method: {method} - skipping. Use 'rock_api' or 'none'.", method=ROON_REFRESH_METHOD)
-            logger.warning(f"[ROON REFRESH] Unknown method: {ROON_REFRESH_METHOD} - skipping. Use 'rock_api' or 'none'.")
             return False
     except Exception as e:
         logmsg.error("Error during ROON refresh: {error}", error=str(e))
-        logger.error(f"[ROON REFRESH] Error during refresh: {e}")
         return False
 
 
@@ -104,19 +96,21 @@ def _restart_via_rock_api(dry_run: bool = False) -> bool:
             kwargs["json"] = ROCK_API_DATA
         else:
             kwargs["data"] = ROCK_API_DATA
-    
-    logger.info(f"[ROON REFRESH] Restarting ROON software via ROCK API: {method} {url}")
+
+    from structured_logging import logmsg  # Deferred - setup_detail_logging must run first
+
+    logmsg.info("Restarting ROON software via ROCK API: {method} {url}", method=method, url=url)
     if ROCK_API_HEADERS:
-        logger.debug(f"[ROON REFRESH] Headers: {ROCK_API_HEADERS}")
+        logmsg.verbose("Headers: {headers}", headers=ROCK_API_HEADERS)
     if ROCK_API_DATA is not None:
-        logger.debug(f"[ROON REFRESH] Data: {ROCK_API_DATA}")
+        logmsg.verbose("Data: {data}", data=ROCK_API_DATA)
     
     if dry_run:
-        logger.info(f"[ROON REFRESH] DRY RUN: Would call ROCK API: {method} {url}")
+        logmsg.info("DRY RUN: Would call ROCK API: {method} {url}", method=method, url=url)
         if ROCK_API_HEADERS:
-            logger.info(f"[ROON REFRESH] DRY RUN: With headers: {ROCK_API_HEADERS}")
+            logmsg.info("DRY RUN: With headers: {headers}", headers=ROCK_API_HEADERS)
         if ROCK_API_DATA is not None:
-            logger.info(f"[ROON REFRESH] DRY RUN: With data: {ROCK_API_DATA}")
+            logmsg.info("DRY RUN: With data: {data}", data=ROCK_API_DATA)
         return True
     
     try:
@@ -126,29 +120,28 @@ def _restart_via_rock_api(dry_run: bool = False) -> bool:
         elif method == "POST":
             r = requests.post(url, **kwargs)
         else:
-            logger.error(f"[ROON REFRESH] Unsupported HTTP method: {method}. Use GET or POST.")
+            logmsg.error("Unsupported HTTP method: {method}. Use GET or POST.", method=method)
             return False
         
         r.raise_for_status()
-        logger.info(f"[ROON REFRESH] Successfully sent restart command to ROCK server (status: {r.status_code})")
+        logmsg.info("Successfully sent restart command to ROCK server (status: {status})", status=r.status_code)
         if r.text:
-            logger.debug(f"[ROON REFRESH] Response: {r.text[:200]}")  # Log first 200 chars of response
+            logmsg.verbose("Response: {response}", response=r.text[:200])
         return True
         
     except requests.exceptions.Timeout:
-        logger.error(f"[ROON REFRESH] Timeout connecting to ROCK server at {rock_server}")
+        logmsg.error("Timeout connecting to ROCK server at {server}", server=rock_server)
         return False
     except requests.exceptions.ConnectionError:
-        logger.error(f"[ROON REFRESH] Could not connect to ROCK server at {rock_server} - is it reachable?")
+        logmsg.error("Could not connect to ROCK server at {server} - is it reachable?", server=rock_server)
         return False
     except requests.exceptions.HTTPError as e:
-        logger.error(f"[ROON REFRESH] ROCK API returned error: {e.response.status_code} {e.response.reason}")
+        logmsg.error("ROCK API returned error: {status} {reason}", status=e.response.status_code, reason=e.response.reason)
         if e.response.text:
-            logger.debug(f"[ROON REFRESH] Error response: {e.response.text[:200]}")
+            logmsg.verbose("Error response: {response}", response=e.response.text[:200])
         return False
     except Exception as e:
-        logger.error(f"[ROON REFRESH] Exception while calling ROCK API: {e}")
-        logger.exception("Full traceback:")
+        logmsg.exception("Exception while calling ROCK API")
         return False
 
 

@@ -32,6 +32,7 @@ cp -f "$SOURCE_DIR/tag_operations.py" "$DEPLOY_FOLDER/tag_operations.py"
 cp -f "$SOURCE_DIR/artwork.py" "$DEPLOY_FOLDER/artwork.py"
 cp -f "$SOURCE_DIR/file_operations.py" "$DEPLOY_FOLDER/file_operations.py"
 cp -f "$SOURCE_DIR/sync_operations.py" "$DEPLOY_FOLDER/sync_operations.py"
+cp -f "$SOURCE_DIR/run_state.py" "$DEPLOY_FOLDER/run_state.py"
 cp -f "$SOURCE_DIR/roon_refresh.py" "$DEPLOY_FOLDER/roon_refresh.py"
 
 # Copy test script

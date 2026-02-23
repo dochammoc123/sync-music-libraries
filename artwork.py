@@ -29,10 +29,7 @@ from config import (
     WEB_ART_LOOKUP_RETRIES,
     WEB_ART_LOOKUP_TIMEOUT,
 )
-from logging_utils import (
-    album_label_from_dir,
-    log,
-)
+from logging_utils import album_label_from_dir
 
 
 def init_musicbrainz() -> None:
@@ -92,6 +89,7 @@ def fetch_art_from_web(artist: str, album: str, cover_path: Path, dry_run: bool 
     Try MusicBrainz + Cover Art Archive with retry logic.
     Returns True on success, False otherwise.
     """
+    from structured_logging import logmsg
     if not ENABLE_WEB_ART_LOOKUP:
         return False
 
@@ -588,7 +586,8 @@ def backup_audio_file_if_needed(audio_path: Path, dry_run: bool = False, backup_
     if backup_path.exists():
         # Backup already exists - skip to avoid overwriting original backup
         # This handles cases where file is modified multiple times (tags, then art)
-        print(f"  BACKUP: {audio_path} -> {backup_path}")
+        from structured_logging import logmsg
+        logmsg.verbose("Backup already exists for %item%, skipping")
         return
     if not dry_run:
         import shutil
@@ -749,6 +748,7 @@ def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_en
                 logmsg.info("Embedding artwork into %item% (force update)")
                 
                 embedded = False
+                last_error = None
                 # Try FLAC first
                 if p.suffix.lower() == ".flac":
                     try:
@@ -762,8 +762,8 @@ def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_en
                         audio.add_picture(pic)
                         audio.save()
                         embedded = True
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        last_error = e
                 
                 # Try MP3
                 if not embedded and p.suffix.lower() == ".mp3":
@@ -782,8 +782,8 @@ def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_en
                         ))
                         audio.save()
                         embedded = True
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        last_error = e
                 
                 # Try MP4/M4A
                 if not embedded and p.suffix.lower() in {".m4a", ".mp4", ".m4v"}:
@@ -793,8 +793,8 @@ def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_en
                         audio['covr'] = [cover]
                         audio.save()
                         embedded = True
-                    except Exception:
-                        pass
+                    except Exception as e:
+                        last_error = e
                 
                 # Try generic MutagenFile for other formats
                 if not embedded:
@@ -808,10 +808,17 @@ def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_en
                             pic.mime = "image/jpeg"
                             pic.desc = "Cover"
                             audio.add_picture(pic)
-                            audio.save()
-                            embedded = True
-                    except Exception:
-                        pass
+                        audio.save()
+                        embedded = True
+                    except Exception as e:
+                        last_error = e
+                
+                if not embedded:
+                    err_msg = str(last_error) if last_error else "unknown error"
+                    logmsg.warn("Failed to embed artwork into %item%: {error}", error=err_msg)
+                else:
+                    import run_state
+                    run_state.mark_embedded(p)
             
             logmsg.end_item(item_key)
     
@@ -1087,6 +1094,7 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
             # Embed art based on detected or actual file type
             # Try to detect actual format first (handles misnamed files)
             embedded = False
+            last_embed_error = None  # Accumulate for single warning at end
             try:
                 # Try FLAC first (if extension or detected format suggests it)
                 if use_format == 'flac' or p.suffix.lower() == ".flac":
@@ -1108,7 +1116,8 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                             error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
                             if len(error_msg) > 200:
                                 error_msg = error_msg[:197] + "..."
-                            logmsg.warn("File has .flac extension but is not valid FLAC, trying other formats: {error}", error=error_msg)
+                            last_embed_error = error_msg
+                            logmsg.verbose("File has .flac extension but is not valid FLAC, trying other formats: {error}", error=error_msg)
                         else:
                             raise
                 
@@ -1147,12 +1156,11 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                         embedded = True
                     except Exception as e:
                         if p.suffix.lower() == ".mp3":
-                            # Don't log the exception object directly (may contain binary data)
                             error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
-                            # Truncate very long error messages
                             if len(error_msg) > 200:
                                 error_msg = error_msg[:197] + "..."
-                            logmsg.warn("File has .mp3 extension but is not valid MP3, trying other formats: {error}", error=error_msg)
+                            last_embed_error = error_msg
+                            logmsg.verbose("File has .mp3 extension but is not valid MP3, trying other formats: {error}", error=error_msg)
                         else:
                             raise
                 
@@ -1170,11 +1178,11 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                         embedded = True
                     except Exception as e:
                         if p.suffix.lower() in {".m4a", ".mp4", ".m4v"}:
-                            # Don't log the exception object directly (may contain binary data)
                             error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
                             if len(error_msg) > 200:
                                 error_msg = error_msg[:197] + "..."
-                            logmsg.warn("Could not embed art into MP4/M4A file %item%: {error}", error=error_msg)
+                            last_embed_error = error_msg
+                            logmsg.verbose("Could not embed art into MP4/M4A file %item%: {error}", error=error_msg)
                         else:
                             raise
                 
@@ -1198,15 +1206,20 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                             else:
                                 logmsg.warn("Format {ext} does not support embedded art", ext=p.suffix)
                     except Exception as e:
-                        # Don't log the exception object directly (may contain binary data)
                         error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
-                        # Truncate very long error messages
                         if len(error_msg) > 200:
                             error_msg = error_msg[:197] + "..."
-                        logmsg.warn("Could not embed art using generic method: {error}", error=error_msg)
+                        last_embed_error = error_msg
+                        logmsg.verbose("Could not embed art using generic method: {error}", error=error_msg)
                 
                 if not embedded:
-                    logmsg.warn("Could not determine format or embed art into %item%")
+                    if last_embed_error:
+                        logmsg.warn("Could not embed art into %item%: {error}", error=last_embed_error)
+                    else:
+                        logmsg.warn("Could not determine format or embed art into %item%")
+                else:
+                    import run_state
+                    run_state.mark_embedded(p)
             except Exception as e:
                 # Don't log the exception object directly (may contain binary data)
                 error_msg = str(e).split('\n')[0] if str(e) else "unknown error"

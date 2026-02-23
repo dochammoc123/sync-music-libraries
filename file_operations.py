@@ -15,10 +15,7 @@ from config import (
     DOWNLOADS_DIR,
     MUSIC_ROOT,
 )
-from logging_utils import (
-    album_label_from_tags,
-    log,
-)
+from logging_utils import album_label_from_tags
 from tag_operations import choose_album_year, format_track_filename, sanitize_filename_component, write_tags_to_file
 
 
@@ -1113,7 +1110,7 @@ def cleanup_downloads_folder(dry_run: bool = False, header_key: str = None) -> N
     # can now be cleaned up if they weren't used
     
     # First, clean up files in downloads root
-    cleanup_root_key = logmsg.push_header("Cleaning up files in downloads root", "%msg% (%count% files)", "CLEANUP")
+    cleanup_root_key = logmsg.push_header("[INFO] Cleaning up files in downloads root", "%msg% (%count% files)", "CLEANUP")
     try:
         cleanup_count = 0
         for f in DOWNLOADS_DIR.iterdir():
@@ -1177,7 +1174,7 @@ def cleanup_downloads_folder(dry_run: bool = False, header_key: str = None) -> N
                 artist_folders.append(folder_path)
         
         # Process album folders (with album context)
-        cleanup_album_folders_key = logmsg.push_header("Cleaning up album folders", "%msg% (%count% items)", "CLEANUP")
+        cleanup_album_folders_key = logmsg.push_header("[INFO] Cleaning up album folders", "%msg% (%count% items)", "CLEANUP")
         try:
             for folder_path in sorted(album_folders, key=lambda p: len(str(p)), reverse=True):
                 _process_cleanup_folder(folder_path, DOWNLOADS_DIR, MUSIC_ROOT, dry_run, is_album_folder=True)
@@ -1185,7 +1182,7 @@ def cleanup_downloads_folder(dry_run: bool = False, header_key: str = None) -> N
             logmsg.pop_header(cleanup_album_folders_key)
         
         # Process artist folders (global context)
-        cleanup_artist_folders_key = logmsg.push_header("Cleaning up artist folders", "%msg% (%count% items)", "CLEANUP")
+        cleanup_artist_folders_key = logmsg.push_header("[INFO] Cleaning up artist folders", "%msg% (%count% items)", "CLEANUP")
         try:
             for folder_path in sorted(artist_folders, key=lambda p: len(str(p)), reverse=True):
                 _process_cleanup_folder(folder_path, DOWNLOADS_DIR, MUSIC_ROOT, dry_run, is_album_folder=False)

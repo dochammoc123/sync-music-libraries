@@ -61,7 +61,7 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from logging_utils import logger, album_label_from_tags, Colors, ColoredFormatter, PlainFormatter, ICONS
+from logging_utils import album_label_from_tags, Colors, ColoredFormatter, PlainFormatter, ICONS
 from config import DETAIL_LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, SYSTEM, STRUCTURED_SUMMARY_LOG_FILE
 
 # Detail log writer (separate from summary) - file handler only
@@ -210,8 +210,9 @@ class StructuredLogger:
         self.current_item_id: Optional[str] = None  # Current item context
         self._current_item_key: Optional[str] = None  # Key for current item (for sanity checking)
         
-        # Track warnings and errors for summary (album -> list of messages)
-        self.album_warnings: Dict[str, List[Tuple[str, str]]] = {}  # album_label -> [(level, message), ...]
+        # Track warnings and errors for summary (album -> list of (header_key, level, message))
+        # header_key = step where warning occurred (from active_definition_stack[0]); None = no step context
+        self.album_warnings: Dict[str, List[Tuple[Optional[str], str, str]]] = {}  # album_label -> [(header_key, level, message), ...]
         self.global_warnings: List[Tuple[str, str]] = []  # [(level, message), ...]
         
         # Cached counts (updated whenever warnings/errors are added)
@@ -913,10 +914,11 @@ class StructuredLogger:
         # Track warnings/errors for summary
         if level in ("warn", "error"):
             if use_album:
-                # Track in structured logging
+                # Associate warning with current step (so it appears under correct step in summary)
+                step_header_key = self.active_definition_stack[0] if self.active_definition_stack else None
                 if use_album not in self.album_warnings:
                     self.album_warnings[use_album] = []
-                self.album_warnings[use_album].append((level, formatted_message))
+                self.album_warnings[use_album].append((step_header_key, level, formatted_message))
                 # Update counts
                 if level == "error":
                     self._count_errors += 1
@@ -1141,7 +1143,7 @@ class StructuredLogger:
                 # Sort steps by creation order of first instance in each step
                 sorted_steps = sorted(step_groups.items(), key=lambda x: min(inst[1].creation_order for inst in x[1]))
                 
-                # Write instances grouped by step
+                # Write instances grouped by step (warnings appear under the step they occurred in)
                 for header_key, step_instances in sorted_steps:
                     # Sort instances within this step by level and creation_order
                     step_instances.sort(key=lambda x: (x[0].level, x[1].creation_order))
@@ -1163,12 +1165,20 @@ class StructuredLogger:
                         num_dashes = adjusted_level + 1  # Number of dashes = adjusted level + 1
                         dashes = "-" * num_dashes
                         lines.append(f"{indent_spaces}{dashes} {message}")
+                    
+                    # Add warnings that occurred during this step
+                    if album_label in self.album_warnings:
+                        for warn_header_key, warn_level, warning_msg in self.album_warnings[album_label]:
+                            if warn_header_key == header_key:
+                                prefix = "[WARN]" if warn_level == "warn" else "[ERROR]"
+                                lines.append(f"    {prefix} {warning_msg}")
                 
-                # Add warnings for this album
+                # Add warnings with no step context at end of album
                 if album_label in self.album_warnings:
-                    for level, warning_msg in self.album_warnings[album_label]:
-                        prefix = "[WARN]" if level == "warn" else "[ERROR]"
-                        lines.append(f"    {prefix} {warning_msg}")  # 4 spaces for warnings (level 2)
+                    for warn_header_key, warn_level, warning_msg in self.album_warnings[album_label]:
+                        if warn_header_key is None:
+                            prefix = "[WARN]" if warn_level == "warn" else "[ERROR]"
+                            lines.append(f"    {prefix} {warning_msg}")
         else:
             lines.append("Albums processed: (none)")
         
@@ -1247,7 +1257,8 @@ class StructuredLogger:
             with STRUCTURED_SUMMARY_LOG_FILE.open("w", encoding="utf-8") as f:
                 f.write("\n".join(lines) + "\n")
         except Exception as e:
-            logger.error(f"Could not write structured summary log: {e}")
+            import sys
+            print(f"[ERROR] Could not write structured summary log: {e}", file=sys.stderr)
         
         # Print to console with colors (on-the-fly)
         import sys
