@@ -11,6 +11,7 @@ from config import (
     AUDIO_EXT,
     BACKUP_ROOT,
     CLEAN_EMPTY_BACKUP_FOLDERS,
+    CLEANUP_FILENAMES,
     MUSIC_ROOT,
     T8_ROOT,
     T8_SYNC_EXCLUDE_DIRS,
@@ -647,23 +648,57 @@ def sync_backups(dry_run: bool = False, use_checksums: bool = None) -> None:
                     break
 
                 if contents:
-                    # Directory not empty, stop cleaning
-                    break
+                    # Subdirs? Not empty yet (they get removed in their own iteration)
+                    if any(c.is_dir() for c in contents):
+                        break
+                    # Only files: treat as empty if only junk (.DS_Store, Thumbs.db, etc.)
+                    if not all(c.name in CLEANUP_FILENAMES for c in contents):
+                        break
+                    for c in contents:
+                        try:
+                            c.unlink()
+                        except OSError:
+                            break
+                    # Fall through to rmdir
 
-                logmsg.verbose("Removing empty backup folder: {path}", path=str(current))
-                print(f"  [CLEANUP] Removing empty backup folder: {current}")
+                logmsg.info("Removing empty backup folder: {path}", path=str(current))
                 try:
                     current.rmdir()
                 except OSError as e:
                     logmsg.warn("Could not remove empty backup folder {path}: {error}", path=str(current), error=str(e))
-                    print(f"    [CLEANUP WARN] Could not remove {current}: {e}")
                     break
 
                 # Move up to parent directory
                 current = current.parent
     
-    # Note: Empty backup root cleanup is handled in startup permission checks
-    # No need to handle it here - if it's empty, it was already removed at startup
+    # Remove BACKUP_ROOT itself if empty (same as restore_flacs_from_backups)
+    if not dry_run and CLEAN_EMPTY_BACKUP_FOLDERS:
+        try:
+            if BACKUP_ROOT.exists():
+                contents = list(BACKUP_ROOT.iterdir())
+                # Remove junk files so we can rmdir root if it's otherwise empty
+                if contents and not any(c.is_dir() for c in contents) and all(c.name in CLEANUP_FILENAMES for c in contents):
+                    for c in contents:
+                        try:
+                            c.unlink()
+                        except OSError:
+                            pass
+                    contents = []
+                if not contents:
+                    logmsg.info("Backup root is empty, removing it (will be recreated on next backup)")
+                    try:
+                        BACKUP_ROOT.rmdir()
+                    except OSError as e:
+                        logmsg.warn("Could not remove empty backup root: {error}", error=str(e))
+        except (OSError, PermissionError) as e:
+            logmsg.warn("Could not check backup root: {error}", error=str(e))
+    
+    # Always log a summary so the step shows at least one INFO line
+    kept = backups_processed - backups_removed
+    if backups_processed == 0:
+        logmsg.info("Backup sync: no backup files to process (folder empty or already cleaned by restore)")
+    else:
+        logmsg.info("Backup sync: {removed} removed (identical or orphan), {kept} kept", removed=backups_removed, kept=kept)
     
 
 
@@ -673,7 +708,7 @@ def restore_flacs_from_backups(dry_run: bool = False) -> None:
     Only affects files that have backup copies.
     """
     from structured_logging import logmsg
-    from config import BACKUP_ROOT, MUSIC_ROOT, CLEAN_EMPTY_BACKUP_FOLDERS
+    from config import BACKUP_ROOT, CLEANUP_FILENAMES, MUSIC_ROOT, CLEAN_EMPTY_BACKUP_FOLDERS
     
     restore_key = logmsg.header("Restore from backups", "%msg% (%count% files restored)")
     
@@ -749,8 +784,18 @@ def restore_flacs_from_backups(dry_run: bool = False) -> None:
                     break
 
                 if contents:
-                    # Directory not empty, stop cleaning
-                    break
+                    # Subdirs? Not empty yet (they get removed in their own iteration)
+                    if any(c.is_dir() for c in contents):
+                        break
+                    # Only files: treat as empty if only junk (.DS_Store, Thumbs.db, etc.)
+                    if not all(c.name in CLEANUP_FILENAMES for c in contents):
+                        break
+                    for c in contents:
+                        try:
+                            c.unlink()
+                        except OSError:
+                            break
+                    # Fall through to rmdir
 
                 try:
                     rel_path = current.relative_to(BACKUP_ROOT)
@@ -760,7 +805,7 @@ def restore_flacs_from_backups(dry_run: bool = False) -> None:
                 
                 item_key = logmsg.begin_item(item_id)
                 try:
-                    logmsg.verbose("Removing empty backup folder: %item%")
+                    logmsg.info("Removing empty backup folder: %item%")
                     current.rmdir()
                 except OSError as e:
                     logmsg.warn("Could not remove empty backup folder %item%: {error}", error=str(e))
@@ -776,13 +821,68 @@ def restore_flacs_from_backups(dry_run: bool = False) -> None:
     if current_album_key is not None:
         logmsg.end_album(current_album_key)
 
-    # After all restores, check if BACKUP_ROOT itself is empty and delete it
-    if not dry_run and CLEAN_EMPTY_BACKUP_FOLDERS:
+    # Dedicated pass: remove empty backup folders after all restores are done.
+    # (Cleanup during the restore walk can miss parents due to walk order or network
+    # share caching; a separate walk ensures CD1/CD2/album/artist/root are removed.)
+    if not dry_run and CLEAN_EMPTY_BACKUP_FOLDERS and BACKUP_ROOT.exists():
+        try:
+            for dirpath, _dirnames, _filenames in os.walk(BACKUP_ROOT, topdown=False):
+                current = Path(dirpath)
+                if not current.exists():
+                    continue
+                while True:
+                    try:
+                        if current.resolve() == BACKUP_ROOT.resolve():
+                            break
+                    except FileNotFoundError:
+                        break
+                    try:
+                        contents = list(current.iterdir())
+                    except (FileNotFoundError, OSError, PermissionError):
+                        break
+                    if contents:
+                        if any(c.is_dir() for c in contents):
+                            break
+                        if not all(c.name in CLEANUP_FILENAMES for c in contents):
+                            break
+                        for c in contents:
+                            try:
+                                c.unlink()
+                            except OSError:
+                                break
+                        # Fall through to rmdir
+                    try:
+                        rel_path = current.relative_to(BACKUP_ROOT)
+                        item_id = str(rel_path)
+                    except ValueError:
+                        item_id = current.name
+                    item_key = logmsg.begin_item(item_id)
+                    try:
+                        logmsg.info("Removing empty backup folder: %item%")
+                        current.rmdir()
+                    except OSError as e:
+                        logmsg.warn("Could not remove empty backup folder %item%: {error}", error=str(e))
+                        logmsg.end_item(item_key)
+                        break
+                    finally:
+                        logmsg.end_item(item_key)
+                    current = current.parent
+        except (OSError, PermissionError) as e:
+            logmsg.warn("Could not walk backup root for cleanup: {error}", error=str(e))
+
+        # After all restores, check if BACKUP_ROOT itself is empty and delete it
         try:
             if BACKUP_ROOT.exists():
                 contents = list(BACKUP_ROOT.iterdir())
+                if contents and not any(c.is_dir() for c in contents) and all(c.name in CLEANUP_FILENAMES for c in contents):
+                    for c in contents:
+                        try:
+                            c.unlink()
+                        except OSError:
+                            pass
+                    contents = []
                 if not contents:
-                    logmsg.verbose("Backup root is empty, removing it (will be recreated on next backup)")
+                    logmsg.info("Backup root is empty, removing it (will be recreated on next backup)")
                     try:
                         BACKUP_ROOT.rmdir()
                     except OSError as e:

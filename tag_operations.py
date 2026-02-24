@@ -189,14 +189,14 @@ def check_file_size_warning(audio_path: Path) -> Optional[Tuple[str, str]]:
     """
     Check if file size seems unusually small for its duration/quality.
     Returns (level, message) tuple if suspicious, None otherwise.
-    Level is either "WARN" (< 80% of expected) or "INFO" (80-90% of expected).
+    Level is "WARN" (likely truncated) or "INFO" (suspicious); thresholds are format-dependent.
     
     Uses expected bitrate based on sample rate/format (NOT actual file bitrate,
     since truncated files will have artificially low bitrates).
     
     Note: This is a heuristic - actual file size can vary significantly.
-    - WARN: File is < 80% of expected (may be truncated)
-    - INFO: File is 80-90% of expected (suspicious but not certain)
+    - WARN: File is < 70% (FLAC) or < 85% (lossy) of expected (may be truncated)
+    - INFO: File is 70-85% (FLAC) or 85-96% (lossy) of expected (suspicious but not certain)
     
     Future enhancement: To truly detect truncated files, we could attempt to decode
     the last second of audio using ffmpeg/pydub. This would require:
@@ -262,9 +262,10 @@ def check_file_size_warning(audio_path: Path) -> Optional[Tuple[str, str]]:
         
         # Check size ratio and return appropriate warning level
         # Thresholds vary by format:
-        # - FLAC: Compression varies significantly (50-70% typical), so use lower thresholds
-        #   WARN: < 75% of expected (likely truncated)
-        #   INFO: 75-90% of expected (suspicious but may be normal compression variation)
+        # - FLAC: Compression varies significantly (50–70% typical); many valid files are 80–90%
+        #   WARN: < 70% of expected (likely truncated)
+        #   INFO: 70–85% of expected (suspicious but may be normal compression variation)
+        #   Above 85%: no message (normal)
         # - Lossy formats (MP3, M4A, AAC): Bitrate is more predictable
         #   WARN: < 85% of expected (likely truncated)
         #   INFO: 85-96% of expected (suspicious - may be missing end)
@@ -272,8 +273,8 @@ def check_file_size_warning(audio_path: Path) -> Optional[Tuple[str, str]]:
         
         # Set thresholds based on format
         if format_name == "flac":
-            warn_threshold = 0.75  # 75% for FLAC (compression varies significantly)
-            info_threshold = 0.90  # 90% for FLAC (above this is normal)
+            warn_threshold = 0.70  # 70% for FLAC (compression varies a lot; only warn when clearly short)
+            info_threshold = 0.85  # 85% for FLAC (above this is normal variation)
         else:
             warn_threshold = 0.85  # 85% for lossy formats (bitrate is more predictable)
             info_threshold = 0.96  # 96% for lossy formats

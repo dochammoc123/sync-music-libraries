@@ -511,8 +511,10 @@ def move_album_from_downloads(
                 size_warning = check_file_size_warning(src)
                 if size_warning:
                     level, message = size_warning
-                    # Warning already logged via logmsg.warn() above
-                    logmsg.warn("{file}: {warning_msg}", file=src.name, warning_msg=message)
+                    if level == "WARN":
+                        logmsg.warn("{file}: {warning_msg}", file=src.name, warning_msg=message)
+                    else:
+                        logmsg.info("{file}: {warning_msg}", file=src.name, warning_msg=message)
                 
                 # Always check source file properties
                 from tag_operations import get_sample_rate, get_audio_duration, get_tags, check_file_size_warning
@@ -824,8 +826,10 @@ def move_album_from_downloads(
                         # Always unset the item, whether we upgraded or not
                         logmsg.end_item(art_item_key)
                 
-                if predownloaded_folder:
-                    # Only folder.jpg exists, use it for cover.jpg
+                elif predownloaded_folder:
+                    # Only folder.jpg exists (no large_cover/cover/pattern-matched art), use it for cover.jpg
+                    # Must be elif: if we already upgraded with predownloaded_art (e.g. large_cover.jpg),
+                    # do NOT overwrite with folder.jpg (which is usually smaller - would downgrade)
                     # But if it's in a CD1/CD2 subfolder, don't copy it to album root
                     # Check if predownloaded_folder is in a subdirectory (CD1/CD2)
                     is_in_subfolder = False
@@ -944,9 +948,16 @@ def move_album_from_downloads(
         if predownloaded_folder:
             used_artwork_files.append(predownloaded_folder)
         
-        # Push cleanup header (nested under album, sibling to artwork header)
-        # Note: Cleanup is deferred to Step 10 (Cleanup downloads folder)
-        # This allows Step 7 (Ensure artist images) to access artist images in downloads before cleanup
+        # Per-album cleanup: remove processed audio, used artwork, empty folders from downloads
+        # Step 10 does a final pass too; per-album cleanup runs here so album folders
+        # (e.g. Lorde/Pure Heroine) are cleaned right after processing
+        cleanup_download_dirs_for_album(
+            items,
+            dry_run=dry_run,
+            used_artwork_files=used_artwork_files if used_artwork_files else None,
+            processed_audio_files=processed_audio_files,
+            extracted_archives=extracted_archives,
+        )
 
 
 def extract_archives_in_downloads(dry_run: bool = False) -> List[Path]:

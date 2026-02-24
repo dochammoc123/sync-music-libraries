@@ -412,14 +412,12 @@ def main() -> None:
         if RESTORE_FROM_BACKUP_MODE:
             restore_flacs_from_backups(DRY_RUN)
             
-            print("\nSync backup folder (remove identical backups, remove orphan backups)...")
             from structured_logging import logmsg
             header_key = logmsg.header("Sync backup folder", "%msg% (%count% items)")
             from sync_operations import sync_backups
             sync_backups(DRY_RUN, use_checksums=None)  # Uses T8_SYNC_USE_CHECKSUMS from config
             logmsg.header(None, key=header_key)
             
-            print("\nSync master library to T8...")
             header_key = logmsg.header("Sync master library to T8", "%msg% (%count% files copied)")
             sync_music_to_t8(DRY_RUN, use_checksums=args.t8_checksums)
             logmsg.header(None, key=header_key)
