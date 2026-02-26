@@ -1109,6 +1109,12 @@ class StructuredLogger:
                 else:
                     global_instances.append((definition, instance))
         
+        # Include albums that only have warnings (e.g. Step 4 fixup) so they appear in the summary
+        for warn_album_label in self.album_warnings.keys():
+            key = warn_album_label.lower()
+            if key not in album_groups:
+                album_groups[key] = (warn_album_label, [])
+        
         # Build summary lines
         lines: List[str] = []
         lines.append(f"Library sync summary - {datetime.now():%Y-%m-%d %H:%M:%S}")
@@ -1175,15 +1181,33 @@ class StructuredLogger:
                                     lines.append(f"    {prefix} {warning_msg}")
                             break
                 
-                # Add warnings for this album that are tied to a step we didn't display (e.g. Step 5 fixup when no instance)
+                # Add warnings for this album that are tied to a step we didn't display (e.g. Step 4 fixup when no instance)
                 displayed_header_keys = set(step_groups.keys())
+                orphaned: List[Tuple[str, str, str]] = []  # (warn_header_key, warn_level, warning_msg)
                 for warn_album_label, warn_list in self.album_warnings.items():
                     if warn_album_label.lower() == normalized_key:
                         for warn_header_key, warn_level, warning_msg in warn_list:
                             if warn_header_key is not None and warn_header_key not in displayed_header_keys:
-                                prefix = "[WARN]" if warn_level == "warn" else "[ERROR]"
-                                lines.append(f"    {prefix} {warning_msg}")
+                                orphaned.append((warn_header_key, warn_level, warning_msg))
                         break
+                if orphaned:
+                    # Group by step and output a step header so warnings don't appear under Step 9
+                    by_step: Dict[str, List[Tuple[str, str]]] = {}  # header_key -> [(level, msg), ...]
+                    for warn_header_key, warn_level, warning_msg in orphaned:
+                        if warn_header_key not in by_step:
+                            by_step[warn_header_key] = []
+                        by_step[warn_header_key].append((warn_level, warning_msg))
+                    for warn_header_key in sorted(
+                        by_step.keys(),
+                        key=lambda k: self.header_definitions[k].message_template if k in self.header_definitions else k
+                    ):
+                        definition = self.header_definitions.get(warn_header_key)
+                        if definition:
+                            step_label = definition.message_template.replace(definition.count_placeholder, "0").strip()
+                            lines.append(f"    -- {step_label}")
+                        for warn_level, warning_msg in by_step[warn_header_key]:
+                            prefix = "[WARN]" if warn_level == "warn" else "[ERROR]"
+                            lines.append(f"    {prefix} {warning_msg}")
                 
                 # Add warnings with no step context at end of album
                 for warn_album_label, warn_list in self.album_warnings.items():
@@ -1272,26 +1296,25 @@ class StructuredLogger:
                 f.write("\n".join(lines) + "\n")
         except Exception as e:
             import sys
-            print(f"[ERROR] Could not write structured summary log: {e}", file=sys.stderr)
+            _console_logger.error(f"[ERROR] Could not write structured summary log: {e}")
         
-        # Print to console with colors (on-the-fly)
+        # Print to console with colors (via console logger)
         import sys
-        print("\n================ SUMMARY ================", flush=True)
+        _console_logger.info("\n================ SUMMARY ================")
         for line in lines:
             if not line:
-                print(flush=True)
+                _console_logger.info("")
                 continue
             
             line_stripped = line.lstrip(" \t")
             
             # Apply colors and icons based on format
             if line_stripped.startswith("[ERROR]"):
-                print(f"{Colors.ERROR}{ICONS['error']} {line}{Colors.RESET}", flush=True)
+                _console_logger.info(f"{Colors.ERROR}{ICONS['error']} {line}{Colors.RESET}")
             elif line_stripped.startswith("[WARN]"):
-                print(f"{Colors.WARNING}{ICONS['warning']} {line}{Colors.RESET}", flush=True)
+                _console_logger.info(f"{Colors.WARNING}{ICONS['warning']} {line}{Colors.RESET}")
             elif line_stripped.startswith("..") and not line_stripped.startswith("[ERROR]") and not line_stripped.startswith("[WARN]"):
                 # Continuation line with ".." prefix - keep ".." prefix for console (same as file)
-                # Find the most recent [ERROR] or [WARN] line for color context
                 prev_was_error = False
                 prev_was_warn = False
                 current_index = lines.index(line)
@@ -1304,35 +1327,27 @@ class StructuredLogger:
                         prev_was_warn = True
                         break
                     elif prev_line.strip() and not prev_stripped.startswith(".."):
-                        # Hit a non-continuation, non-error/warn line, stop looking
                         break
-                
                 if prev_was_error:
-                    print(f"{Colors.ERROR}{ICONS['error']} {line}{Colors.RESET}", flush=True)
+                    _console_logger.info(f"{Colors.ERROR}{ICONS['error']} {line}{Colors.RESET}")
                 elif prev_was_warn:
-                    print(f"{Colors.WARNING}{ICONS['warning']} {line}{Colors.RESET}", flush=True)
+                    _console_logger.info(f"{Colors.WARNING}{ICONS['warning']} {line}{Colors.RESET}")
                 else:
-                    print(f"  {line}", flush=True)  # Default formatting for continuation lines
+                    _console_logger.info(f"  {line}")
             elif line.startswith("* "):
-                # Album header - cyan with info icon
-                print(f"{Colors.CYAN}{ICONS['info']}  {line}{Colors.RESET}", flush=True)
+                _console_logger.info(f"{Colors.CYAN}{ICONS['info']}  {line}{Colors.RESET}")
             elif line.startswith("  ") and any(c == '-' for c in line[:10]) and not line.startswith("  [WARN]") and not line.startswith("  [ERROR]"):
-                # Header line (spaces + dashes) - info icon
-                print(f"{ICONS['info']}  {line}", flush=True)
+                _console_logger.info(f"{ICONS['info']}  {line}")
             elif "(none)" in line:
-                # Summary text like "(none)" - no icon, just plain text
-                print(line, flush=True)
+                _console_logger.info(line)
             elif ':' in line and not line.startswith("  ") and not line.startswith("\t") and not line.startswith("*"):
-                # Section header (like "Global errors/warnings:", "Albums processed:") - step icon
-                print(f"{ICONS['step']} {line}", flush=True)
+                _console_logger.info(f"{ICONS['step']} {line}")
             elif line.startswith("  ") or line.startswith("\t"):
-                # Other indented lines
-                print(f"{ICONS['info']}  {line}", flush=True)
+                _console_logger.info(f"{ICONS['info']}  {line}")
             else:
-                # Regular line
-                print(line, flush=True)
-        print("=========================================\n", flush=True)
-        sys.stdout.flush()  # Ensure all output is flushed
+                _console_logger.info(line)
+        _console_logger.info("=========================================\n")
+        sys.stdout.flush()
     
     def clear(self) -> None:
         """Clear the header stacks and album context. Useful for testing."""

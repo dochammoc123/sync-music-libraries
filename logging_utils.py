@@ -96,19 +96,25 @@ def _enable_windows_ansi_colors() -> None:
 
 
 class ColoredFormatter(logging.Formatter):
-    """Custom formatter that adds colors to warnings and errors for console output."""
+    """Custom formatter that adds colors to warnings and errors for console output.
+    Uses log level for records from logmsg.warn()/error(); only uses [WARN]/[ERROR]
+    prefix for summary lines sent via info() so phrases like 'no warnings' are not colored.
+    """
     
     def format(self, record: logging.LogRecord) -> str:
-        # Get the base formatted message
         msg = super().format(record)
-        
-        # Check if message contains warning or error indicators
-        msg_upper = msg.upper()
-        if '[WARN]' in msg_upper or 'WARNING' in msg_upper:
-            msg = f"{Colors.WARNING}{msg}{Colors.RESET}"
-        elif '[ERROR]' in msg_upper or 'ERROR' in msg_upper or 'EXCEPTION' in msg_upper or 'FAILED' in msg_upper:
+        # Level-based: actual warning/error logs always get color
+        if record.levelno >= logging.ERROR:
             msg = f"{Colors.ERROR}{msg}{Colors.RESET}"
-        
+        elif record.levelno >= logging.WARNING:
+            msg = f"{Colors.WARNING}{msg}{Colors.RESET}"
+        else:
+            # INFO/DEBUG: only color if message explicitly starts with [WARN] or [ERROR]
+            msg_stripped = msg.lstrip()
+            if msg_stripped.startswith("[ERROR]"):
+                msg = f"{Colors.ERROR}{msg}{Colors.RESET}"
+            elif msg_stripped.startswith("[WARN]"):
+                msg = f"{Colors.WARNING}{msg}{Colors.RESET}"
         return msg
 
 
@@ -176,7 +182,8 @@ def notify_run_summary(mode: str) -> None:
     else:
         message = f"Mode: {mode} — finished with no warnings."
 
-    print(f"Run complete: {message}")
+    from structured_logging import logmsg
+    logmsg.info("Run complete: {run_msg}", run_msg=message)
 
     # macOS Notification (non-blocking)
     if SYSTEM == "Darwin":

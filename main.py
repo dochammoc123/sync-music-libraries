@@ -17,7 +17,7 @@ from pathlib import Path
 from artwork import (
     embed_art_into_audio_files,
     embed_missing_art_global,
-    fixup_missing_art,
+    ensure_cover_and_folder_global,
     init_musicbrainz,
 )
 from config import (
@@ -121,12 +121,11 @@ def main() -> None:
             exit_code: Exit code (default 1)
             is_error: If True, log as error; if False, log as warning (e.g., for DRY_RUN scenarios)
         """
-        print(error_msg, file=sys.stderr)
         # Strip "ERROR:" or "WARNING:" prefix if present
         clean_msg = error_msg
         if clean_msg.startswith("ERROR:") or clean_msg.startswith("WARNING:"):
             clean_msg = clean_msg.split(":", 1)[1].lstrip()
-        # Log to structured logging detail log
+        # Log to structured logging (console + detail log)
         from structured_logging import logmsg
         if is_error:
             logmsg.error(clean_msg)
@@ -137,8 +136,8 @@ def main() -> None:
         # Keep console open for user to review
         if sys.platform == "win32":
             try:
-                print()  # Add blank line before prompt
-                print("Press Enter to close this window...")  # Use print() not log() - log() doesn't write to console
+                logmsg.info("")
+                logmsg.info("Press Enter to close this window...")
                 input()
             except (EOFError, KeyboardInterrupt, OSError, AttributeError):
                 pass  # stdin not available - likely running from tray launcher
@@ -224,7 +223,7 @@ def main() -> None:
             )
             exit_with_error(error_msg, exit_code=1, is_error=True)
     
-    print("\nSafety check: Verifying directory permissions...")
+    logmsg.info("Safety check: Verifying directory permissions...")
     logmsg.verbose("Verifying directory permissions...")
     check_directory_permissions(MUSIC_ROOT, "MUSIC_ROOT (ROON)", must_exist=True)
     check_directory_permissions(BACKUP_ROOT, "BACKUP_ROOT", must_exist=False)  # May not exist yet
@@ -242,8 +241,8 @@ def main() -> None:
     check_directory_permissions(UPDATE_ROOT, "UPDATE_ROOT", must_exist=False)  # May not exist yet
     if T8_ROOT is not None:
         check_directory_permissions(T8_ROOT, "T8_ROOT", must_exist=False)  # May not exist yet
-    print("Directory permissions check passed.\n")
-    logmsg.verbose("Directory permissions check passed.\n")
+    logmsg.info("Directory permissions check passed.")
+    logmsg.verbose("Directory permissions check passed.")
     
     # Log startup info as always_show headers (appears in summary at end; no duplicate print)
     from structured_logging import logmsg
@@ -257,12 +256,12 @@ def main() -> None:
         logmsg.header(None, key=header_key)
 
     # Safety check: Verify both ROON and T8 drives have at least 1TB total capacity
-    print("\nSafety check: Verifying disk capacity on target drives...")
+    logmsg.info("Safety check: Verifying disk capacity on target drives...")
     min_tb = MIN_DISK_CAPACITY_BYTES / (1024 ** 4)  # Convert to TB for display
     
     try:
         # Check ROON (MUSIC_ROOT) drive
-        print(f"  Checking ROON drive: {MUSIC_ROOT}")
+        logmsg.info("Checking ROON drive: {path}", path=str(MUSIC_ROOT))
         # Check if this is a network share - they often report incorrect capacity
         is_network_share = (
             (SYSTEM == "Windows" and str(MUSIC_ROOT).startswith("\\\\")) or
@@ -274,17 +273,16 @@ def main() -> None:
             try:
                 test_access = MUSIC_ROOT if MUSIC_ROOT.exists() else MUSIC_ROOT.parent
                 if test_access.exists():
-                    print(f"  INFO: ROON drive ({MUSIC_ROOT}) is accessible (network share - capacity check skipped)")
+                    logmsg.info("INFO: ROON drive ({path}) is accessible (network share - capacity check skipped)", path=str(MUSIC_ROOT))
                     logmsg.verbose("ROON drive is a network share - capacity check skipped (network shares may not report capacity reliably)")
                     # Don't check capacity for network shares - they're unreliable
                     pass
                 else:
                     # Path not accessible
                     if DRY_RUN:
-                        print(f"  WARNING: ROON drive ({MUSIC_ROOT}) appears to be inaccessible.")
-                        print(f"  DRY RUN: Continuing with warning (drive may be offline).")
+                        logmsg.warn("WARNING: ROON drive ({path}) appears to be inaccessible.", path=str(MUSIC_ROOT))
+                        logmsg.warn("DRY RUN: Continuing with warning (drive may be offline).")
                         logmsg.warn("ROON drive inaccessible in DRY RUN - continuing with warning (drive may be offline)")
-                        logmsg.warn("ROON drive appears to be inaccessible in DRY RUN - continuing with warning")
                     else:
                         error_msg = (
                             f"ERROR: ROON drive ({MUSIC_ROOT}) is not accessible.\n"
@@ -295,9 +293,8 @@ def main() -> None:
             except Exception as e:
                 # In dry-run, allow it to continue with warning (might be a temporary network issue)
                 if DRY_RUN:
-                    print(f"  WARNING: Could not access ROON drive ({MUSIC_ROOT}) in DRY RUN: {e}")
-                    print(f"  DRY RUN: Continuing with warning (path may be temporarily inaccessible).")
-                    logmsg.warn("ROON drive access check failed in DRY RUN - continuing with warning: {error}", error=str(e))
+                    logmsg.warn("WARNING: Could not access ROON drive ({path}) in DRY RUN: {error}", path=str(MUSIC_ROOT), error=str(e))
+                    logmsg.warn("DRY RUN: Continuing with warning (path may be temporarily inaccessible).")
                     logmsg.warn("ROON drive access check failed in DRY RUN - continuing with warning: {error}", error=str(e))
                 else:
                     error_msg = (
@@ -309,16 +306,15 @@ def main() -> None:
             # Not a network share - do capacity check
             has_capacity, capacity_gb, checked_path = check_disk_capacity(MUSIC_ROOT, MIN_DISK_CAPACITY_BYTES)
             if has_capacity:
-                print(f"  ROON drive ({checked_path}): {capacity_gb:.2f} GB capacity ({capacity_gb / 1024:.2f} TB) - OK")
+                logmsg.info("ROON drive ({path}): {capacity_gb:.2f} GB capacity ({tb:.2f} TB) - OK", path=str(checked_path), capacity_gb=capacity_gb, tb=capacity_gb / 1024)
             else:
                 # Capacity check failed
-                print(f"  WARNING: ROON drive ({checked_path}) capacity is too small.")
+                logmsg.warn("WARNING: ROON drive ({path}) capacity is too small.", path=str(checked_path))
                 if DRY_RUN:
-                    print(f"  Required: {min_tb:.2f} TB minimum")
-                    print(f"  Actual: {capacity_gb:.2f} GB ({capacity_gb / 1024:.2f} TB)")
-                    print(f"  DRY RUN: Allowing operation to continue (no changes will be made).")
+                    logmsg.warn("Required: {min_tb:.2f} TB minimum", min_tb=min_tb)
+                    logmsg.warn("Actual: {capacity_gb:.2f} GB ({tb:.2f} TB)", capacity_gb=capacity_gb, tb=capacity_gb / 1024)
+                    logmsg.warn("DRY RUN: Allowing operation to continue (no changes will be made).")
                     logmsg.warn("ROON drive capacity too small ({capacity} GB) - continuing in DRY RUN mode", capacity=capacity_gb)
-                    logmsg.warn("ROON drive capacity too small in DRY RUN - continuing with warning: {capacity} GB", capacity=capacity_gb)
                 else:
                     error_msg = (
                         f"ERROR: ROON drive ({checked_path}) capacity is too small.\n"
@@ -330,7 +326,7 @@ def main() -> None:
         
         # Check T8 drive
         if T8_ROOT is not None:
-            print(f"  Checking T8 drive: {T8_ROOT}")
+            logmsg.info("Checking T8 drive: {path}", path=str(T8_ROOT))
             # Check if this is a network share - they often report incorrect capacity
             is_network_share = (
                 (SYSTEM == "Windows" and str(T8_ROOT).startswith("\\\\")) or
@@ -342,17 +338,16 @@ def main() -> None:
                 try:
                     test_access = T8_ROOT if T8_ROOT.exists() else T8_ROOT.parent
                     if test_access.exists():
-                        print(f"  INFO: T8 drive ({T8_ROOT}) is accessible (network share - capacity check skipped)")
+                        logmsg.info("INFO: T8 drive ({path}) is accessible (network share - capacity check skipped)", path=str(T8_ROOT))
                         logmsg.verbose("T8 drive is a network share - capacity check skipped (network shares may not report capacity reliably)")
                         # Don't check capacity for network shares - they're unreliable
                         pass
                     else:
                         # Path not accessible - in dry-run, allow with warning (for testing when T8 is offline)
                         if DRY_RUN:
-                            print(f"  WARNING: T8 drive ({T8_ROOT}) appears to be inaccessible.")
-                            print(f"  DRY RUN: Continuing with warning (drive may be offline or IP changed).")
+                            logmsg.warn("WARNING: T8 drive ({path}) appears to be inaccessible.", path=str(T8_ROOT))
+                            logmsg.warn("DRY RUN: Continuing with warning (drive may be offline or IP changed).")
                             logmsg.warn("T8 drive inaccessible in DRY RUN - continuing with warning (drive may be offline)")
-                            logmsg.warn("T8 drive appears to be inaccessible in DRY RUN - continuing with warning")
                         else:
                             error_msg = (
                                 f"ERROR: T8 drive ({T8_ROOT}) is not accessible.\n"
@@ -363,9 +358,8 @@ def main() -> None:
                 except Exception as e:
                     # In dry-run, allow it to continue with warning (might be a temporary network issue)
                     if DRY_RUN:
-                        print(f"  WARNING: Could not access T8 drive ({T8_ROOT}) in DRY RUN: {e}")
-                        print(f"  DRY RUN: Continuing with warning (path may be temporarily inaccessible).")
-                        logmsg.warn("T8 drive access check failed in DRY RUN - continuing with warning: {error}", error=str(e))
+                        logmsg.warn("WARNING: Could not access T8 drive ({path}) in DRY RUN: {error}", path=str(T8_ROOT), error=str(e))
+                        logmsg.warn("DRY RUN: Continuing with warning (path may be temporarily inaccessible).")
                         logmsg.warn("T8 drive access check failed in DRY RUN - continuing with warning: {error}", error=str(e))
                     else:
                         error_msg = (
@@ -377,17 +371,16 @@ def main() -> None:
                 # Not a network share - do capacity check
                 has_capacity, capacity_gb, checked_path = check_disk_capacity(T8_ROOT, MIN_DISK_CAPACITY_BYTES)
                 if has_capacity:
-                    print(f"  T8 drive ({checked_path}): {capacity_gb:.2f} GB capacity ({capacity_gb / 1024:.2f} TB) - OK")
+                    logmsg.info("T8 drive ({path}): {capacity_gb:.2f} GB capacity ({tb:.2f} TB) - OK", path=str(checked_path), capacity_gb=capacity_gb, tb=capacity_gb / 1024)
                 else:
                     # Drive too small (likely a system drive)
                     # In dry-run mode, allow it to continue with warning (no changes will be made anyway)
                     if DRY_RUN:
-                        print(f"  WARNING: T8 drive ({checked_path}) capacity is too small.")
-                        print(f"  Required: {min_tb:.2f} TB minimum")
-                        print(f"  Actual: {capacity_gb:.2f} GB ({capacity_gb / 1024:.2f} TB)")
-                        print(f"  DRY RUN: Allowing operation to continue (no changes will be made).")
+                        logmsg.warn("WARNING: T8 drive ({path}) capacity is too small.", path=str(checked_path))
+                        logmsg.warn("Required: {min_tb:.2f} TB minimum", min_tb=min_tb)
+                        logmsg.warn("Actual: {capacity_gb:.2f} GB ({tb:.2f} TB)", capacity_gb=capacity_gb, tb=capacity_gb / 1024)
+                        logmsg.warn("DRY RUN: Allowing operation to continue (no changes will be made).")
                         logmsg.warn("T8 drive capacity too small ({capacity} GB) - continuing in DRY RUN mode", capacity=capacity_gb)
-                        logmsg.warn("T8 drive capacity too small in DRY RUN - continuing with warning: {capacity} GB", capacity=capacity_gb)
                     else:
                         error_msg = (
                             f"ERROR: T8 drive ({checked_path}) capacity is too small.\n"
@@ -397,7 +390,7 @@ def main() -> None:
                         )
                         exit_with_error(error_msg, exit_code=1, is_error=True)
         
-        print("Disk capacity check passed.\n")
+        logmsg.info("Disk capacity check passed.")
     except Exception as e:
         error_msg = f"ERROR: Exception during disk capacity check: {e}"
         from structured_logging import logmsg
@@ -421,9 +414,8 @@ def main() -> None:
             header_key = logmsg.header("Sync master library to T8", "%msg% (%count% files copied)")
             sync_music_to_t8(DRY_RUN, use_checksums=args.t8_checksums)
             logmsg.header(None, key=header_key)
-            print("Restore mode complete.")
-            
-            print("\nRefresh ROON library...")
+            logmsg.info("Restore mode complete.")
+            logmsg.info("Refresh ROON library...")
             from roon_refresh import refresh_roon_library
             roon_refresh_success = refresh_roon_library(DRY_RUN)
             if not roon_refresh_success:
@@ -454,20 +446,19 @@ def main() -> None:
             else:
                 exit_code = 0
             
-            # Summary already printed by logmsg.write_summary() above
             # Log exit status before prompt
             if exit_code == 1:
-                print(f"Exiting with code 1 ({total_errors} error(s)) - systray will show red error icon")
+                logmsg.info("Exiting with code 1 ({total_errors} error(s)) - systray will show red error icon", total_errors=total_errors)
             elif exit_code == 2:
-                print(f"Exiting with code 2 ({total_warnings} warning(s)) - systray will show yellow warning icon")
+                logmsg.info("Exiting with code 2 ({total_warnings} warning(s)) - systray will show yellow warning icon", total_warnings=total_warnings)
             else:
-                print("Exiting with code 0 (success) - systray will show idle icon")
+                logmsg.info("Exiting with code 0 (success) - systray will show idle icon")
             
             # Keep console open for user to review
             if sys.platform == "win32":
                 try:
-                    print()  # Add blank line before prompt
-                    print("Press Enter to close this window...")  # Use print() not log() - log() doesn't write to console
+                    logmsg.info("")
+                    logmsg.info("Press Enter to close this window...")
                     input()
                 except (EOFError, KeyboardInterrupt, OSError, AttributeError):
                     pass
@@ -491,26 +482,26 @@ def main() -> None:
         upgrade_albums_to_flac_only(DRY_RUN)
         logmsg.header(None, key=header_key)  # Close Step 3 header
 
-        header_key = logmsg.header("Step 4: Embed missing artwork", "%msg% (%count% items)", key=header_key)
-        embed_missing_art_global(DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED, EMBED_IF_MISSING)
+        header_key = logmsg.header("Step 4: Ensure cover and folder artwork", "%msg% (%count% items)", key=header_key)
+        ensure_cover_and_folder_global(DRY_RUN)
         logmsg.header(None, key=header_key)  # Close Step 4 header
 
+        header_key = logmsg.header("Step 5: Embed missing artwork", "%msg% (%count% items)", key=header_key)
+        embed_missing_art_global(DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED, EMBED_IF_MISSING)
+        logmsg.header(None, key=header_key)  # Close Step 5 header
+
         if EMBED_ALL:
-            header_key = logmsg.header("Step 4.5: Embed all artwork", "%msg% (%count% items)", key=header_key)
+            header_key = logmsg.header("Step 5.5: Embed all artwork", "%msg% (%count% items)", key=header_key)
             import os
             for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
                 embed_art_into_audio_files(Path(dirpath), DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
-            logmsg.header(None, key=header_key)  # Close Step 4.5 header
+            logmsg.header(None, key=header_key)  # Close Step 5.5 header
 
         if EMBED_FROM_UPDATES and albums_with_new_cover:
-            header_key = logmsg.header("Step 4.6: Embed artwork from updates", "%msg% (%count% items)", key=header_key)
+            header_key = logmsg.header("Step 5.6: Embed artwork from updates", "%msg% (%count% items)", key=header_key)
             for album_dir in sorted(albums_with_new_cover):
                 embed_art_into_audio_files(album_dir, DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
-            logmsg.header(None, key=header_key)  # Close Step 4.6 header
-
-        header_key = logmsg.header("Step 5: Final missing-art fixup", "%msg% (%count% items)", key=header_key)
-        fixup_missing_art(DRY_RUN)
-        logmsg.header(None, key=header_key)  # Close Step 5 header
+            logmsg.header(None, key=header_key)  # Close Step 5.6 header
 
         header_key = logmsg.header("Step 6: Sync empty UPDATE overlay directory structure", "%msg%", key=header_key)
         sync_update_root_structure(DRY_RUN)
@@ -603,11 +594,13 @@ def main() -> None:
 
         header_key = logmsg.header("Step 13: Run summary notification", "%msg%", verbose=True, key=header_key)
         try:
+            # Close Step 13 before notify so "Run complete" logs at top level (no "  > " prefix)
+            logmsg.header(None, key=header_key)
             notify_run_summary(args.mode)
-            logmsg.verbose("Summary notification sent successfully")
         except Exception as e:
             logmsg.error("Failed to send summary notification: {error}", error=str(e))
-        logmsg.header(None, key=header_key)  # Close Step 13 header
+        else:
+            logmsg.verbose("Summary notification sent successfully")
 
         # Exit with appropriate code based on warnings/errors
         # Exit codes: 0 = clean (idle icon), 2 = warnings (yellow icon), 1 = errors (red icon)
@@ -626,15 +619,13 @@ def main() -> None:
         else:
             exit_code = 0
         
-        # Summary is already printed by logmsg.write_summary()
-        
         # Log exit status
         if exit_code == 1:
-            print(f"Exiting with code 1 ({total_errors} error(s)) - systray will show red error icon")
+            logmsg.info("Exiting with code 1 ({total_errors} error(s)) - systray will show red error icon", total_errors=total_errors)
         elif exit_code == 2:
-            print(f"Exiting with code 2 ({total_warnings} warning(s)) - systray will show yellow warning icon")
+            logmsg.info("Exiting with code 2 ({total_warnings} warning(s)) - systray will show yellow warning icon", total_warnings=total_warnings)
         else:
-            print("Exiting with code 0 (success) - systray will show idle icon")
+            logmsg.info("Exiting with code 0 (success) - systray will show idle icon")
         
         # IMPORTANT: Set exit code early and flush logs before user interaction
         # This ensures the correct exit code is used even if user closes the window
@@ -661,8 +652,8 @@ def main() -> None:
                 try:
                     # Try to wait for user input - this keeps console open
                     # If stdin is not available (tray launcher), this will raise an exception
-                    print()  # Add blank line before prompt
-                    print("Press Enter to close this window...")
+                    logmsg.info("")
+                    logmsg.info("Press Enter to close this window...")
                     input()
                 except (EOFError, KeyboardInterrupt, OSError, AttributeError):
                     # stdin not available or interrupted - likely running from tray launcher
@@ -693,8 +684,8 @@ def main() -> None:
             try:
                 sys.stdout.flush()
                 sys.stderr.flush()
-                print()  # Add blank line before prompt
-                print("Press Enter to close this window...", flush=True)
+                logmsg.info("")
+                logmsg.info("Press Enter to close this window...")
                 input()
             except (EOFError, KeyboardInterrupt, OSError, AttributeError):
                 pass  # stdin not available - likely running from tray launcher

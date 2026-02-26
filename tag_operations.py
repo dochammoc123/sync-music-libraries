@@ -13,7 +13,7 @@ from mutagen.mp4 import MP4
 import musicbrainzngs
 
 from config import AUDIO_EXT, ENABLE_WEB_ART_LOOKUP, MB_APP, MB_VER, MB_CONTACT, WEB_ART_LOOKUP_TIMEOUT
-# log() removed - use print() for console output
+# log() removed - use structured_logging logmsg for console/detail output
 
 
 def find_audio_files(root: Path) -> Iterator[Path]:
@@ -305,7 +305,7 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
     except Exception as e:
         # File might be corrupted, wrong format, or unreadable
         # Log warning but return None - path-based fallback will be handled at directory level
-        # log() removed - use print() for console output
+        # log() removed - use structured_logging logmsg for console/detail output
         from config import DOWNLOADS_DIR, MUSIC_ROOT
         
         # Determine if this is a new file in downloads (WARN) or existing file in music root (INFO)
@@ -391,7 +391,7 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
         }
     except Exception as e:
         # Error reading tags even though file opened
-        # log() removed - use print() for console output
+        # log() removed - use structured_logging logmsg for console/detail output
         try:
             from structured_logging import logmsg
             # Only log warning if album context is set (during processing, not during scanning)

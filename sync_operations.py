@@ -223,7 +223,6 @@ def sync_update_root_structure(dry_run: bool = False) -> None:
                     logmsg.info("Would remove obsolete overlay directory: {path}", path=str(upd_dir))
                 else:
                     logmsg.info("REMOVE obsolete overlay directory: {path}", path=str(upd_dir))
-                print(f"  [UPDATE] Removing obsolete overlay dir: {upd_dir}")
             
             if not dry_run:
                 try:
@@ -396,7 +395,6 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
                                 logmsg.warn("Failed to copy {artist}: %item% to T8: {error}", artist=artist_name, error=str(e))
                             else:
                                 logmsg.warn("Failed to copy %item% to T8: {error}", error=str(e))
-                            print(f"    [T8 SYNC ERROR] Failed to copy {src_file.name}: {e}")
                 elif skip_reason:
                     if artist_name:
                         logmsg.verbose("SKIP: {artist}: %item% ({reason})", artist=artist_name, reason=skip_reason)
@@ -463,7 +461,6 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
                             logmsg.warn("Could not delete {artist}: %item% from T8: {error}", artist=artist_name, error=str(e))
                         else:
                             logmsg.warn("Could not delete %item% from T8: {error}", error=str(e))
-                        print(f"    [WARN] Could not delete {dst_file}: {e}")
                 logmsg.end_item(item_key)
 
         # Remove empty directories (but not excluded dirs like .thumbnails)
@@ -900,7 +897,6 @@ def restore_flacs_from_backups(dry_run: bool = False) -> None:
                         logmsg.warn("Could not remove empty backup root: {error}", error=str(e))
         except Exception as e:
             logmsg.warn("Could not check backup root: {error}", error=str(e))
-            print(f"  [CLEANUP WARN] Could not check backup root: {e}")
     
     # Close restore header
     logmsg.header(None, key=restore_key)

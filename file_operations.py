@@ -426,7 +426,7 @@ def move_album_from_downloads(
     extracted_archives: List[Path] = None
 ) -> None:
     """Move an album from downloads to the music library, organizing files."""
-    from artwork import ensure_cover_and_folder, find_predownloaded_art_source_for_album
+    from artwork import find_predownloaded_art_source_for_album
     
     artist, album = album_key
     year = choose_album_year(items)
@@ -802,7 +802,7 @@ def move_album_from_downloads(
                             if existing_size:
                                 new_pixels = art_size[0] * art_size[1] if art_size else 0
                                 old_pixels = existing_size[0] * existing_size[1]
-                                print(f"    Upgraded cover.jpg (new: {new_pixels}px, previous: {old_pixels}px)")
+                                logmsg.info("Upgraded cover.jpg (new: {new_pixels}px, previous: {old_pixels}px)", new_pixels=new_pixels, old_pixels=old_pixels)
                             
                             # Clean up the source art file if it's in the album directory (MUSIC_ROOT)
                             # This handles pattern-matched art files like "pure-heroine-lorde.jpg" that were copied to cover.jpg
@@ -922,19 +922,7 @@ def move_album_from_downloads(
             logmsg.info("No pre-downloaded art files found")
             logmsg.end_item(art_check_key)
 
-        # Use destination files (after moving) for artwork extraction
-        # Only use dest_items if files were actually moved (not dry-run)
-        # In dry-run mode, files still exist at source paths, so use items_sorted
-        files_for_artwork = dest_items if (dest_items and not dry_run) else items_sorted
-        ensure_cover_and_folder(
-            album_dir,
-            files_for_artwork,
-            artist,
-            album,
-            label,
-            dry_run=dry_run,
-            skip_cover_creation=used_predownloaded_art
-        )
+        # Cover and folder.jpg are ensured globally in Step 4 (ensure_cover_and_folder_global)
     finally:
         logmsg.pop_header(art_key)
 

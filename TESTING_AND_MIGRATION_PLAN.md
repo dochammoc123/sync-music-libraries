@@ -71,7 +71,7 @@ python main.py --mode embed --dry
   - `fetch_art_from_web()` - web art lookup
   - `embed_art_into_flacs()` - embedding artwork
   - `embed_missing_art_global()` - global missing art fixup
-  - `fixup_missing_art()` - final fixup
+  - Cover/folder art is now handled by `ensure_cover_and_folder_global()` in main script
 
 #### 2. `sync_operations.py` - **HIGH PRIORITY** (Step 2)
 - **Status**: Mixed - has structured logging but also many old log() calls

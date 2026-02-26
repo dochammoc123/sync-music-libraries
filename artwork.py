@@ -84,14 +84,15 @@ def export_embedded_art_to_cover(first_file: Path, cover_path: Path, dry_run: bo
     return False
 
 
-def fetch_art_from_web(artist: str, album: str, cover_path: Path, dry_run: bool = False) -> bool:
+def fetch_art_from_web(artist: str, album: str, cover_path: Path, dry_run: bool = False) -> Tuple[bool, Optional[str]]:
     """
     Try MusicBrainz + Cover Art Archive with retry logic.
-    Returns True on success, False otherwise.
+    Returns (True, None) on success, (False, reason) on failure.
+    reason is e.g. "no MusicBrainz release", "HTTP 404", or the last connection/error message.
     """
     from structured_logging import logmsg
     if not ENABLE_WEB_ART_LOOKUP:
-        return False
+        return (False, "web art lookup disabled")
 
     try:
         result = musicbrainzngs.search_releases(
@@ -99,25 +100,29 @@ def fetch_art_from_web(artist: str, album: str, cover_path: Path, dry_run: bool 
         )
         releases = result.get("release-list", [])
         if not releases:
-            return False
+            return (False, "no MusicBrainz release")
 
         mbid = releases[0]["id"]
         url = f"https://coverartarchive.org/release/{mbid}/front-500.jpg"
 
+        last_error: Optional[str] = None
         for attempt in range(1, WEB_ART_LOOKUP_RETRIES + 1):
             try:
                 r = requests.get(url, timeout=WEB_ART_LOOKUP_TIMEOUT)
                 if r.status_code == 200:
                     if not dry_run:
                         cover_path.write_bytes(r.content)
-                    return True
+                    return (True, None)
+                last_error = f"HTTP {r.status_code}"
+                logmsg.verbose("Web art fetch attempt {attempt} failed: HTTP {status}", attempt=attempt, status=r.status_code)
             except Exception as e:
-                logmsg.verbose("Web art fetch attempt {attempt} failed: {error}", attempt=attempt, error=str(e))
+                last_error = str(e)
+                logmsg.verbose("Web art fetch attempt {attempt} failed: {error}", attempt=attempt, error=last_error)
 
-        return False
+        return (False, last_error or "no cover after retries")
 
     except Exception as e:
-        return False
+        return (False, str(e))
 
 
 def find_artist_images_in_folder(artist_dir: Path) -> Optional[Path]:
@@ -361,7 +366,7 @@ def ensure_artist_images(artist_dir: Path, artist: str, dry_run: bool = False) -
                             try:
                                 best_image.unlink()
                                 logmsg.verbose("Cleaned up source file: {file}", file=best_image.name)
-                                print(f"    Cleaned up source file: {best_image.name}")
+                                logmsg.info("Cleaned up source file: {file}", file=best_image.name)
                             except Exception as e:
                                 logmsg.warn("Could not delete source file {file}: {error}", file=best_image.name, error=str(e))
         
@@ -630,8 +635,9 @@ def ensure_cover_and_folder(
     # If folder.jpg exists, copy it to cover.jpg (don't overwrite folder.jpg)
     if folder_path.exists():
         if not cover_path.exists():
-            logmsg.verbose("folder.jpg exists, creating cover.jpg from it")
-            print("  folder.jpg exists, creating cover.jpg from it")
+            item_key = logmsg.begin_item("cover.jpg")
+            logmsg.info("folder.jpg exists, creating cover.jpg from it")
+            logmsg.end_item(item_key)
             if not dry_run:
                 shutil.copy2(folder_path, cover_path)
         return
@@ -639,8 +645,9 @@ def ensure_cover_and_folder(
     # If cover.jpg exists, copy it to folder.jpg (don't overwrite cover.jpg)
     if cover_path.exists():
         if not folder_path.exists():
-            logmsg.verbose("cover.jpg exists, creating folder.jpg from it")
-            print("  cover.jpg exists, creating folder.jpg from it")
+            item_key = logmsg.begin_item("folder.jpg")
+            logmsg.info("cover.jpg exists, creating folder.jpg from it")
+            logmsg.end_item(item_key)
             if not dry_run:
                 try:
                     shutil.copy2(cover_path, folder_path)
@@ -654,39 +661,39 @@ def ensure_cover_and_folder(
     # Neither exists - try to create cover.jpg from embedded art or web
     if not skip_cover_creation:
         if not cover_path.exists():
-            logmsg.verbose("No cover.jpg; attempting to export embedded art…")
-            print("  No cover.jpg; attempting to export embedded art…")
+            logmsg.verbose("No cover.jpg; attempting to export embedded art...")
             first_file = album_files[0][0]
             if export_embedded_art_to_cover(first_file, cover_path, dry_run):
-                logmsg.verbose("cover.jpg created from embedded art.")
-                print("  cover.jpg created from embedded art.")
-                # Event tracked automatically by structured logging
+                item_key = logmsg.begin_item("cover.jpg")
+                logmsg.info("cover.jpg created from embedded art.")
+                logmsg.end_item(item_key)
             else:
-                logmsg.verbose("No embedded art; attempting web fetch…")
-                print("  No embedded art; attempting web fetch…")
-                if fetch_art_from_web(artist, album, cover_path, dry_run):
-                    logmsg.verbose("cover.jpg downloaded from web.")
-                    print("  cover.jpg downloaded from web.")
-                    # Event tracked automatically by structured logging
+                logmsg.verbose("No embedded art; attempting web fetch...")
+                ok, reason = fetch_art_from_web(artist, album, cover_path, dry_run)
+                if ok:
+                    item_key = logmsg.begin_item("cover.jpg")
+                    logmsg.info("cover.jpg downloaded from web.")
+                    logmsg.end_item(item_key)
                 else:
-                    msg = "[WARN] Could not obtain artwork."
-                    logmsg.warn("Could not obtain artwork.")
+                    if reason:
+                        logmsg.warn("Could not obtain artwork. ({reason})", reason=reason)
+                    else:
+                        logmsg.warn("Could not obtain artwork.")
     
     # After creating/finding cover.jpg, ensure folder.jpg exists in album root
     if cover_path.exists() and not folder_path.exists():
-        logmsg.verbose("Creating folder.jpg from cover.jpg")
-        print("  Creating folder.jpg from cover.jpg")
+        item_key = logmsg.begin_item("folder.jpg")
+        logmsg.info("Creating folder.jpg from cover.jpg")
+        logmsg.end_item(item_key)
         if not dry_run:
             try:
                 shutil.copy2(cover_path, folder_path)
                 logmsg.verbose("folder.jpg created successfully")
-                print("  ✓ folder.jpg created successfully")
             except Exception as e:
                 from structured_logging import logmsg
                 logmsg.warn("Failed to create folder.jpg: {error}", error=str(e))
     
     # Ensure CD1/CD2 subdirectories have folder.jpg (not cover.jpg) if they don't already
-    # Use album root cover.jpg or folder.jpg as source
     if album_dir.exists():
         source_for_subfolders = None
         if cover_path.exists():
@@ -695,21 +702,73 @@ def ensure_cover_and_folder(
             source_for_subfolders = folder_path
         
         if source_for_subfolders:
-            # Check for CD1, CD2, etc. subdirectories
             for subdir in album_dir.iterdir():
                 if subdir.is_dir() and subdir.name.upper().startswith("CD"):
                     subfolder_folder = subdir / "folder.jpg"
                     if not subfolder_folder.exists():
-                        logmsg.verbose("Creating folder.jpg in {subdir}/ from album root", subdir=subdir.name)
-                        print(f"  Creating folder.jpg in {subdir.name}/ from album root")
+                        item_key = logmsg.begin_item(f"{subdir.name}/folder.jpg")
+                        logmsg.info("Creating folder.jpg in {subdir}/ from album root", subdir=subdir.name)
+                        logmsg.end_item(item_key)
                         if not dry_run:
                             try:
                                 shutil.copy2(source_for_subfolders, subfolder_folder)
-                                logmsg.verbose("folder.jpg created in {subdir}/", subdir=subdir.name)
                             except Exception as e:
                                 if label:
                                     from structured_logging import logmsg
                                     logmsg.warn("Failed to create folder.jpg in {subdir}/: {error}", subdir=subdir.name, error=str(e))
+
+
+def ensure_cover_and_folder_global(dry_run: bool = False) -> None:
+    """
+    For every album directory under MUSIC_ROOT: ensure cover.jpg and folder.jpg
+    exist (create from embedded or web if missing, else copy between them).
+    Also ensures CD1/CD2 subdirs have folder.jpg from the album root.
+    Single place for all cover/folder logic; used instead of per-album ensure in Step 1.
+    """
+    from config import AUDIO_EXT, MUSIC_ROOT
+    from tag_operations import get_tags
+    from logging_utils import album_label_from_tags
+    from structured_logging import logmsg
+
+    for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
+        current = Path(dirpath)
+        try:
+            rel = current.relative_to(MUSIC_ROOT)
+            parts = rel.parts
+        except ValueError:
+            continue
+        if len(parts) != 2:
+            continue
+
+        album_dir = current
+        audio_files = []
+        for r, d, f in os.walk(album_dir):
+            for n in f:
+                if Path(n).suffix.lower() in AUDIO_EXT:
+                    audio_files.append(Path(r) / n)
+        audio_files.sort()
+        if not audio_files:
+            continue
+
+        first_file = audio_files[0]
+        tags = get_tags(first_file) or {}
+        artist = tags.get("artist", "")
+        album = tags.get("album", "")
+        year = tags.get("year", "")
+        label = album_label_from_tags(artist, album, year)
+        album_files = [(first_file, tags)]
+
+        album_key = logmsg.begin_album(album_dir)
+        ensure_cover_and_folder(
+            album_dir,
+            album_files,
+            artist,
+            album,
+            label,
+            dry_run=dry_run,
+            skip_cover_creation=False,
+        )
+        logmsg.end_album(album_key)
 
 
 def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_enabled: bool = True) -> None:
@@ -1107,7 +1166,7 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                         audio.clear_pictures()
                         audio.add_picture(pic)
                         audio.save()
-                        print(f"    ✓ Embedded art into {p.name} (FLAC)")
+                        logmsg.info("Embedded art into %item% (FLAC)")
                         total_embedded += 1
                         embedded = True
                     except Exception as e:
@@ -1135,7 +1194,7 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                             data=cover_data
                         ))
                         audio.save()
-                        print(f"    ✓ Embedded art into {p.name} (MP3)")
+                        logmsg.info("Embedded art into %item% (MP3)")
                         total_embedded += 1
                         embedded = True
                     except ID3NoHeaderError:
@@ -1150,7 +1209,7 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                             data=cover_data
                         ))
                         audio.save()
-                        print(f"    ✓ Embedded art into {p.name} (MP3)")
+                        logmsg.info("Embedded art into %item% (MP3)")
                         total_embedded += 1
                         embedded = True
                     except Exception as e:
@@ -1172,7 +1231,7 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                         cover = MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)
                         audio['covr'] = [cover]
                         audio.save()
-                        print(f"    ✓ Embedded art into {p.name} (MP4/M4A)")
+                        logmsg.info("Embedded art into %item% (MP4/M4A)")
                         total_embedded += 1
                         embedded = True
                     except Exception as e:
@@ -1199,7 +1258,7 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                                 pic.desc = "Cover"
                                 audio.add_picture(pic)
                                 audio.save()
-                                print(f"    ✓ Embedded art into {p.name} (generic)")
+                                logmsg.info("Embedded art into %item% (generic)")
                                 total_embedded += 1
                                 embedded = True
                             else:
@@ -1233,86 +1292,3 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
         
         logmsg.end_album(album_key)
     
-
-
-def fixup_missing_art(dry_run: bool = False) -> None:
-    """
-    Final pass: scan library for album dirs with audio files but no cover.jpg
-    and try to create art (embedded -> web).
-    
-    Handles multi-disc albums (CD1, CD2, etc.) by checking the parent album directory
-    for cover.jpg, not just the subdirectory.
-    """
-    from config import AUDIO_EXT, MUSIC_ROOT
-    from tag_operations import get_tags
-    from logging_utils import album_label_from_tags
-    from structured_logging import logmsg
-    
-    
-    # Track processed albums to avoid duplicates (e.g., CD1 and CD2 subdirectories)
-    processed_albums = set()
-
-    for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
-        p = Path(dirpath)
-        audio_files = [f for f in filenames if Path(f).suffix.lower() in AUDIO_EXT]
-        if not audio_files:
-            continue
-
-        first_audio_path = p / audio_files[0]
-        tags = get_tags(first_audio_path)
-        if not tags:
-            continue
-
-        artist = tags["artist"]
-        album = tags["album"]
-        year = tags.get("year", "")
-        label = album_label_from_tags(artist, album, year)
-        
-        # Skip if we've already processed this album (e.g., from CD1 subdirectory)
-        if label in processed_albums:
-            continue
-        
-        # Determine the album directory (parent if we're in a CD1/CD2 subdirectory)
-        # Walk up to find the album directory (should be 2 levels deep: Artist/Album or Artist/(Year) Album)
-        album_dir = p
-        try:
-            rel = p.relative_to(MUSIC_ROOT)
-            parts = list(rel.parts)
-            # If we're in a subdirectory (CD1, CD2, etc.), use parent as album directory
-            if len(parts) > 2:
-                # Check if last part looks like a disc subdirectory
-                if parts[-1].upper().startswith("CD") or len(parts) > 3:
-                    album_dir = p.parent
-        except ValueError:
-            # Path is not under MUSIC_ROOT, use current directory
-            pass
-
-        cover_path = album_dir / "cover.jpg"
-        if cover_path.exists():
-            continue
-
-        # Mark this album as processed to avoid duplicates
-        processed_albums.add(label)
-
-        # Set album context
-        album_key = logmsg.begin_album(album_dir)
-
-
-        if export_embedded_art_to_cover(first_audio_path, cover_path, dry_run):
-            # Set item context to the created cover file (more interesting than source FLAC)
-            item_key = logmsg.begin_item(cover_path.name)
-            logmsg.info("Extracted embedded art to %item%")
-            logmsg.end_item(item_key)
-            # Event tracked automatically by structured logging
-            logmsg.end_album(album_key)
-            continue
-
-        if fetch_art_from_web(artist, album, cover_path, dry_run):
-            logmsg.info("Downloaded cover via web")
-            # Event tracked automatically by structured logging
-            logmsg.end_album(album_key)
-            continue
-
-        logmsg.warn("Could not obtain artwork")
-        logmsg.end_album(album_key)
-
