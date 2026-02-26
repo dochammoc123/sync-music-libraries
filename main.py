@@ -177,7 +177,7 @@ def main() -> None:
             # Try to create the directory to test write access
             try:
                 path.mkdir(parents=True, exist_ok=True)
-                logmsg.verbose(f"  ✓ Directory created: OK")
+                logmsg.verbose("  [OK] Directory created: OK")
             except (OSError, PermissionError) as e:
                 error_msg = (
                     f"ERROR: Cannot access {name} directory: {path}\n"
@@ -190,7 +190,7 @@ def main() -> None:
         if path.exists():
             try:
                 list(path.iterdir())
-                logmsg.verbose(f"  ✓ Read access: OK")
+                logmsg.verbose("  [OK] Read access: OK")
             except (OSError, PermissionError) as e:
                 error_msg = (
                     f"ERROR: Cannot read from {name} directory: {path}\n"
@@ -203,7 +203,7 @@ def main() -> None:
         test_file = path / ".permission_test"
         try:
             test_file.write_text("test")
-            logmsg.verbose(f"  ✓ Write access: OK")
+            logmsg.verbose("  [OK] Write access: OK")
         except (OSError, PermissionError) as e:
             error_msg = (
                 f"ERROR: Cannot write to {name} directory: {path}\n"
@@ -215,7 +215,7 @@ def main() -> None:
         # Test remove access (delete the test file)
         try:
             test_file.unlink()
-            logmsg.verbose(f"  ✓ Remove access: OK")
+            logmsg.verbose("  [OK] Remove access: OK")
         except (OSError, PermissionError) as e:
             error_msg = (
                 f"ERROR: Cannot remove files from {name} directory: {path}\n"

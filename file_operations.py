@@ -47,20 +47,19 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
     for p, _tags in items:
         root_dir = find_root_album_directory(p, all_files, DOWNLOADS_DIR)
         original_root = root_dir
-        # If root_dir is a CD1/CD2 subdirectory, walk up to the parent album directory
-        # This ensures we clean up sibling directories like "original" that are at the album level
+        # If root_dir is a CD/original subdir of an album, walk up to the album directory
+        # so we clean up the whole album folder (CD1, CD2, original, etc.).
+        # Do NOT walk up to artist when parent has multiple albums (19, 21, 25) - we only
+        # clean the album we just processed, not sibling albums.
         while True:
             parent = root_dir.parent
-            # Stop if we've reached DOWNLOADS_DIR or filesystem root
             if parent == root_dir or (DOWNLOADS_DIR and parent.resolve() == DOWNLOADS_DIR.resolve()):
                 break
-            # Check if parent contains multiple subdirectories (CD1, CD2, original, etc.)
-            # or if it's the actual album root (contains files or is one level below DOWNLOADS_DIR)
             try:
                 if parent.exists():
-                    # If parent has subdirectories, it's likely the album root
-                    subdirs = [d for d in parent.iterdir() if d.is_dir()]
-                    if len(subdirs) > 1 or root_dir.name.upper().startswith("CD"):
+                    # Only walk up when we're inside a CD/original-style subdir of an album
+                    name_upper = root_dir.name.upper()
+                    if name_upper.startswith("CD") or root_dir.name.lower() == "original":
                         root_dir = parent
                         continue
             except (OSError, PermissionError):
@@ -134,9 +133,8 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                             removal_reason = "processed audio file"
                             logmsg.info("Removing processed audio file in subdirectory: %item%")
                         else:
-                            # Audio file in subdirectory that wasn't processed - warn and skip
-                            removal_reason = "not in processed list"
-                            logmsg.warn("Skipping unprocessed audio file in subdirectory: %item% (not in processed list)", item=f.name)
+                            # Audio in a subdir we're cleaning that wasn't part of this album's move (e.g. nested CD/original)
+                            logmsg.verbose("Keeping audio in subdirectory (not part of this album): %item%")
                             continue
                     elif is_artwork_file:
                         # For artwork files in subdirectories, always remove them (they're leftovers)
@@ -1066,19 +1064,21 @@ def process_downloads(dry_run: bool = False) -> None:
             skipped_count += 1
             file_paths = [str(item[0]) for item in items]
             
-            # Warnings already logged via logmsg.warn() above
-            
-            skip_key = logmsg.begin_item(f"album_{idx}")
-            logmsg.warn("Cannot determine artist/album from tags or path structure")
-            logmsg.info("Files will remain in downloads folder for manual processing")
-            for file_path in file_paths[:5]:  # Show first 5 files
-                logmsg.verbose("  - {file_path}", file_path=file_path)
-            if len(file_paths) > 5:
-                logmsg.verbose("  ... and {remaining} more file(s)", remaining=len(file_paths) - 5)
-            logmsg.info("Please add tags or organize files in Artist/Album folder structure, then re-run script")
-            from structured_logging import logmsg
-            logmsg.warn(f"Skipped {len(file_paths)} file(s) in downloads - cannot determine artist/album (files: {', '.join([Path(f).name for f in file_paths[:3]])}...)")
-            logmsg.end_item(skip_key)
+            # Log under a synthetic "Downloads (unmatched)" section so summary groups these together
+            unmatched_key = logmsg.begin_album("Downloads", "(unmatched)", "")
+            try:
+                skip_key = logmsg.begin_item(f"album_{idx}")
+                logmsg.warn("Cannot determine artist/album from tags or path structure")
+                logmsg.info("Unmatched files are left in download folders so you can add tags or reorganize and re-run")
+                for file_path in file_paths[:5]:  # Show first 5 files
+                    logmsg.verbose("  - {file_path}", file_path=file_path)
+                if len(file_paths) > 5:
+                    logmsg.verbose("  ... and {remaining} more file(s)", remaining=len(file_paths) - 5)
+                logmsg.info("To match in future runs: add tags or use Artist/Album folder structure, then re-run")
+                logmsg.warn("Skipped {n} file(s) in downloads - cannot determine artist/album (files: {files})", n=len(file_paths), files=", ".join([Path(f).name for f in file_paths[:3]]) + ("..." if len(file_paths) > 3 else ""))
+                logmsg.end_item(skip_key)
+            finally:
+                logmsg.end_album(unmatched_key)
             continue
 
         # Process album: set album context and organize
@@ -1089,7 +1089,12 @@ def process_downloads(dry_run: bool = False) -> None:
             logmsg.end_album(album_key_val)
     
     if skipped_count > 0:
-        logmsg.warn("Skipped {count} album(s) that could not be reliably determined. Files remain in downloads for manual processing", count=skipped_count)
+        # Use same synthetic section so summary groups with per-skip warnings (use placeholder that isn't "count" - that's reserved)
+        unmatched_key = logmsg.begin_album("Downloads", "(unmatched)", "")
+        try:
+            logmsg.warn("Skipped {skipped_count} album(s) that could not be reliably determined. Unmatched files are left in download folders so you can fix tags or structure and re-run.", skipped_count=skipped_count)
+        finally:
+            logmsg.end_album(unmatched_key)
     
     # Note: Cleanup is deferred to Step 10 (Cleanup downloads folder)
     # This allows Step 7 (Ensure artist images) to access artist images in downloads before cleanup
@@ -1260,36 +1265,28 @@ def _process_cleanup_folder(folder_path: Path, downloads_dir: Path, music_root: 
             logmsg.end_item(item_key)
             return
         
-        # Check if folder only contains cleanup files, unused artist images, or audio files
-        # Audio files in downloads at this point were skipped in Step 1 (duplicates/truncated)
-        # and should be cleaned up
-        # (Step 7 has already processed artist images, so we can clean up leftovers)
+        # Check if folder only contains cleanup files (junk, artwork, archives) - NOT audio/video
+        # Do NOT treat audio/video as cleanup: unmatched files (couldn't determine artist/album) must
+        # stay so the user can add tags or reorganize and re-run. Only remove truly disposable content.
         all_cleanup = True
         for item in items:
             if item.is_dir():
                 all_cleanup = False
                 break
             suffix = item.suffix.lower()
-            # Keep non-cleanup, non-audio files (e.g., PDF booklets that might be processed separately)
-            # Audio files should be removed (they were skipped in Step 1)
-            if suffix not in CLEANUP_EXTENSIONS and suffix not in AUDIO_EXT:
+            name = item.name
+            # Consider only CLEANUP_EXTENSIONS and CLEANUP_FILENAMES as cleanup (junk/artwork/archives)
+            # Leave audio/video in place so "fix tags and re-run" works without redownloading
+            if suffix not in CLEANUP_EXTENSIONS and name not in CLEANUP_FILENAMES:
                 all_cleanup = False
                 break
-            # Artwork files are cleanup extensions - can be removed
-            # Step 7 has already processed artist images, so any remaining are leftovers
-            # Audio files should be removed (they were skipped in Step 1)
         
         if all_cleanup:
-            # Remove all files in folder, then remove folder
+            # Remove only cleanup files and the folder if empty afterward
             item_key = logmsg.begin_item(str(folder_path.relative_to(downloads_dir)))
             for item in items:
                 if item.is_file():
-                    suffix = item.suffix.lower()
-                    if suffix in AUDIO_EXT:
-                        # Audio file that was skipped in Step 1 - remove it
-                        logmsg.info("Removing skipped audio file: {file}", file=item.name)
-                    else:
-                        logmsg.verbose("Removing leftover file: {file}", file=item.name)
+                    logmsg.verbose("Removing leftover file: {file}", file=item.name)
                     if not dry_run:
                         try:
                             item.unlink()

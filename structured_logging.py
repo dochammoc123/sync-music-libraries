@@ -1086,8 +1086,8 @@ class StructuredLogger:
         # Ensure directory exists
         STRUCTURED_SUMMARY_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         
-        # Organize instances by album_label
-        album_groups: Dict[Optional[str], List[Tuple[HeaderDefinition, HeaderInstance]]] = {}
+        # Organize instances by album_label (use case-insensitive key so "ADELE - 25" and "Adele - 25" merge)
+        album_groups: Dict[str, Tuple[str, List[Tuple[HeaderDefinition, HeaderInstance]]]] = {}  # normalized_key -> (display_label, instances)
         global_info_instances: List[Tuple[HeaderDefinition, HeaderInstance]] = []  # Informational (always_show=True)
         global_instances: List[Tuple[HeaderDefinition, HeaderInstance]] = []  # Regular global headers
         
@@ -1097,9 +1097,10 @@ class StructuredLogger:
             
             definition = self.header_definitions[header_key]
             if album_label:
-                if album_label not in album_groups:
-                    album_groups[album_label] = []
-                album_groups[album_label].append((definition, instance))
+                key = album_label.lower()
+                if key not in album_groups:
+                    album_groups[key] = (album_label, [])  # Keep first-seen label for display
+                album_groups[key][1].append((definition, instance))
             else:
                 # Include all global headers (including nested ones - they'll be sorted by level)
                 # Separate informational headers (always_show=True) from regular headers
@@ -1126,12 +1127,11 @@ class StructuredLogger:
         # Write albums section
         if album_groups:
             lines.append("Albums processed:")
-            # Sort albums for consistent output
-            for album_label in sorted(album_groups.keys()):
-                lines.append(f"* {album_label}")  # Album header with *
+            # Sort albums by normalized key for consistent output
+            for normalized_key in sorted(album_groups.keys()):
+                display_label, instances = album_groups[normalized_key]
+                lines.append(f"* {display_label}")  # Album header with *
                 
-                # Get instances for this album
-                instances = album_groups[album_label]
                 # Group instances by header_key (step) first, then sort within each step
                 # This ensures Step 1 instances don't appear under Step 3
                 step_groups: Dict[str, List[Tuple[HeaderDefinition, HeaderInstance]]] = {}
@@ -1166,19 +1166,33 @@ class StructuredLogger:
                         dashes = "-" * num_dashes
                         lines.append(f"{indent_spaces}{dashes} {message}")
                     
-                    # Add warnings that occurred during this step
-                    if album_label in self.album_warnings:
-                        for warn_header_key, warn_level, warning_msg in self.album_warnings[album_label]:
-                            if warn_header_key == header_key:
+                    # Add warnings that occurred during this step (any label that normalizes to this album)
+                    for warn_album_label, warn_list in self.album_warnings.items():
+                        if warn_album_label.lower() == normalized_key:
+                            for warn_header_key, warn_level, warning_msg in warn_list:
+                                if warn_header_key == header_key:
+                                    prefix = "[WARN]" if warn_level == "warn" else "[ERROR]"
+                                    lines.append(f"    {prefix} {warning_msg}")
+                            break
+                
+                # Add warnings for this album that are tied to a step we didn't display (e.g. Step 5 fixup when no instance)
+                displayed_header_keys = set(step_groups.keys())
+                for warn_album_label, warn_list in self.album_warnings.items():
+                    if warn_album_label.lower() == normalized_key:
+                        for warn_header_key, warn_level, warning_msg in warn_list:
+                            if warn_header_key is not None and warn_header_key not in displayed_header_keys:
                                 prefix = "[WARN]" if warn_level == "warn" else "[ERROR]"
                                 lines.append(f"    {prefix} {warning_msg}")
+                        break
                 
                 # Add warnings with no step context at end of album
-                if album_label in self.album_warnings:
-                    for warn_header_key, warn_level, warning_msg in self.album_warnings[album_label]:
-                        if warn_header_key is None:
-                            prefix = "[WARN]" if warn_level == "warn" else "[ERROR]"
-                            lines.append(f"    {prefix} {warning_msg}")
+                for warn_album_label, warn_list in self.album_warnings.items():
+                    if warn_album_label.lower() == normalized_key:
+                        for warn_header_key, warn_level, warning_msg in warn_list:
+                            if warn_header_key is None:
+                                prefix = "[WARN]" if warn_level == "warn" else "[ERROR]"
+                                lines.append(f"    {prefix} {warning_msg}")
+                        break
         else:
             lines.append("Albums processed: (none)")
         

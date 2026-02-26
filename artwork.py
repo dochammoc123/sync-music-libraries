@@ -670,7 +670,6 @@ def ensure_cover_and_folder(
                     # Event tracked automatically by structured logging
                 else:
                     msg = "[WARN] Could not obtain artwork."
-                    print(f"  {msg}")
                     logmsg.warn("Could not obtain artwork.")
     
     # After creating/finding cover.jpg, ensure folder.jpg exists in album root
@@ -1315,7 +1314,5 @@ def fixup_missing_art(dry_run: bool = False) -> None:
             continue
 
         logmsg.warn("Could not obtain artwork")
-        msg = "[WARN] Could not obtain artwork."
-        # Warning already logged via logmsg.warn() above
         logmsg.end_album(album_key)
 

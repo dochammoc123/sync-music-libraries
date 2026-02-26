@@ -281,7 +281,7 @@ def check_file_size_warning(audio_path: Path) -> Optional[Tuple[str, str]]:
         
         if size_ratio < info_threshold:
             bitrate_str = f" @ {expected_bitrate/1000:.0f}kbps expected" if expected_bitrate else f" @ {sample_rate}Hz" if sample_rate else ""
-            message = f"File size ({file_size:,} bytes) is {size_ratio*100:.0f}% of expected ({expected_size:,} bytes) for {duration:.1f}s{bitrate_str} - may be truncated or corrupted"
+            message = f"File size ({file_size:,} bytes) is {size_ratio*100:.0f}% of expected ({expected_size:,} bytes) for {duration:.1f}s{bitrate_str} - may be truncated or corrupted (long silent sections compress well and can cause false positives)"
             if size_ratio < warn_threshold:
                 return ("WARN", message)
             elif size_ratio < info_threshold:

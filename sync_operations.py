@@ -4,6 +4,7 @@ Sync operations: T8 sync, update overlay, and restore operations.
 import hashlib
 import os
 import shutil
+import time
 from pathlib import Path
 from typing import Set, Tuple
 
@@ -13,6 +14,7 @@ from config import (
     CLEAN_EMPTY_BACKUP_FOLDERS,
     CLEANUP_FILENAMES,
     MUSIC_ROOT,
+    SYSTEM,
     T8_ROOT,
     T8_SYNC_EXCLUDE_DIRS,
     T8_SYNC_EXCLUDE_FILES,
@@ -263,9 +265,18 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
     if T8_ROOT is None:
         return
 
+    # On network shares, directory listings can lag after we just wrote new files (Step 1).
+    # A short delay lets the share update so os.walk() sees the new artist/album folders.
+    _music_root_str = str(MUSIC_ROOT)
+    _is_network = (
+        (SYSTEM == "Windows" and (_music_root_str.startswith("\\\\") or _music_root_str.startswith("//"))) or
+        (SYSTEM == "Darwin" and _music_root_str.startswith("SMB:"))
+    )
+    if _is_network and not dry_run:
+        _delay = 2
+        logmsg.verbose("Waiting {delay}s for network share to update before T8 sync", delay=_delay)
+        time.sleep(_delay)
     
-    # Header is already set by main.py (Step 5), so we don't set it here
-
     # Copy all files from ROON to T8 (exclude .thumbnails and similar - T8 manages its own)
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
         # Don't descend into excluded directories
