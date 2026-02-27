@@ -88,7 +88,8 @@ def fetch_art_from_web(artist: str, album: str, cover_path: Path, dry_run: bool 
     """
     Try MusicBrainz + Cover Art Archive with retry logic.
     Returns (True, None) on success, (False, reason) on failure.
-    reason is e.g. "no MusicBrainz release", "HTTP 404", or the last connection/error message.
+    reason is e.g. "no MusicBrainz release", "no front cover in Cover Art Archive", or the last error.
+    Note: HTTP 404 from Cover Art Archive means no front cover exists for that release; retrying won't help.
     """
     from structured_logging import logmsg
     if not ENABLE_WEB_ART_LOOKUP:
@@ -103,21 +104,47 @@ def fetch_art_from_web(artist: str, album: str, cover_path: Path, dry_run: bool 
             return (False, "no MusicBrainz release")
 
         mbid = releases[0]["id"]
-        url = f"https://coverartarchive.org/release/{mbid}/front-500.jpg"
+        url_front = f"https://coverartarchive.org/release/{mbid}/front-500.jpg"
 
         last_error: Optional[str] = None
         for attempt in range(1, WEB_ART_LOOKUP_RETRIES + 1):
             try:
-                r = requests.get(url, timeout=WEB_ART_LOOKUP_TIMEOUT)
+                r = requests.get(url_front, timeout=WEB_ART_LOOKUP_TIMEOUT)
                 if r.status_code == 200:
                     if not dry_run:
                         cover_path.write_bytes(r.content)
                     return (True, None)
+                if r.status_code == 404:
+                    # No front cover for this release; retrying won't help
+                    last_error = "no front cover in Cover Art Archive"
+                    logmsg.verbose("Web art: no front cover for release {mbid} (404)", mbid=mbid)
+                    break
                 last_error = f"HTTP {r.status_code}"
                 logmsg.verbose("Web art fetch attempt {attempt} failed: HTTP {status}", attempt=attempt, status=r.status_code)
             except Exception as e:
                 last_error = str(e)
                 logmsg.verbose("Web art fetch attempt {attempt} failed: {error}", attempt=attempt, error=last_error)
+
+        # If we got 404, try fallback: release may have images but none marked "front"
+        if last_error == "no front cover in Cover Art Archive":
+            try:
+                meta_url = f"https://coverartarchive.org/release/{mbid}"
+                rm = requests.get(meta_url, timeout=WEB_ART_LOOKUP_TIMEOUT)
+                if rm.status_code == 200:
+                    data = rm.json()
+                    images = data.get("images", [])
+                    if images:
+                        # Prefer first image with front=True, else first image
+                        img = next((i for i in images if i.get("front")), images[0])
+                        img_url = img.get("image") or img.get("thumbnails", {}).get("500")
+                        if img_url:
+                            r2 = requests.get(img_url, timeout=WEB_ART_LOOKUP_TIMEOUT)
+                            if r2.status_code == 200:
+                                if not dry_run:
+                                    cover_path.write_bytes(r2.content)
+                                return (True, None)
+            except Exception:
+                pass  # Keep last_error as "no front cover..."
 
         return (False, last_error or "no cover after retries")
 
