@@ -21,6 +21,11 @@ from tag_operations import choose_album_year, format_track_filename, sanitize_fi
 
 def make_album_dir(root: Path, artist: str, album: str, year: str, dry_run: bool = False) -> Path:
     """Create an album directory path and optionally create it."""
+    artist = (artist or "Unknown Artist").strip() or "Unknown Artist"
+    album = (album or "Unknown Album").strip() or "Unknown Album"
+    if album == "None":
+        album = "Unknown Album"
+    year = (year or "").strip()
     safe_artist = sanitize_filename_component(artist)
     disp_year = f"({year}) " if year else ""
     safe_album = sanitize_filename_component(album)

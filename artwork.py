@@ -886,16 +886,17 @@ def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_en
 def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True) -> None:
     """
     Walk the entire MUSIC_ROOT and add missing tags to files that don't have them.
+    Also fills in missing albumartist on files that have tags but blank albumartist
+    (e.g. Freddie Mercury tracks) so Roon/T8 group correctly.
+    Uses structured logging (begin_album, begin_item, info) so the summary shows a count.
     Only writes tags after backing up files (if backup_enabled).
-    Uses album metadata from other files in the same album directory.
     """
     from config import MUSIC_ROOT, AUDIO_EXT
-    from tag_operations import get_tags, write_tags_to_file
+    from tag_operations import get_tags, write_tags_to_file, choose_album_artist_album
     from pathlib import Path
+    from structured_logging import logmsg
     import os
-    
-    total_processed = 0
-    total_added = 0
+    import re
     
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
         album_dir = Path(dirpath)
@@ -910,7 +911,6 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True) 
         
         for audio_file in audio_files:
             tags = get_tags(audio_file)
-            # Consider file to have tags if it has artist and album (tracknum and title can be missing)
             if tags and tags.get("artist") and tags.get("album"):
                 files_with_tags.append((audio_file, tags))
                 if not album_metadata:
@@ -922,32 +922,37 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True) 
             else:
                 files_without_tags.append(audio_file)
         
-        total_processed += len(audio_files)
+        # Canonical album-level artist for this directory
+        album_level_artist = None
+        if files_with_tags:
+            album_level_artist, _ = choose_album_artist_album(
+                [(f, t) for f, t in files_with_tags], verify_via_mb=False
+            )
         
-        # If we have album metadata and files without tags, add tags to them
+        # Collect (file, action, tags) for every file we will write to
+        to_write: List[Tuple[Path, str, Dict[str, Any]]] = []
+        
+        # Fill missing albumartist on files that already have tags
+        if album_level_artist and files_with_tags:
+            for audio_file, tags in files_with_tags:
+                if not (tags.get("albumartist") or "").strip():
+                    to_write.append((audio_file, "albumartist", tags))
+        
+        # Add full tags to tagless files
         if album_metadata and files_without_tags:
             for audio_file in files_without_tags:
-                # Extract track number and title from filename
-                import re
                 tracknum = 0
                 title = audio_file.stem
-                
-                # Extract track number from filename like "02 - " or "02."
                 track_match = re.match(r'^(\d+)\s*[-.]\s*', title)
                 if track_match:
                     try:
                         tracknum = int(track_match.group(1))
-                        # Remove track number prefix
                         title = re.sub(r'^\d+\s*[-.]\s*', '', title).strip()
                     except ValueError:
                         pass
-                
-                # Remove artist prefix if present (e.g., "Lorde - 400 Lux" -> "400 Lux")
                 title = re.sub(r'^[^-]+-\s*', '', title).strip()
                 if not title:
                     title = audio_file.stem
-                
-                # Build complete tags using album metadata
                 tags_to_write = {
                     "artist": album_metadata["artist"],
                     "album": album_metadata["album"],
@@ -956,10 +961,30 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True) 
                     "discnum": 1,
                     "title": title,
                 }
-                
-                if write_tags_to_file(audio_file, tags_to_write, dry_run, backup_enabled):
-                    total_added += 1
-                # else: warning already logged via logmsg.warn() if available
+                to_write.append((audio_file, "tags", tags_to_write))
+        
+        if not to_write:
+            continue
+        
+        # One album we're updating — set album context and log each file for summary count
+        artist = album_level_artist or (album_metadata["artist"] if album_metadata else "Unknown Artist")
+        album = album_metadata["album"] if album_metadata else "Unknown Album"
+        year = album_metadata.get("year", "") if album_metadata else ""
+        album_key = logmsg.begin_album(artist, album, year or None)
+        
+        for audio_file, action, tags in to_write:
+            item_key = logmsg.begin_item(audio_file.name)
+            if action == "albumartist":
+                logmsg.info("Fill albumartist: %item%")
+            else:
+                logmsg.info("Add tags: %item%")
+            if action == "albumartist":
+                write_tags_to_file(audio_file, tags, dry_run, backup_enabled, album_artist=album_level_artist)
+            else:
+                write_tags_to_file(audio_file, tags, dry_run, backup_enabled, album_artist=album_level_artist or (album_metadata["artist"] if album_metadata else None))
+            logmsg.end_item(item_key)
+        
+        logmsg.end_album(album_key)
 
 
 def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True, embed_if_missing: bool = True) -> None:

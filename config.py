@@ -112,6 +112,15 @@ T8_SYNC_USE_CHECKSUMS = False
 T8_SYNC_EXCLUDE_DIRS = {".thumbnails", ".cache", ".trash", ".Trash"}
 T8_SYNC_EXCLUDE_FILES = {".database_uuid", ".DS_Store", "Thumbs.db"}
 
+# When True, set albumartist tag to normalized form (accents → ASCII, generic → Various Artists)
+# so Roon/T8 group by folder. Track artist is left unchanged (compilations keep per-track artists).
+# Set False to leave albumartist as-is in files.
+NORMALIZE_ARTIST_IN_TAGS = True
+
+# When True, set album tag to normalized form (strip " (Disc 1)", " [Disc 2]", " (1/2)", etc.)
+# so streamers index one multi-disc album instead of multiple albums.
+NORMALIZE_ALBUM_IN_TAGS = True
+
 # ROON library refresh configuration
 # ROON needs to rescan its library after files are added/modified.
 # Set ENABLE_ROON_REFRESH to True to enable automatic ROON refresh after sync operations.

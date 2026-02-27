@@ -124,7 +124,12 @@ class PlainFormatter(logging.Formatter):
 
 
 def album_label_from_tags(artist: str, album: str, year: str) -> str:
-    """Create an album label from tags."""
+    """Create an album label from tags. Uses 'Unknown Album' when album is missing or None."""
+    artist = (artist or "Unknown Artist").strip() or "Unknown Artist"
+    album = (album or "Unknown Album").strip() or "Unknown Album"
+    if album == "None":
+        album = "Unknown Album"
+    year = (year or "").strip()
     return f"{artist} - {album} ({year})" if year else f"{artist} - {album}"
 
 

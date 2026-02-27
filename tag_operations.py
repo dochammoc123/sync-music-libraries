@@ -2,17 +2,25 @@
 Tag operations for reading and processing audio file metadata.
 """
 import os
+import re
+import unicodedata
 from collections import Counter
 from pathlib import Path
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from mutagen import File as MutagenFile
 from mutagen.easyid3 import EasyID3
+
+# So we can set album artist (TPE2) when NORMALIZE_ARTIST_IN_TAGS is True
+try:
+    EasyID3.RegisterTextKey("albumartist", "TPE2")
+except Exception:
+    pass  # Already registered or unsupported
 from mutagen.flac import FLAC
 from mutagen.mp4 import MP4
 import musicbrainzngs
 
-from config import AUDIO_EXT, ENABLE_WEB_ART_LOOKUP, MB_APP, MB_VER, MB_CONTACT, WEB_ART_LOOKUP_TIMEOUT
+from config import AUDIO_EXT, ENABLE_WEB_ART_LOOKUP, MB_APP, MB_VER, MB_CONTACT, NORMALIZE_ALBUM_IN_TAGS, NORMALIZE_ARTIST_IN_TAGS, WEB_ART_LOOKUP_TIMEOUT
 # log() removed - use structured_logging logmsg for console/detail output
 
 
@@ -37,7 +45,12 @@ def get_tags_from_path(path: Path, downloads_root: Path) -> Dict[str, Any]:
         # Extract artist and album from path
         if len(parts) >= 2:
             artist = parts[0]
-            album = parts[1]
+            second = parts[1]
+            # File directly in artist folder (e.g. Artist/song.flac) -> no album
+            if Path(second).suffix.lower() in AUDIO_EXT:
+                album = "Unknown Album"
+            else:
+                album = second
         elif len(parts) == 1:
             artist = "Unknown Artist"
             album = "Unknown Album"
@@ -367,8 +380,8 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
         date = _get("date") or _get("year") or ""
         year = date[:4] if len(date) >= 4 and date[:4].isdigit() else ""
 
-        trackno = _get("tracknumber") or "0"
-        discno = _get("discnumber") or "1"
+        trackno = _get("tracknumber") or _get("TRACKNUMBER") or "0"
+        discno = _get("discnumber") or _get("DISCNUMBER") or "1"
         title = _get("title") or path.stem
 
         try:
@@ -381,6 +394,9 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
         except ValueError:
             discnum = 1
 
+        # Raw albumartist from file (may be missing); FLAC uses ALBUMARTIST, ID3 uses albumartist
+        raw_albumartist = (_get("albumartist") or _get("ALBUMARTIST") or "").strip()
+
         return {
             "artist": artist.strip(),
             "album": album.strip(),
@@ -388,6 +404,7 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
             "tracknum": tracknum,
             "discnum": discnum,
             "title": title.strip(),
+            "albumartist": raw_albumartist or None,
         }
     except Exception as e:
         # Error reading tags even though file opened
@@ -467,6 +484,78 @@ def verify_album_via_musicbrainz(artist: str, album: str) -> Optional[Tuple[str,
         return None
 
 
+def normalize_unicode_canonical(s: str) -> str:
+    """
+    Normalize Unicode to a canonical form for grouping and folder names:
+    NFD decomposition then remove combining characters (accents).
+    E.g. "Céline Dion" and "Celine Dion" both become "Celine Dion".
+    """
+    if not s:
+        return s
+    nfd = unicodedata.normalize("NFD", s)
+    return "".join(c for c in nfd if unicodedata.category(c) != "Mn")
+
+
+# Canonicalization for album-level artist names.
+# Used to collapse "oddball" bucket artists (like "Christmas Music") into
+# a consistent Various Artists bucket so compilations don't scatter under
+# different pseudo-artist folders.
+GENERIC_COMPILATION_ARTISTS = {
+    "christmas music",
+    "holiday music",
+    "christmas songs",
+    "holiday songs",
+    "soundtrack",
+    "soundtracks",
+    "various",
+    "compilation",
+    "compilations",
+}
+
+
+def normalize_album_artist(artist: str) -> str:
+    """
+    Normalize album-level artist names for folder/label purposes.
+    - Collapse generic bucket names (e.g. "Christmas Music") into "Various Artists"
+      so that compilations don't end up under arbitrary pseudo-artist folders.
+    - Normalize accents (e.g. "Céline Dion" -> "Celine Dion") so variants
+      are grouped under one folder.
+    """
+    a = (artist or "").strip()
+    if a.lower() in GENERIC_COMPILATION_ARTISTS:
+        return "Various Artists"
+    return normalize_unicode_canonical(a)
+
+
+# For two-artist albums: only file under the majority artist if they have at least this share
+# of tracks (e.g. 2/3). Otherwise treat as Various Artists (e.g. 50/50 or 5/3).
+MAJORITY_ARTIST_MIN_RATIO = 2 / 3
+
+
+def normalize_album_name(album: str) -> str:
+    """
+    Normalize album name for grouping and folder naming so multi-disc sets with
+    inconsistent tags merge into one album (e.g. one folder with CD1/CD2 subdirs).
+    Strips common disc suffixes: "(Disc 1)", "[Disc 2]", " (1/2)", " [2/2]", " - Disc 1", etc.
+    """
+    if not album or not isinstance(album, str):
+        return album or ""
+    s = album.strip()
+    # Strip trailing disc patterns (repeat until no change so we handle "Album (Disc 1) (1/2)")
+    while True:
+        orig = s
+        # (Disc N), [Disc N], (disc N), [disc N]
+        s = re.sub(r'\s*[(\[]\s*disc\s*\d+\s*[)\]]\s*$', '', s, flags=re.IGNORECASE)
+        # (N/M), [N/M] e.g. (1/2), [2/2]
+        s = re.sub(r'\s*[(\[]\s*\d+\s*/\s*\d+\s*[)\]]\s*$', '', s)
+        # - Disc N, – Disc N
+        s = re.sub(r'\s*[-–—]\s*disc\s*\d+\s*$', '', s, flags=re.IGNORECASE)
+        s = s.strip()
+        if s == orig:
+            break
+    return s
+
+
 def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_via_mb: bool = True) -> Tuple[str, str]:
     """
     Given a list of (path, tags) for files in the same directory, pick canonical
@@ -483,19 +572,30 @@ def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_v
     
     Returns (artist, album) tuple.
     """
-    # Collect artist/album from files with tags
-    artist_album_pairs = [(t["artist"], t["album"]) for (_p, t) in items if t.get("artist") and t.get("album")]
+    # Collect artist/album from files with tags; normalize album so "Album (Disc 1)" and "Album [Disc 2]" merge
+    artist_album_pairs = [(t["artist"], normalize_album_name(t["album"])) for (_p, t) in items if t.get("artist") and t.get("album")]
     
     if artist_album_pairs:
         # Find most common (artist, album) pair
-        # Tags already handle Various Artists correctly, so use them as-is
         counts = Counter(artist_album_pairs)
         max_count = max(counts.values())
         candidates = [pair for pair, c in counts.items() if c == max_count]
         candidate_artist, candidate_album = candidates[0]
         
-        # Use tag values directly (they already handle Various Artists)
-        return (candidate_artist, candidate_album)
+        # Tie (e.g. 50/50 two artists): treat as compilation so we don't arbitrarily pick one
+        if len(candidates) > 1:
+            return ("Various Artists", candidate_album)
+        # Many distinct track artists (e.g. soundtrack with no albumartist): compilation
+        distinct_artists = len(set(normalize_album_artist(a) for (a, _) in artist_album_pairs))
+        if distinct_artists >= 3:
+            return ("Various Artists", candidate_album)
+        # Two artists: only use majority if they have at least 2/3 of tracks (e.g. 6/8 ok, 5/3 → Various)
+        total_tracks = len(artist_album_pairs)
+        if distinct_artists == 2 and max_count < total_tracks * MAJORITY_ARTIST_MIN_RATIO:
+            return ("Various Artists", candidate_album)
+        
+        normalized_artist = normalize_album_artist(candidate_artist)
+        return (normalized_artist, candidate_album)  # candidate_album already normalized
     
     # Can't determine albumDir from most used tag (all tags are missing)
     # Use path-based fallback, then verify via MusicBrainz (for Various Artists detection)
@@ -512,10 +612,12 @@ def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_v
                 verified = verify_album_via_musicbrainz(path_artist, path_album)
                 if verified:
                     verified_artist, verified_album = verified
-                    return (verified_artist, verified_album)
+                    normalized_artist = normalize_album_artist(verified_artist)
+                    return (normalized_artist, normalize_album_name(verified_album))
                 # else: no MusicBrainz match, using path values (already logged via logmsg if available)
             
-            return (path_artist, path_album)
+            normalized_artist = normalize_album_artist(path_artist)
+            return (normalized_artist, normalize_album_name(path_album))
     
     # Last resort
     return ("Unknown Artist", "Unknown Album")
@@ -692,7 +794,8 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
                             logmsg.verbose(msg)
                         except Exception:
                             pass  # Fallback if structured logging not available
-                    
+
+                    artist = normalize_album_artist(artist)
                     dir_to_key[dir_path] = (artist, album)
                     
                     for f in dir_files:
@@ -710,7 +813,7 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
         if dir_path in dir_to_key:
             key = dir_to_key[dir_path]
         else:
-            key = (tags["artist"], tags["album"])
+            key = (normalize_album_artist(tags.get("artist", "") or ""), normalize_album_name(tags.get("album", "") or ""))
         
         albums.setdefault(key, []).append((f, tags))
     
@@ -767,12 +870,20 @@ def format_track_filename(tags: Dict[str, Any], ext: str) -> str:
     return f"{tags['tracknum']:02d} - {safe_title}{ext.lower()}"
 
 
-def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, backup_enabled: bool = True) -> bool:
+def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, backup_enabled: bool = True, album_artist: Optional[str] = None) -> bool:
     """
     Write tags to an audio file.
     If backup_enabled is True, backs up the file first.
     Detects actual file format (not just extension) to handle misnamed files.
-    Returns True if successful, False otherwise.
+
+    When NORMALIZE_ARTIST_IN_TAGS is True, only albumartist is set to the normalized form
+    (folder/grouping); artist (track artist) is left unchanged so compilations keep
+    per-track artists and streamers can use albumartist for grouping.
+    Pass album_artist when you know the album-level artist (e.g. "Various Artists"
+    for compilations) so albumartist is set correctly; otherwise it is derived from
+    tags["artist"].
+    When NORMALIZE_ALBUM_IN_TAGS is True, the album tag is set to the normalized form
+    (strip " (Disc 1)", " [Disc 2]", etc.) so streamers show one multi-disc album.
     """
     try:
         ext = path.suffix.lower()
@@ -810,6 +921,16 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
         # Use detected format if available, otherwise fall back to extension
         use_format = detected_format or ext.lstrip('.')
         
+        # Album artist for grouping: normalized, never overwrite track artist
+        if NORMALIZE_ARTIST_IN_TAGS:
+            effective_album_artist = normalize_album_artist((album_artist or tags.get("artist") or "").strip() or "")
+        else:
+            effective_album_artist = None
+        
+        # Album name: normalized so streamers index one multi-disc album (e.g. "Instrumental Magic" not "Instrumental Magic (Disc 1)")
+        if NORMALIZE_ALBUM_IN_TAGS:
+            tags = {**tags, "album": normalize_album_name(tags.get("album", "") or "")}
+        
         # Try FLAC first (if detected or extension suggests it)
         if use_format == 'flac' or ext == ".flac":
             try:
@@ -817,6 +938,8 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
                 audio["TITLE"] = tags["title"]
                 audio["ARTIST"] = tags["artist"]
                 audio["ALBUM"] = tags["album"]
+                if effective_album_artist is not None:
+                    audio["ALBUMARTIST"] = effective_album_artist
                 if tags.get("year"):
                     audio["DATE"] = tags["year"]
                 audio["TRACKNUMBER"] = str(tags["tracknum"])
@@ -840,6 +963,8 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
                 audio["\xa9nam"] = tags["title"]
                 audio["\xa9ART"] = tags["artist"]
                 audio["\xa9alb"] = tags["album"]
+                if effective_album_artist is not None:
+                    audio["aART"] = [effective_album_artist]
                 if tags.get("year"):
                     audio["\xa9day"] = tags["year"]
                 audio["trkn"] = [(tags["tracknum"], 0)]
@@ -861,6 +986,8 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
                 audio["title"] = tags["title"]
                 audio["artist"] = tags["artist"]
                 audio["album"] = tags["album"]
+                if effective_album_artist is not None:
+                    audio["albumartist"] = effective_album_artist
                 if tags.get("year"):
                     audio["date"] = tags["year"]
                 audio["tracknumber"] = str(tags["tracknum"])

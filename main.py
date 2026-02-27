@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 from artwork import (
+    add_missing_tags_global,
     embed_art_into_audio_files,
     embed_missing_art_global,
     ensure_cover_and_folder_global,
@@ -469,9 +470,12 @@ def main() -> None:
         import run_state
         run_state.clear()
         from structured_logging import logmsg
-        # Step header processes MULTIPLE albums (each album gets its own instance)
         header_key = logmsg.header("Step 1: Process new downloads", "%msg%")
         process_downloads(DRY_RUN)
+        # Fill missing tags / albumartist (e.g. Freddie Mercury) — subheading so summary shows count
+        fill_tags_header = logmsg.header("Fill missing tags / albumartist", "%msg% (%count% items)", key=header_key)
+        add_missing_tags_global(DRY_RUN, backup_enabled=BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
+        logmsg.header(None, key=fill_tags_header)
         logmsg.header(None, key=header_key)  # Close Step 1 header
 
         header_key = logmsg.header("Step 2: Apply UPDATE overlay", "%msg% (%count% items)", key=header_key)
