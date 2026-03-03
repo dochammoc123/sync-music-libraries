@@ -84,26 +84,172 @@ def export_embedded_art_to_cover(first_file: Path, cover_path: Path, dry_run: bo
     return False
 
 
-def fetch_art_from_web(artist: str, album: str, cover_path: Path, dry_run: bool = False) -> Tuple[bool, Optional[str]]:
+def fetch_art_from_web(artist: str, album: str, cover_path: Path, dry_run: bool = False, album_dir: Optional[Path] = None) -> Tuple[bool, Optional[str]]:
     """
     Try MusicBrainz + Cover Art Archive with retry logic.
+    When album_dir has CD subfolders: prefers a MusicBrainz release with matching disc count,
+    then fetches disc-specific covers from CAA (by comment "Disc N"/"CD N" or by front-image order).
     Returns (True, None) on success, (False, reason) on failure.
-    reason is e.g. "no MusicBrainz release", "no front cover in Cover Art Archive", or the last error.
-    Note: HTTP 404 from Cover Art Archive means no front cover exists for that release; retrying won't help.
     """
     from structured_logging import logmsg
     if not ENABLE_WEB_ART_LOOKUP:
         return (False, "web art lookup disabled")
 
     try:
+        init_musicbrainz()
+        # When we have CD subdirs, fetch more candidates and prefer a release with matching disc count
+        num_discs_wanted: Optional[int] = None
+        if album_dir and album_dir.exists():
+            n = sum(1 for s in album_dir.iterdir() if s.is_dir() and re.match(r"^CD\d+", s.name, re.IGNORECASE))
+            if n > 0:
+                num_discs_wanted = n
+
+        limit = 10 if num_discs_wanted else 1
         result = musicbrainzngs.search_releases(
-            artist=artist, release=album, limit=1
+            artist=artist, release=album, limit=limit
         )
         releases = result.get("release-list", [])
         if not releases:
             return (False, "no MusicBrainz release")
 
+        # Build CD subdir map early so we can prefer a release with disc-specific CAA art
+        cd_subdirs: Dict[int, Path] = {}
+        if album_dir and album_dir.exists():
+            for subdir in album_dir.iterdir():
+                if subdir.is_dir():
+                    m = re.match(r"^CD(\d+)", subdir.name, re.IGNORECASE)
+                    if m:
+                        cd_subdirs[int(m.group(1))] = subdir
+
         mbid = releases[0]["id"]
+        if num_discs_wanted and len(releases) > 1:
+            for r in releases:
+                try:
+                    rel = musicbrainzngs.get_release_by_id(r["id"], includes=["media"])
+                    mediums = rel.get("release", {}).get("medium-list", [])
+                    if len(mediums) == num_discs_wanted:
+                        mbid = r["id"]
+                        break
+                except Exception:
+                    continue
+
+        def _image_url(img: dict) -> Optional[str]:
+            """Prefer 1200px, then full image, then 500px."""
+            thumbs = img.get("thumbnails") or {}
+            return thumbs.get("1200") or img.get("image") or thumbs.get("500")
+
+        def _caa_has_disc_covers(mbid_str: str) -> bool:
+            """Return True if this release's CAA has at least one disc-specific image (by comment)."""
+            try:
+                meta_url = f"https://coverartarchive.org/release/{mbid_str}"
+                rm = requests.get(meta_url, timeout=WEB_ART_LOOKUP_TIMEOUT)
+                if rm.status_code != 200:
+                    return False
+                data = rm.json()
+                images = data.get("images", [])
+                disc_comment_re = re.compile(
+                    r"(?:Disc|CD)\s*(\d+)(?:\s*cover)?",
+                    re.IGNORECASE
+                )
+                for img in images:
+                    comment = (img.get("comment") or "").strip()
+                    if disc_comment_re.search(comment):
+                        return True
+            except Exception:
+                pass
+            return False
+
+        # When we have CD subdirs, prefer a release whose CAA has disc-specific comments (Disc 1 cover, etc.)
+        if num_discs_wanted and cd_subdirs:
+            candidates_with_disc_art = []
+            for r in releases:
+                try:
+                    rel = musicbrainzngs.get_release_by_id(r["id"], includes=["media"])
+                    mediums = rel.get("release", {}).get("medium-list", [])
+                    if len(mediums) != num_discs_wanted:
+                        continue
+                    if _caa_has_disc_covers(r["id"]):
+                        candidates_with_disc_art.append(r["id"])
+                except Exception:
+                    continue
+            if candidates_with_disc_art:
+                mbid = candidates_with_disc_art[0]
+            else:
+                # Fallback: use first release with matching disc count (already set above)
+                pass
+
+        # When we have CD subfolders, fetch full CAA metadata to get disc-specific images
+        if cd_subdirs:
+            # Multi-disc: fetch metadata and get all disc covers
+            meta_url = f"https://coverartarchive.org/release/{mbid}"
+            rm = requests.get(meta_url, timeout=WEB_ART_LOOKUP_TIMEOUT)
+            if rm.status_code != 200:
+                return (False, f"Cover Art Archive HTTP {rm.status_code}")
+            data = rm.json()
+            images = data.get("images", [])
+            if not images:
+                return (False, "no images in Cover Art Archive")
+
+            front_img = next((i for i in images if i.get("front")), images[0])
+            img_url = _image_url(front_img)
+            if not img_url:
+                return (False, "no image URL in Cover Art Archive")
+
+            # Save album root cover
+            r = requests.get(img_url, timeout=WEB_ART_LOOKUP_TIMEOUT)
+            if r.status_code != 200:
+                return (False, f"failed to fetch front image: HTTP {r.status_code}")
+            if not dry_run:
+                cover_path.write_bytes(r.content)
+
+            # Collect all front images in order (for order-based fallback)
+            front_images = [i for i in images if i.get("front")]
+            if not front_images:
+                front_images = [i for i in images if "Front" in (i.get("types") or [])]
+
+            # Save disc-specific covers: first by comment ("Disc N cover", "Disc N", "CD N", etc.)
+            disc_comment_re = re.compile(
+                r"(?:Disc|CD)\s*(\d+)(?:\s*cover)?",
+                re.IGNORECASE
+            )
+            saved_discs: set = set()  # disc_num that got a cover from comment
+            for img in images:
+                comment = (img.get("comment") or "").strip()
+                m = disc_comment_re.search(comment)
+                if m:
+                    disc_num = int(m.group(1))
+                    if disc_num in cd_subdirs and disc_num not in saved_discs:
+                        disc_url = _image_url(img)
+                        if disc_url:
+                            r2 = requests.get(disc_url, timeout=WEB_ART_LOOKUP_TIMEOUT)
+                            if r2.status_code == 200 and not dry_run:
+                                subdir = cd_subdirs[disc_num]
+                                subdir.joinpath("folder.jpg").write_bytes(r2.content)
+                                subdir.joinpath("cover.jpg").write_bytes(r2.content)
+                                saved_discs.add(disc_num)
+                                logmsg.verbose("Downloaded disc {n} cover to {subdir}/ (from comment)", n=disc_num, subdir=subdir.name)
+
+            # Fallback: if CAA has multiple front images in order (no comments), assign by position
+            # front_images[0] = main/CD1, front_images[1] = CD2, front_images[2] = CD3, ...
+            if len(front_images) >= len(cd_subdirs):
+                for disc_num in sorted(cd_subdirs.keys()):
+                    if disc_num <= len(front_images):
+                        # Skip if we already saved this disc from a comment
+                        if disc_num in saved_discs:
+                            continue
+                        img = front_images[disc_num - 1]
+                        disc_url = _image_url(img)
+                        if disc_url:
+                            r2 = requests.get(disc_url, timeout=WEB_ART_LOOKUP_TIMEOUT)
+                            if r2.status_code == 200 and not dry_run:
+                                subdir = cd_subdirs[disc_num]
+                                subdir.joinpath("folder.jpg").write_bytes(r2.content)
+                                subdir.joinpath("cover.jpg").write_bytes(r2.content)
+                                logmsg.verbose("Downloaded disc {n} cover to {subdir}/ (by order)", n=disc_num, subdir=subdir.name)
+
+            return (True, None)
+
+        # Single cover: use front-500.jpg or fallback to metadata
         url_front = f"https://coverartarchive.org/release/{mbid}/front-500.jpg"
 
         last_error: Optional[str] = None
@@ -134,9 +280,8 @@ def fetch_art_from_web(artist: str, album: str, cover_path: Path, dry_run: bool 
                     data = rm.json()
                     images = data.get("images", [])
                     if images:
-                        # Prefer first image with front=True, else first image
                         img = next((i for i in images if i.get("front")), images[0])
-                        img_url = img.get("image") or img.get("thumbnails", {}).get("500")
+                        img_url = _image_url(img)
                         if img_url:
                             r2 = requests.get(img_url, timeout=WEB_ART_LOOKUP_TIMEOUT)
                             if r2.status_code == 200:
@@ -653,85 +798,81 @@ def ensure_cover_and_folder(
     cover_path = album_dir / "cover.jpg"
     folder_path = album_dir / "folder.jpg"
 
-    # If both exist, nothing to do
-    if cover_path.exists() and folder_path.exists():
-        return
-
     from structured_logging import logmsg
-    
-    # If folder.jpg exists, copy it to cover.jpg (don't overwrite folder.jpg)
-    if folder_path.exists():
-        if not cover_path.exists():
-            item_key = logmsg.begin_item("cover.jpg")
-            logmsg.info("folder.jpg exists, creating cover.jpg from it")
-            logmsg.end_item(item_key)
-            if not dry_run:
-                shutil.copy2(folder_path, cover_path)
-        return
 
-    # If cover.jpg exists, copy it to folder.jpg (don't overwrite cover.jpg)
-    if cover_path.exists():
-        if not folder_path.exists():
-            item_key = logmsg.begin_item("folder.jpg")
-            logmsg.info("cover.jpg exists, creating folder.jpg from it")
-            logmsg.end_item(item_key)
-            if not dry_run:
-                try:
-                    shutil.copy2(cover_path, folder_path)
-                    logmsg.verbose("folder.jpg created successfully")
-                except Exception as e:
-                    if label:
+    # Ensure root has cover and folder (skip if both already exist)
+    if not (cover_path.exists() and folder_path.exists()):
+        # If folder.jpg exists, copy it to cover.jpg (don't overwrite folder.jpg)
+        if folder_path.exists():
+            if not cover_path.exists():
+                item_key = logmsg.begin_item("cover.jpg")
+                logmsg.info("folder.jpg exists, creating cover.jpg from it")
+                logmsg.end_item(item_key)
+                if not dry_run:
+                    shutil.copy2(folder_path, cover_path)
+        # If cover.jpg exists, copy it to folder.jpg (don't overwrite cover.jpg)
+        elif cover_path.exists():
+            if not folder_path.exists():
+                item_key = logmsg.begin_item("folder.jpg")
+                logmsg.info("cover.jpg exists, creating folder.jpg from it")
+                logmsg.end_item(item_key)
+                if not dry_run:
+                    try:
+                        shutil.copy2(cover_path, folder_path)
+                        logmsg.verbose("folder.jpg created successfully")
+                    except Exception as e:
+                        if label:
+                            from structured_logging import logmsg
+                            logmsg.warn("Failed to create folder.jpg: {error}", error=str(e))
+        else:
+            # Neither exists - try to create cover.jpg from embedded art or web
+            if not skip_cover_creation:
+                if not cover_path.exists():
+                    logmsg.verbose("No cover.jpg; attempting to export embedded art...")
+                    first_file = album_files[0][0]
+                    if export_embedded_art_to_cover(first_file, cover_path, dry_run):
+                        item_key = logmsg.begin_item("cover.jpg")
+                        logmsg.info("cover.jpg created from embedded art.")
+                        logmsg.end_item(item_key)
+                    else:
+                        logmsg.verbose("No embedded art; attempting web fetch...")
+                        ok, reason = fetch_art_from_web(artist, album, cover_path, dry_run, album_dir=album_dir)
+                        if ok:
+                            item_key = logmsg.begin_item("cover.jpg")
+                            logmsg.info("cover.jpg downloaded from web.")
+                            logmsg.end_item(item_key)
+                        else:
+                            if reason:
+                                logmsg.warn("Could not obtain artwork. ({reason})", reason=reason)
+                            else:
+                                logmsg.warn("Could not obtain artwork.")
+            
+            # After creating/finding cover.jpg, ensure folder.jpg exists in album root
+            if cover_path.exists() and not folder_path.exists():
+                item_key = logmsg.begin_item("folder.jpg")
+                logmsg.info("Creating folder.jpg from cover.jpg")
+                logmsg.end_item(item_key)
+                if not dry_run:
+                    try:
+                        shutil.copy2(cover_path, folder_path)
+                        logmsg.verbose("folder.jpg created successfully")
+                    except Exception as e:
                         from structured_logging import logmsg
                         logmsg.warn("Failed to create folder.jpg: {error}", error=str(e))
-        return
 
-    # Neither exists - try to create cover.jpg from embedded art or web
-    if not skip_cover_creation:
-        if not cover_path.exists():
-            logmsg.verbose("No cover.jpg; attempting to export embedded art...")
-            first_file = album_files[0][0]
-            if export_embedded_art_to_cover(first_file, cover_path, dry_run):
-                item_key = logmsg.begin_item("cover.jpg")
-                logmsg.info("cover.jpg created from embedded art.")
-                logmsg.end_item(item_key)
-            else:
-                logmsg.verbose("No embedded art; attempting web fetch...")
-                ok, reason = fetch_art_from_web(artist, album, cover_path, dry_run)
-                if ok:
-                    item_key = logmsg.begin_item("cover.jpg")
-                    logmsg.info("cover.jpg downloaded from web.")
-                    logmsg.end_item(item_key)
-                else:
-                    if reason:
-                        logmsg.warn("Could not obtain artwork. ({reason})", reason=reason)
-                    else:
-                        logmsg.warn("Could not obtain artwork.")
-    
-    # After creating/finding cover.jpg, ensure folder.jpg exists in album root
-    if cover_path.exists() and not folder_path.exists():
-        item_key = logmsg.begin_item("folder.jpg")
-        logmsg.info("Creating folder.jpg from cover.jpg")
-        logmsg.end_item(item_key)
-        if not dry_run:
-            try:
-                shutil.copy2(cover_path, folder_path)
-                logmsg.verbose("folder.jpg created successfully")
-            except Exception as e:
-                from structured_logging import logmsg
-                logmsg.warn("Failed to create folder.jpg: {error}", error=str(e))
-    
-    # Ensure CD1/CD2 subdirectories have folder.jpg (not cover.jpg) if they don't already
+    # Always ensure CD1/CD2/... subdirectories have folder.jpg and cover.jpg if they don't already
     if album_dir.exists():
         source_for_subfolders = None
         if cover_path.exists():
             source_for_subfolders = cover_path
         elif folder_path.exists():
             source_for_subfolders = folder_path
-        
+
         if source_for_subfolders:
             for subdir in album_dir.iterdir():
                 if subdir.is_dir() and subdir.name.upper().startswith("CD"):
                     subfolder_folder = subdir / "folder.jpg"
+                    subfolder_cover = subdir / "cover.jpg"
                     if not subfolder_folder.exists():
                         item_key = logmsg.begin_item(f"{subdir.name}/folder.jpg")
                         logmsg.info("Creating folder.jpg in {subdir}/ from album root", subdir=subdir.name)
@@ -743,6 +884,17 @@ def ensure_cover_and_folder(
                                 if label:
                                     from structured_logging import logmsg
                                     logmsg.warn("Failed to create folder.jpg in {subdir}/: {error}", subdir=subdir.name, error=str(e))
+                    if not subfolder_cover.exists():
+                        item_key = logmsg.begin_item(f"{subdir.name}/cover.jpg")
+                        logmsg.info("Creating cover.jpg in {subdir}/ from album root", subdir=subdir.name)
+                        logmsg.end_item(item_key)
+                        if not dry_run:
+                            try:
+                                shutil.copy2(source_for_subfolders, subfolder_cover)
+                            except Exception as e:
+                                if label:
+                                    from structured_logging import logmsg
+                                    logmsg.warn("Failed to create cover.jpg in {subdir}/: {error}", subdir=subdir.name, error=str(e))
 
 
 def ensure_cover_and_folder_global(dry_run: bool = False) -> None:
@@ -823,6 +975,19 @@ def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_en
             p = Path(dirpath) / name
             if p.suffix.lower() not in AUDIO_EXT:
                 continue
+            
+            # Prefer cover/folder.jpg from the file's directory when in a CD subfolder (disc-specific art)
+            file_dir = p.parent
+            if file_dir != album_dir:
+                sub_cover = file_dir / "cover.jpg"
+                sub_folder = file_dir / "folder.jpg"
+                if sub_cover.exists():
+                    img_data = sub_cover.read_bytes()
+                elif sub_folder.exists():
+                    img_data = sub_folder.read_bytes()
+                # else keep img_data from album root (or previous dir)
+            else:
+                img_data = cover_path.read_bytes()
             
             item_key = logmsg.begin_item(p.name)
             backup_audio_file_if_needed(p, dry_run, backup_enabled)
@@ -919,11 +1084,13 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True) 
     Only writes tags after backing up files (if backup_enabled).
     """
     from config import MUSIC_ROOT, AUDIO_EXT
-    from tag_operations import get_tags, write_tags_to_file, choose_album_artist_album
+    from tag_operations import get_tags, write_tags_to_file, choose_album_artist_album, normalize_album_name, normalize_album_artist, parse_album_disc
     from pathlib import Path
     from structured_logging import logmsg
     import os
     import re
+
+    albums_updated = 0
     
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
         album_dir = Path(dirpath)
@@ -992,10 +1159,16 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True) 
         
         if not to_write:
             continue
-        
-        # One album we're updating — set album context and log each file for summary count
+
+        albums_updated += 1
+        # Use normalized artist/album for album context so summary shows one heading
+        # When raw album has [Disc N] (e.g. "... [Disc 07] The Rarities 1"), use base_album so we don't get a separate "Rarities 1" row
         artist = album_level_artist or (album_metadata["artist"] if album_metadata else "Unknown Artist")
-        album = album_metadata["album"] if album_metadata else "Unknown Album"
+        raw_album = album_metadata["album"] if album_metadata else "Unknown Album"
+        base_album, disc_num, _ = parse_album_disc(raw_album)
+        album = base_album if disc_num is not None else normalize_album_name(raw_album)
+        album = album or "Unknown Album"
+        artist = normalize_album_artist(artist)
         year = album_metadata.get("year", "") if album_metadata else ""
         album_key = logmsg.begin_album(artist, album, year or None)
         
@@ -1012,6 +1185,9 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True) 
             logmsg.end_item(item_key)
         
         logmsg.end_album(album_key)
+
+    if albums_updated == 0:
+        logmsg.info("No files needed albumartist or tag updates.")
 
 
 def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True, embed_if_missing: bool = True) -> None:
@@ -1059,9 +1235,16 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
         cover_path = parent_album_dir / "cover.jpg"
         if not cover_path.exists():
             continue
-        
-        # Determine if we're in a subdirectory (CD1, CD2, etc.)
+
+        # When in a CD subfolder, prefer cover/folder.jpg in this subfolder so each disc can have its own art
         is_subdirectory = (current_dir != parent_album_dir)
+        if is_subdirectory:
+            if (current_dir / "cover.jpg").exists():
+                cover_path = current_dir / "cover.jpg"
+            elif (current_dir / "folder.jpg").exists():
+                cover_path = current_dir / "folder.jpg"
+        if not cover_path.exists():
+            continue
         
         # Use parent album directory for album context
         album_key = logmsg.begin_album(parent_album_dir)

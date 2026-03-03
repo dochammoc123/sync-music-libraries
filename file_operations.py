@@ -2,9 +2,10 @@
 File operations: moving, organizing, and cleaning up files.
 """
 import os
+import re
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from config import (
     AUDIO_EXT,
@@ -16,7 +17,40 @@ from config import (
     MUSIC_ROOT,
 )
 from logging_utils import album_label_from_tags
-from tag_operations import choose_album_year, format_track_filename, sanitize_filename_component, write_tags_to_file
+from tag_operations import choose_album_year, format_track_filename, sanitize_filename_component, write_tags_to_file, normalize_album_name, parse_album_disc
+
+
+def find_existing_album_dir(root: Path, artist: str, album: str) -> Optional[Path]:
+    """
+    If an album folder already exists under root/artist for the same album (same
+    normalized name, any year prefix), return it. Use this to merge into one
+    folder when adding discs in separate runs (e.g. CD1-2 first, then CD3-10).
+    """
+    artist = (artist or "Unknown Artist").strip() or "Unknown Artist"
+    album = (album or "Unknown Album").strip() or "Unknown Album"
+    safe_artist = sanitize_filename_component(artist)
+    artist_dir = root / safe_artist
+    if not artist_dir.exists() or not artist_dir.is_dir():
+        return None
+    target_normalized = sanitize_filename_component(normalize_album_name(album))
+    # Match folder names: optional "(year) " prefix then album part
+    year_prefix_re = re.compile(
+        r"^\s*\(\d{4}(?:\s*[,\-]\s*\d{4})*\)\s*(.+)$",
+        re.IGNORECASE
+    )
+    for subdir in artist_dir.iterdir():
+        if not subdir.is_dir():
+            continue
+        name = subdir.name
+        m = year_prefix_re.match(name)
+        if m:
+            folder_album_part = m.group(1).strip()
+        else:
+            folder_album_part = name
+        folder_normalized = sanitize_filename_component(normalize_album_name(folder_album_part))
+        if folder_normalized == target_normalized:
+            return subdir
+    return None
 
 
 def make_album_dir(root: Path, artist: str, album: str, year: str, dry_run: bool = False) -> Path:
@@ -436,10 +470,19 @@ def move_album_from_downloads(
     artist, album = album_key
     year = choose_album_year(items)
     label = album_label_from_tags(artist, album, year)
-    
+
     from structured_logging import logmsg
 
-    album_dir = make_album_dir(music_root, artist, album, year, dry_run)
+    # Reuse existing album folder if one exists (same artist+album, any year) so
+    # adding discs in separate runs (e.g. CD1-2 then CD3-10) merges into one folder
+    existing_album_dir = find_existing_album_dir(music_root, artist, album)
+    if existing_album_dir is not None:
+        album_dir = existing_album_dir
+        if not dry_run:
+            album_dir.mkdir(parents=True, exist_ok=True)
+        logmsg.verbose("Using existing album folder: {album_dir}", album_dir=str(album_dir))
+    else:
+        album_dir = make_album_dir(music_root, artist, album, year, dry_run)
     existing = album_dir.exists()
 
     # Events tracked automatically by structured logging
@@ -452,6 +495,14 @@ def move_album_from_downloads(
 
         items_sorted = sorted(items, key=lambda x: (x[1]["discnum"], x[1]["tracknum"]))
         discs = set(t["discnum"] for _, t in items)
+        # Use CD1/CD2 when: multiple discs present, or album title had "[Disc x]", or disc tag is "1/2" etc. (disctotal >= 2)
+        raw_albums = {(t.get("album") or "").strip() for _, t in items if t.get("album")}
+        disc_totals = [t.get("disctotal") for _, t in items if t.get("disctotal")]
+        use_disc_subdirs = (
+            len(discs) > 1
+            or any(normalize_album_name(raw) != raw for raw in raw_albums if raw)
+            or (max(disc_totals) >= 2 if disc_totals else False)
+        )
         
         # Track which audio files were processed (moved, upgraded, or skipped)
         # These should be cleaned up from downloads
@@ -490,8 +541,13 @@ def move_album_from_downloads(
             # Generate filename from tags (title and tracknum from tags, not filename)
             # If tags are missing, filename will use fallback values (from path/filename parsing)
             filename = format_track_filename(tags_to_use, ext)
-            if len(discs) > 1:
-                disc_label = f"CD{tags_to_use['discnum']}"
+            if use_disc_subdirs:
+                _, _disc_num, disc_title = parse_album_disc((tags_to_use.get("album") or "").strip())
+                disc_num = tags_to_use["discnum"]
+                if disc_title:
+                    disc_label = f"CD{disc_num} - {sanitize_filename_component(disc_title)}"
+                else:
+                    disc_label = f"CD{disc_num}"
                 disc_dir = album_dir / disc_label
                 if not dry_run:
                     disc_dir.mkdir(exist_ok=True)
@@ -657,7 +713,7 @@ def move_album_from_downloads(
     move_booklets_from_downloads(items, album_dir, dry_run)
     
     # Push artwork header
-    art_key = logmsg.push_header("Processing album artwork", "%msg% (%count% items)", "ARTWORK", always_show=True)
+    art_key = logmsg.push_header("Processing album artwork", "%msg%", "ARTWORK")
     try:
         # Find best art file (standard names + pattern-matched, always largest)
         # This function now handles:
@@ -930,6 +986,51 @@ def move_album_from_downloads(
         # Cover and folder.jpg are ensured globally in Step 4 (ensure_cover_and_folder_global)
     finally:
         logmsg.pop_header(art_key)
+
+    # When we merged into an existing folder (or always), ensure folder name reflects
+    # combined years from all tracks (CD1–10), not just the current batch
+    try:
+        from tag_operations import get_tags
+        all_audio: List[Path] = []
+        for p in album_dir.rglob("*"):
+            if p.is_file() and p.suffix.lower() in AUDIO_EXT:
+                all_audio.append(p)
+        if all_audio:
+            all_with_tags: List[Tuple[Path, Dict[str, Any]]] = []
+            for p in all_audio:
+                t = get_tags(p)
+                if t:
+                    all_with_tags.append((p, t))
+            if all_with_tags:
+                new_year = choose_album_year(all_with_tags)
+                safe_album = sanitize_filename_component(album)
+                desired_name = (f"({new_year}) " if new_year else "") + safe_album
+                if album_dir.name != desired_name:
+                    parent = album_dir.parent
+                    new_path = parent / desired_name
+                    if not dry_run and not new_path.exists():
+                        old_rel = album_dir.relative_to(music_root)
+                        new_rel = new_path.relative_to(music_root)
+                        album_dir.rename(new_path)
+                        album_dir = new_path
+                        logmsg.verbose("Renamed album folder to reflect combined years: {name}", name=desired_name)
+                        # Keep backup and overlay in sync: rename same path under BACKUP_ROOT and UPDATE_ROOT
+                        from config import BACKUP_ROOT, UPDATE_ROOT
+                        for root in (BACKUP_ROOT, UPDATE_ROOT):
+                            if not root or not root.exists():
+                                continue
+                            old_dir = root / old_rel
+                            new_dir = root / new_rel
+                            if old_dir.exists() and old_dir.is_dir() and not new_dir.exists():
+                                try:
+                                    old_dir.rename(new_dir)
+                                    logmsg.verbose("Renamed {root_name} folder to match: {name}", root_name=root.name, name=new_rel.name)
+                                except Exception as e:
+                                    logmsg.verbose("Could not rename {root_name} folder: {error}", root_name=root.name, error=str(e))
+                    elif dry_run:
+                        logmsg.verbose("Would rename album folder to: {name}", name=desired_name)
+    except Exception as e:
+        logmsg.verbose("Could not update album folder name: {error}", error=str(e))
 
     if CLEAN_EMPTY_DOWNLOAD_FOLDERS:
         # Track which artwork files were used/matched for this album

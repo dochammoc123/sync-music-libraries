@@ -393,6 +393,11 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
             discnum = int(discno.split("/")[0])
         except ValueError:
             discnum = 1
+        # Total discs when tag is "1/2" or "2/2" (for folder layout: use CD1 even when only disc 1 present)
+        try:
+            disctotal = int(discno.split("/")[1]) if "/" in discno else 0
+        except (ValueError, IndexError):
+            disctotal = 0
 
         # Raw albumartist from file (may be missing); FLAC uses ALBUMARTIST, ID3 uses albumartist
         raw_albumartist = (_get("albumartist") or _get("ALBUMARTIST") or "").strip()
@@ -403,6 +408,7 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
             "year": year.strip(),
             "tracknum": tracknum,
             "discnum": discnum,
+            "disctotal": disctotal if disctotal > 0 else None,
             "title": title.strip(),
             "albumartist": raw_albumartist or None,
         }
@@ -532,27 +538,50 @@ def normalize_album_artist(artist: str) -> str:
 MAJORITY_ARTIST_MIN_RATIO = 2 / 3
 
 
+def parse_album_disc(album: str) -> Tuple[str, Optional[int], Optional[str]]:
+    """
+    Parse disc number and optional disc title from album name for multi-disc sets
+    with different titles per disc (e.g. "Solo (Disc 1) Mr Bad Guy" / "Solo (Disc 2) Barcelona").
+    Returns (base_album, disc_num, disc_title). disc_title is None when not present.
+    """
+    if not album or not isinstance(album, str):
+        return (album or "", None, None)
+    s = album.strip()
+    # Match: "BaseAlbum (Disc N) Optional Title" or "BaseAlbum [Disc N] Optional Title"
+    m = re.match(r"^(.*?)\s*[(\[]\s*disc\s*(\d+)\s*[)\]]\s*(.*)$", s, re.IGNORECASE)
+    if m:
+        base = m.group(1).strip()
+        disc_num = int(m.group(2))
+        rest = m.group(3).strip()
+        disc_title = rest if rest else None
+        return (normalize_album_name(base), disc_num, disc_title)
+    return (normalize_album_name(s), None, None)
+
+
 def normalize_album_name(album: str) -> str:
     """
     Normalize album name for grouping and folder naming so multi-disc sets with
     inconsistent tags merge into one album (e.g. one folder with CD1/CD2 subdirs).
-    Strips common disc suffixes: "(Disc 1)", "[Disc 2]", " (1/2)", " [2/2]", " - Disc 1", etc.
+    Strips disc patterns from anywhere in the name: "(Disc 1)", "[Disc 2]", " [Disc 1] ",
+    "(CD 1)", "[CD2]", " (1/2)", " - Disc 1", etc.
+    Normalizes colon variants so "Greenpeace: Rainbow Warriors" and "Greenpeace Rainbow Warriors" match.
     """
     if not album or not isinstance(album, str):
         return album or ""
     s = album.strip()
-    # Strip trailing disc patterns (repeat until no change so we handle "Album (Disc 1) (1/2)")
-    while True:
-        orig = s
-        # (Disc N), [Disc N], (disc N), [disc N]
-        s = re.sub(r'\s*[(\[]\s*disc\s*\d+\s*[)\]]\s*$', '', s, flags=re.IGNORECASE)
-        # (N/M), [N/M] e.g. (1/2), [2/2]
-        s = re.sub(r'\s*[(\[]\s*\d+\s*/\s*\d+\s*[)\]]\s*$', '', s)
-        # - Disc N, – Disc N
-        s = re.sub(r'\s*[-–—]\s*disc\s*\d+\s*$', '', s, flags=re.IGNORECASE)
-        s = s.strip()
-        if s == orig:
-            break
+    # Strip disc patterns from anywhere (not just trailing)
+    # [Disc N], (Disc N), [disc N], (disc N)
+    s = re.sub(r'\s*[(\[]\s*disc\s*\d+\s*[)\]]\s*', ' ', s, flags=re.IGNORECASE)
+    # [CD N], (CD N), [CDN], (CDN)
+    s = re.sub(r'\s*[(\[]\s*cd\s*\d+\s*[)\]]\s*', ' ', s, flags=re.IGNORECASE)
+    # (N/M), [N/M] e.g. (1/2), [2/2]
+    s = re.sub(r'\s*[(\[]\s*\d+\s*/\s*\d+\s*[)\]]\s*', ' ', s)
+    # - Disc N, – Disc N (dash + Disc N)
+    s = re.sub(r'\s*[-–—]\s*disc\s*\d+\s*', ' ', s, flags=re.IGNORECASE)
+    # Normalize colon so "Greenpeace: Rainbow Warriors" and "Greenpeace Rainbow Warriors" match
+    s = re.sub(r'\s*:\s*', ' ', s)
+    # Collapse multiple spaces and strip
+    s = re.sub(r'\s+', ' ', s).strip()
     return s
 
 
@@ -816,39 +845,70 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
             key = (normalize_album_artist(tags.get("artist", "") or ""), normalize_album_name(tags.get("album", "") or ""))
         
         albums.setdefault(key, []).append((f, tags))
-    
-    return albums
+
+    # Step 4: Merge groups that share (artist, base_album) when album has disc-with-title
+    # e.g. "Solo (Disc 1) Mr Bad Guy" and "Solo (Disc 2) Barcelona" -> one album "Solo" with CD1 - Mr Bad Guy / CD2 - Barcelona
+    merged: Dict[Tuple[str, str], List[Tuple[Path, Dict]]] = {}
+    for (artist, album), items in albums.items():
+        for (f, tags) in items:
+            raw_album = (tags.get("album") or "").strip()
+            base_album, disc_num, _ = parse_album_disc(raw_album)
+            if disc_num is not None:
+                key = (artist, base_album)
+            else:
+                key = (artist, normalize_album_name(raw_album))
+            merged.setdefault(key, []).append((f, tags))
+
+    # Step 5: Merge keys when one album name is a prefix of another (same artist)
+    # e.g. "The Solo Collection" and "The Solo Collection The Rarities 1" -> one album "The Solo Collection"
+    def _canonical_album_key(artist: str, album: str, keys: List[Tuple[str, str]]) -> Tuple[str, str]:
+        candidates = [(a, al) for (a, al) in keys if a == artist and (al == album or album.startswith(al + " "))]
+        if not candidates:
+            return (artist, album)
+        return min(candidates, key=lambda x: len(x[1]))
+
+    keys_list = list(merged.keys())
+    final: Dict[Tuple[str, str], List[Tuple[Path, Dict]]] = {}
+    for (artist, album), items in merged.items():
+        ckey = _canonical_album_key(artist, album, keys_list)
+        final.setdefault(ckey, []).extend(items)
+    return final
 
 
 def choose_album_year(items: List[Tuple[Path, Dict[str, Any]]]) -> str:
     """
-    Given a list of (path, tags) for an album, pick a canonical year
-    to use in the folder name.
+    Given a list of (path, tags) for an album, pick a canonical year string
+    for the folder name and label.
 
     Strategy:
-      - Collect all non-empty year strings from tags["year"].
-      - If none, return "" (no year in folder).
-      - Otherwise:
-          * Find the most common year.
-          * If there's a tie, pick the earliest year numerically.
+      - Collect all non-empty year strings from tags["year"] (use first 4 digits).
+      - If none, return "" (no year in folder or label).
+      - Distinct years (sorted):
+          * 1 year  -> "yyyy"
+          * 2–3 years -> "yyyy, yyyy, yyyy"
+          * 4+ years -> "yyyy - yyyy" (earliest to latest)
     """
     years = [t["year"] for (_p, t) in items if t.get("year")]
     if not years:
         return ""
 
-    counts = Counter(years)
-    max_count = max(counts.values())
-    candidates = [y for y, c in counts.items() if c == max_count]
+    numeric_years: List[int] = []
+    for y in years:
+        s = (y or "").strip()
+        if len(s) >= 4 and s[:4].isdigit():
+            try:
+                numeric_years.append(int(s[:4]))
+            except ValueError:
+                pass
+    if not numeric_years:
+        return ""
 
-    numeric_candidates = []
-    for y in candidates:
-        try:
-            numeric_candidates.append((int(y[:4]), y))
-        except ValueError:
-            numeric_candidates.append((9999, y))
-
-    numeric_candidates.sort(key=lambda x: (x[0], x[1]))
-    return numeric_candidates[0][1]
+    distinct = sorted(set(numeric_years))
+    if len(distinct) == 1:
+        return str(distinct[0])
+    if len(distinct) <= 3:
+        return ", ".join(str(y) for y in distinct)
+    return f"{distinct[0]} - {distinct[-1]}"
 
 
 def sanitize_filename_component(name: str) -> str:

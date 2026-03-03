@@ -472,10 +472,10 @@ def main() -> None:
         from structured_logging import logmsg
         header_key = logmsg.header("Step 1: Process new downloads", "%msg%")
         process_downloads(DRY_RUN)
-        # Fill missing tags / albumartist (e.g. Freddie Mercury) — subheading so summary shows count
-        fill_tags_header = logmsg.header("Fill missing tags / albumartist", "%msg% (%count% items)", key=header_key)
+        # Fill missing tags / albumartist — nested under Step 1 (push/pop, don't replace)
+        fill_tags_header = logmsg.push_header("Fill missing tags / albumartist", "%msg% (%count% items)")
         add_missing_tags_global(DRY_RUN, backup_enabled=BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
-        logmsg.header(None, key=fill_tags_header)
+        logmsg.pop_header(fill_tags_header)
         logmsg.header(None, key=header_key)  # Close Step 1 header
 
         header_key = logmsg.header("Step 2: Apply UPDATE overlay", "%msg% (%count% items)", key=header_key)
@@ -486,7 +486,7 @@ def main() -> None:
         upgrade_albums_to_flac_only(DRY_RUN)
         logmsg.header(None, key=header_key)  # Close Step 3 header
 
-        header_key = logmsg.header("Step 4: Ensure cover and folder artwork", "%msg% (%count% items)", key=header_key)
+        header_key = logmsg.header("Step 4: Ensure cover and folder artwork", "%msg%", key=header_key)
         ensure_cover_and_folder_global(DRY_RUN)
         logmsg.header(None, key=header_key)  # Close Step 4 header
 

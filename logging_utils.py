@@ -129,19 +129,33 @@ def album_label_from_tags(artist: str, album: str, year: str) -> str:
     album = (album or "Unknown Album").strip() or "Unknown Album"
     if album == "None":
         album = "Unknown Album"
+    album = _strip_leading_artist(album, artist)
     year = (year or "").strip()
     return f"{artist} - {album} ({year})" if year else f"{artist} - {album}"
+
+
+def _strip_leading_artist(album: str, artist: str) -> str:
+    """If album starts with 'Artist - ', remove it to avoid 'Artist - Artist - Album' in labels."""
+    if not artist or not album:
+        return album or ""
+    prefix = (artist.strip() + " - ").lower()
+    if album.lower().startswith(prefix):
+        return album[len(prefix):].strip() or album
+    return album
 
 
 def album_label_from_dir(album_dir: Path) -> str:
     """
     Build a label from the directory under MUSIC_ROOT, e.g.
-    'Artist - Album (1995)'. Normalizes year format to match album_label_from_tags().
+    'Artist - Album (1995)' or 'Artist - Album (1967 - 1985)'.
+    Normalizes year format to match album_label_from_tags() (year at end in parens).
+    Strips disc patterns from album name (e.g. [Disc 1]) so path matches tag-derived labels.
     Falls back to path if odd.
     """
     from config import MUSIC_ROOT
+    from tag_operations import normalize_album_name
     import re
-    
+
     try:
         rel = album_dir.relative_to(MUSIC_ROOT)
     except ValueError:
@@ -155,17 +169,24 @@ def album_label_from_dir(album_dir: Path) -> str:
     if len(parts) >= 2:
         artist = parts[0]
         album_folder = parts[1]
-        
-        # Extract year from album folder if it's at the beginning: "(2012) Album Name"
-        # Normalize to match album_label_from_tags() format: "Artist - Album (2012)"
-        year_match = re.match(r'^\((\d{4})\)\s*(.+)$', album_folder)
+
+        # Year prefix: (YYYY), (YYYY - YYYY), or (YYYY, YYYY, YYYY)
+        year_match = re.match(
+            r'^\((\d{4}(?:\s*,\s*\d{4})*|\d{4}\s*-\s*\d{4})\)\s*(.+)$',
+            album_folder
+        )
         if year_match:
-            year = year_match.group(1)
-            album = year_match.group(2).strip()
+            year = year_match.group(1).strip()
+            year = re.sub(r'\s*-\s*', ' - ', year)  # normalize range dash
+            year = re.sub(r'\s*,\s*', ', ', year)   # normalize comma list
+            album = normalize_album_name(year_match.group(2).strip())
+            album = _strip_leading_artist(album, artist)
             return f"{artist} - {album} ({year})"
         else:
-            # No year prefix, use as-is
-            return f"{artist} - {album_folder}"
+            # No year prefix, use as-is (after stripping disc patterns and leading artist)
+            album = normalize_album_name(album_folder)
+            album = _strip_leading_artist(album, artist)
+            return f"{artist} - {album}"
     else:
         return rel.as_posix()
 

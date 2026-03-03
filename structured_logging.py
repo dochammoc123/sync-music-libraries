@@ -300,51 +300,26 @@ class StructuredLogger:
         # Check if first argument is a Path (polymorphism)
         from pathlib import Path
         if isinstance(artist_or_path, Path):
-            # Signature 2: Extract artist/album/year from Path
+            # Signature 2: Extract artist/album/year from Path (same format as album_label_from_dir)
             album_dir = artist_or_path
             try:
-                from config import MUSIC_ROOT
-                rel = album_dir.relative_to(MUSIC_ROOT)
-                parts = list(rel.parts)
-                
-                # Collapse CD1/CD2 etc to album folder
-                if parts and parts[-1].upper().startswith("CD") and len(parts) >= 2:
-                    parts = parts[:-1]
-                
-                if len(parts) >= 2:
+                from logging_utils import album_label_from_dir
+                label = album_label_from_dir(album_dir)
+                if " - " in label:
+                    parts = label.split(" - ", 1)
                     artist = parts[0]
-                    album_folder = parts[1]
-                    
-                    # Extract year from album folder if it's at the beginning: "(2012) Album Name"
-                    import re
-                    year_match = re.match(r'^\((\d{4})\)\s*(.+)$', album_folder)
-                    if year_match:
-                        year = year_match.group(1)
-                        album = year_match.group(2).strip()
+                    album_part = parts[1]
+                    if " (" in album_part:
+                        album, year_part = album_part.rsplit(" (", 1)
+                        year = year_part.rstrip(")")
                     else:
-                        # No year prefix, use as-is
-                        album = album_folder
+                        album = album_part
                         year = None
                 else:
-                    # Can't extract from path, use fallback
-                    from logging_utils import album_label_from_dir
-                    label = album_label_from_dir(album_dir)
-                    if " - " in label:
-                        parts = label.split(" - ", 1)
-                        artist = parts[0]
-                        album_part = parts[1]
-                        if " (" in album_part:
-                            album, year_part = album_part.rsplit(" (", 1)
-                            year = year_part.rstrip(")")
-                        else:
-                            album = album_part
-                            year = None
-                    else:
-                        artist = "Unknown Artist"
-                        album = "Unknown Album"
-                        year = None
+                    artist = "Unknown Artist"
+                    album = "Unknown Album"
+                    year = None
             except Exception:
-                # Fallback if path extraction fails
                 from logging_utils import album_label_from_dir
                 label = album_label_from_dir(album_dir)
                 if " - " in label:
@@ -1087,13 +1062,19 @@ class StructuredLogger:
         STRUCTURED_SUMMARY_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         
         # Organize instances by album_label (use case- and accent-insensitive key so "Céline Dion" and "Celine Dion" merge)
+        # Group by artist + album only (strip year) so same album with different year strings merges into one row
         album_groups: Dict[str, Tuple[str, List[Tuple[HeaderDefinition, HeaderInstance]]]] = {}  # normalized_key -> (display_label, instances)
         global_info_instances: List[Tuple[HeaderDefinition, HeaderInstance]] = []  # Informational (always_show=True)
         global_instances: List[Tuple[HeaderDefinition, HeaderInstance]] = []  # Regular global headers
 
         def _album_key(label: str) -> str:
+            import re
             from tag_operations import normalize_unicode_canonical
-            return normalize_unicode_canonical(label).lower()
+            # Strip trailing " (YYYY)", " (YYYY - YYYY)", or " (YYYY, YYYY, YYYY)" so same album merges
+            stripped = re.sub(r"\s*\(\d{4}(?:\s*[,\-]\s*\d{4})*\)\s*$", "", label).strip()
+            # Normalize underscore to colon so path-derived labels (sanitized : -> _) match tag-derived labels
+            stripped = (stripped or label).replace("_", ":")
+            return normalize_unicode_canonical(stripped).lower()
         
         for (header_key, album_label), instance in self.header_instances.items():
             if not instance.should_log():
@@ -1157,24 +1138,19 @@ class StructuredLogger:
                 for header_key, step_instances in sorted_steps:
                     # Sort instances within this step by level and creation_order
                     step_instances.sort(key=lambda x: (x[0].level, x[1].creation_order))
-                    
-                    # Check if Step 1 is in the global headers (it should be at level 0)
-                    # If so, album headers should be nested under Step 1 (level 1 = first nested under Step 1)
-                    # Adjust level calculation: if header is level 1 and Step 1 exists, it's nested under Step 1
-                    # Level 0 headers under albums should be treated as level 1 (nested under Step 1)
-                    # Level 1 headers under albums should be treated as level 2 (nested under Step 1's nested header)
-                    for definition, instance in step_instances:
-                        message = self._format_header_message(definition, instance)
-                        # Format: 2 spaces per level, dashes for subheadings
-                        # Headers under albums are nested under Step 1 (which is a global header)
-                        # Level 0 headers (like "Organizing tracks") should appear as level 1 under Step 1
-                        # Level 1 headers should appear as level 2, etc.
-                        # So we add 1 to the level to account for Step 1 nesting
-                        adjusted_level = definition.level + 1  # Add 1 for Step 1 nesting
-                        indent_spaces = "  " * (adjusted_level + 1)  # 2 spaces per level, +1 for album
-                        num_dashes = adjusted_level + 1  # Number of dashes = adjusted level + 1
-                        dashes = "-" * num_dashes
-                        lines.append(f"{indent_spaces}{dashes} {message}")
+                    # One line per step per album (merge multiple instances from merged album labels)
+                    definition = step_instances[0][0]
+                    total_count = sum(inst.count for _, inst in step_instances)
+                    message = definition.message_template.replace(definition.count_placeholder, str(total_count))
+                    if definition.count_placeholder == "%count%":
+                        message = message.replace("%Count%", str(total_count))
+                    elif definition.count_placeholder == "%Count%":
+                        message = message.replace("%count%", str(total_count))
+                    adjusted_level = definition.level + 1
+                    indent_spaces = "  " * (adjusted_level + 1)
+                    num_dashes = adjusted_level + 1
+                    dashes = "-" * num_dashes
+                    lines.append(f"{indent_spaces}{dashes} {message}")
                     
                     # Add warnings that occurred during this step (any label that normalizes to this album)
                     for warn_album_label, warn_list in self.album_warnings.items():
