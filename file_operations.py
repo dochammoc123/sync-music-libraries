@@ -98,7 +98,11 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                 if parent.exists():
                     # Only walk up when we're inside a CD/original-style subdir of an album
                     name_upper = root_dir.name.upper()
-                    if name_upper.startswith("CD") or root_dir.name.lower() == "original":
+                    if (
+                        name_upper.startswith("CD")
+                        or name_upper.startswith("VOL")
+                        or root_dir.name.lower() == "original"
+                    ):
                         root_dir = parent
                         continue
             except (OSError, PermissionError):
@@ -494,15 +498,19 @@ def move_album_from_downloads(
         logmsg.verbose("Target directory: {album_dir}", album_dir=str(album_dir))
 
         items_sorted = sorted(items, key=lambda x: (x[1]["discnum"], x[1]["tracknum"]))
-        discs = set(t["discnum"] for _, t in items)
-        # Use CD1/CD2 when: multiple discs present, or album title had "[Disc x]", or disc tag is "1/2" etc. (disctotal >= 2)
-        raw_albums = {(t.get("album") or "").strip() for _, t in items if t.get("album")}
-        disc_totals = [t.get("disctotal") for _, t in items if t.get("disctotal")]
-        use_disc_subdirs = (
-            len(discs) > 1
-            or any(normalize_album_name(raw) != raw for raw in raw_albums if raw)
-            or (max(disc_totals) >= 2 if disc_totals else False)
-        )
+        # Per track: multi-disc from tags (disctotal >= 2) → CD{n} under album, optionally under
+        # VOL{n} when the title includes Vol./Volume before [Disc n] (Lilith Fair-style).
+        # Title-only Vol. with 1/1 → VOL{n} (not CD). Multiple [Disc n] without tag multi → CD{n}.
+        # "[Disc 1]" alone + 1/1 stays flat unless multi_from_title.
+        from tag_operations import parse_album_disc, parse_album_layout_from_title
+
+        title_disc_nums = set()
+        for _src, t in items:
+            raw_a = (t.get("album") or "").strip()
+            _b, dn, _dt = parse_album_disc(raw_a)
+            if dn is not None:
+                title_disc_nums.add(dn)
+        multi_from_title = len(title_disc_nums) > 1
         
         # Track which audio files were processed (moved, upgraded, or skipped)
         # These should be cleaned up from downloads
@@ -541,19 +549,53 @@ def move_album_from_downloads(
             # Generate filename from tags (title and tracknum from tags, not filename)
             # If tags are missing, filename will use fallback values (from path/filename parsing)
             filename = format_track_filename(tags_to_use, ext)
-            if use_disc_subdirs:
-                _, _disc_num, disc_title = parse_album_disc((tags_to_use.get("album") or "").strip())
-                disc_num = tags_to_use["discnum"]
+            album_raw = (tags_to_use.get("album") or "").strip()
+            dt_raw = tags_to_use.get("disctotal")
+            try:
+                disctotal_i = int(dt_raw) if dt_raw is not None else 0
+            except (TypeError, ValueError):
+                disctotal_i = 0
+            tag_says_multi = disctotal_i >= 2
+            vol_title, _disc_bracket, _dt_layout = parse_album_layout_from_title(
+                album_raw
+            )
+
+            def _disc_label(dn: int, disc_title: Optional[str]) -> str:
                 if disc_title:
-                    disc_label = f"CD{disc_num} - {sanitize_filename_component(disc_title)}"
+                    return f"CD{dn} - {sanitize_filename_component(disc_title)}"
+                return f"CD{dn}"
+
+            dest_parent = album_dir
+            if vol_title is not None and tag_says_multi:
+                try:
+                    disc_num = int(tags_to_use.get("discnum", 1))
+                except (TypeError, ValueError):
+                    disc_num = 1
+                _, _pdn, disc_title = parse_album_disc(album_raw)
+                disc_label = _disc_label(disc_num, disc_title)
+                dest_parent = album_dir / f"VOL{vol_title}" / disc_label
+            elif vol_title is not None:
+                dest_parent = album_dir / f"VOL{vol_title}"
+            elif tag_says_multi:
+                _, _pdn, disc_title = parse_album_disc(album_raw)
+                try:
+                    disc_num = int(tags_to_use.get("discnum", 1))
+                except (TypeError, ValueError):
+                    disc_num = 1
+                disc_label = _disc_label(disc_num, disc_title)
+                dest_parent = album_dir / disc_label
+            elif multi_from_title:
+                _, dn_title, disc_title = parse_album_disc(album_raw)
+                if dn_title is not None:
+                    dest_parent = album_dir / _disc_label(dn_title, disc_title)
                 else:
-                    disc_label = f"CD{disc_num}"
-                disc_dir = album_dir / disc_label
-                if not dry_run:
-                    disc_dir.mkdir(exist_ok=True)
-                dest = disc_dir / filename
+                    dest_parent = album_dir
             else:
-                dest = album_dir / filename
+                dest_parent = album_dir
+
+            if dest_parent != album_dir and not dry_run:
+                dest_parent.mkdir(parents=True, exist_ok=True)
+            dest = dest_parent / filename
 
             # Check if destination exists - compare frequency first, then file size
             # Handles partial/corrupted files and frequency upgrades
@@ -1463,14 +1505,12 @@ def match_root_artwork_to_existing_albums(dry_run: bool = False) -> None:
         albums_to_match = []
         for album_dir in album_dirs:
             try:
+                from logging_utils import library_album_dir_from_abs
+
+                album_dir = library_album_dir_from_abs(album_dir)
                 rel = album_dir.relative_to(MUSIC_ROOT)
                 parts = list(rel.parts)
-                
-                # Skip CD subdirectories
-                if parts and parts[-1].upper().startswith("CD") and len(parts) >= 2:
-                    parts = parts[:-1]
-                    album_dir = album_dir.parent
-                
+
                 if len(parts) >= 2:
                     artist = parts[0]
                     album_folder = parts[1]

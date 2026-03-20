@@ -9,10 +9,11 @@ import os
 import platform
 import subprocess
 import sys
+import re
 from pathlib import Path
 from typing import Dict, List, Optional
 
-from config import STRUCTURED_SUMMARY_LOG_FILE, SYSTEM
+from config import MUSIC_ROOT, STRUCTURED_SUMMARY_LOG_FILE, SYSTEM
 
 
 def __getattr__(name: str):
@@ -144,6 +145,37 @@ def _strip_leading_artist(album: str, artist: str) -> str:
     return album
 
 
+def strip_library_album_vol_cd_suffix_parts(parts: List[str]) -> List[str]:
+    """
+    Drop trailing VOLn / CDn segments so Artist/(Year) Album remains.
+    """
+    out = list(parts)
+    while len(out) >= 3:
+        tail = out[-1]
+        if re.match(r"^CD\d+", tail, re.IGNORECASE) or re.match(
+            r"^VOL\d+", tail, re.IGNORECASE
+        ):
+            out = out[:-1]
+        else:
+            break
+    return out
+
+
+def library_album_dir_from_abs(path: Path) -> Path:
+    """
+    Resolve a path under MUSIC_ROOT to the album folder, stripping VOLn/CDn
+    when ``path`` points inside a multi-volume or multi-disc layout.
+    """
+    try:
+        rel = path.resolve().relative_to(MUSIC_ROOT.resolve())
+    except ValueError:
+        return path
+    if len(rel.parts) < 2:
+        return path
+    stripped = strip_library_album_vol_cd_suffix_parts(list(rel.parts))
+    return MUSIC_ROOT.joinpath(*stripped)
+
+
 def album_label_from_dir(album_dir: Path) -> str:
     """
     Build a label from the directory under MUSIC_ROOT, e.g.
@@ -152,19 +184,14 @@ def album_label_from_dir(album_dir: Path) -> str:
     Strips disc patterns from album name (e.g. [Disc 1]) so path matches tag-derived labels.
     Falls back to path if odd.
     """
-    from config import MUSIC_ROOT
     from tag_operations import normalize_album_name
-    import re
 
     try:
         rel = album_dir.relative_to(MUSIC_ROOT)
     except ValueError:
         return album_dir.as_posix()
 
-    # Collapse CD1/CD2 etc to album folder
-    parts = list(rel.parts)
-    if parts and parts[-1].upper().startswith("CD") and len(parts) >= 2:
-        parts = parts[:-1]
+    parts = strip_library_album_vol_cd_suffix_parts(list(rel.parts))
 
     if len(parts) >= 2:
         artist = parts[0]

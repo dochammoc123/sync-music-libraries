@@ -100,9 +100,11 @@ def fetch_art_from_web(artist: str, album: str, cover_path: Path, dry_run: bool 
         # When we have CD subdirs, fetch more candidates and prefer a release with matching disc count
         num_discs_wanted: Optional[int] = None
         if album_dir and album_dir.exists():
-            n = sum(1 for s in album_dir.iterdir() if s.is_dir() and re.match(r"^CD\d+", s.name, re.IGNORECASE))
-            if n > 0:
-                num_discs_wanted = n
+            from tag_operations import album_layout_leaf_directories
+
+            leaves = album_layout_leaf_directories(album_dir)
+            if leaves:
+                num_discs_wanted = len(leaves)
 
         limit = 10 if num_discs_wanted else 1
         result = musicbrainzngs.search_releases(
@@ -115,11 +117,10 @@ def fetch_art_from_web(artist: str, album: str, cover_path: Path, dry_run: bool 
         # Build CD subdir map early so we can prefer a release with disc-specific CAA art
         cd_subdirs: Dict[int, Path] = {}
         if album_dir and album_dir.exists():
-            for subdir in album_dir.iterdir():
-                if subdir.is_dir():
-                    m = re.match(r"^CD(\d+)", subdir.name, re.IGNORECASE)
-                    if m:
-                        cd_subdirs[int(m.group(1))] = subdir
+            from tag_operations import album_layout_leaf_directories
+
+            for i, subdir in enumerate(album_layout_leaf_directories(album_dir), start=1):
+                cd_subdirs[i] = subdir
 
         mbid = releases[0]["id"]
         if num_discs_wanted and len(releases) > 1:
@@ -869,32 +870,91 @@ def ensure_cover_and_folder(
             source_for_subfolders = folder_path
 
         if source_for_subfolders:
+            from tag_operations import album_layout_leaf_directories
+
+            for subdir in album_layout_leaf_directories(album_dir):
+                subfolder_folder = subdir / "folder.jpg"
+                subfolder_cover = subdir / "cover.jpg"
+                if not subfolder_folder.exists():
+                    item_key = logmsg.begin_item(f"{subdir.name}/folder.jpg")
+                    logmsg.info(
+                        "Creating folder.jpg in {subdir}/ from album root",
+                        subdir=subdir.relative_to(album_dir).as_posix(),
+                    )
+                    logmsg.end_item(item_key)
+                    if not dry_run:
+                        try:
+                            shutil.copy2(source_for_subfolders, subfolder_folder)
+                        except Exception as e:
+                            if label:
+                                from structured_logging import logmsg
+                                logmsg.warn(
+                                    "Failed to create folder.jpg in {subdir}/: {error}",
+                                    subdir=subdir.relative_to(album_dir).as_posix(),
+                                    error=str(e),
+                                )
+                if not subfolder_cover.exists():
+                    item_key = logmsg.begin_item(f"{subdir.name}/cover.jpg")
+                    logmsg.info(
+                        "Creating cover.jpg in {subdir}/ from album root",
+                        subdir=subdir.relative_to(album_dir).as_posix(),
+                    )
+                    logmsg.end_item(item_key)
+                    if not dry_run:
+                        try:
+                            shutil.copy2(source_for_subfolders, subfolder_cover)
+                        except Exception as e:
+                            if label:
+                                from structured_logging import logmsg
+                                logmsg.warn(
+                                    "Failed to create cover.jpg in {subdir}/: {error}",
+                                    subdir=subdir.relative_to(album_dir).as_posix(),
+                                    error=str(e),
+                                )
+            # Nested VOLn/CDm: also place art on VOLn if it only contains CD subdirs
             for subdir in album_dir.iterdir():
-                if subdir.is_dir() and subdir.name.upper().startswith("CD"):
-                    subfolder_folder = subdir / "folder.jpg"
-                    subfolder_cover = subdir / "cover.jpg"
-                    if not subfolder_folder.exists():
-                        item_key = logmsg.begin_item(f"{subdir.name}/folder.jpg")
-                        logmsg.info("Creating folder.jpg in {subdir}/ from album root", subdir=subdir.name)
-                        logmsg.end_item(item_key)
-                        if not dry_run:
-                            try:
-                                shutil.copy2(source_for_subfolders, subfolder_folder)
-                            except Exception as e:
-                                if label:
-                                    from structured_logging import logmsg
-                                    logmsg.warn("Failed to create folder.jpg in {subdir}/: {error}", subdir=subdir.name, error=str(e))
-                    if not subfolder_cover.exists():
-                        item_key = logmsg.begin_item(f"{subdir.name}/cover.jpg")
-                        logmsg.info("Creating cover.jpg in {subdir}/ from album root", subdir=subdir.name)
-                        logmsg.end_item(item_key)
-                        if not dry_run:
-                            try:
-                                shutil.copy2(source_for_subfolders, subfolder_cover)
-                            except Exception as e:
-                                if label:
-                                    from structured_logging import logmsg
-                                    logmsg.warn("Failed to create cover.jpg in {subdir}/: {error}", subdir=subdir.name, error=str(e))
+                if not subdir.is_dir() or not re.match(
+                    r"^VOL\d+", subdir.name, re.IGNORECASE
+                ):
+                    continue
+                vol_folder = subdir / "folder.jpg"
+                vol_cover = subdir / "cover.jpg"
+                if not vol_folder.exists():
+                    item_key = logmsg.begin_item(f"{subdir.name}/folder.jpg")
+                    logmsg.info(
+                        "Creating folder.jpg in {subdir}/ from album root",
+                        subdir=subdir.name,
+                    )
+                    logmsg.end_item(item_key)
+                    if not dry_run:
+                        try:
+                            shutil.copy2(source_for_subfolders, vol_folder)
+                        except Exception as e:
+                            if label:
+                                from structured_logging import logmsg
+                                logmsg.warn(
+                                    "Failed to create folder.jpg in {subdir}/: {error}",
+                                    subdir=subdir.name,
+                                    error=str(e),
+                                )
+                if not vol_cover.exists():
+                    item_key = logmsg.begin_item(f"{subdir.name}/cover.jpg")
+                    logmsg.info(
+                        "Creating cover.jpg in {subdir}/ from album root",
+                        subdir=subdir.name,
+                    )
+                    logmsg.end_item(item_key)
+                    if not dry_run:
+                        try:
+                            shutil.copy2(source_for_subfolders, vol_cover)
+                        except Exception as e:
+                            if label:
+                                from structured_logging import logmsg
+                                logmsg.warn(
+                                    "Failed to create cover.jpg in {subdir}/: {error}",
+                                    subdir=subdir.name,
+                                    error=str(e),
+                                )
 
 
 def ensure_cover_and_folder_global(dry_run: bool = False) -> None:
@@ -1217,18 +1277,12 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
         current_dir = Path(dirpath)
         
-        # Determine the parent album directory (for multi-disc albums with CD1/CD2 subdirectories)
-        # Check if we're in a subdirectory (CD1, CD2, etc.)
+        # Album root: strip VOLn/CDn (same as logging_utils.album_label_from_dir)
         try:
-            rel = current_dir.relative_to(MUSIC_ROOT)
-            parts = list(rel.parts)
-            # If we're in a subdirectory (CD1, CD2, etc.), use parent as album directory
-            if len(parts) > 2 and (parts[-1].upper().startswith("CD") or len(parts) > 3):
-                parent_album_dir = current_dir.parent
-            else:
-                parent_album_dir = current_dir
+            from logging_utils import library_album_dir_from_abs
+
+            parent_album_dir = library_album_dir_from_abs(current_dir)
         except ValueError:
-            # Path is not under MUSIC_ROOT, use current directory
             parent_album_dir = current_dir
         
         # Check for cover.jpg in the parent album directory (not subdirectories)
