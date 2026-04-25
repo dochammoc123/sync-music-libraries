@@ -62,16 +62,31 @@ def get_tags_from_path(path: Path, downloads_root: Path) -> Dict[str, Any]:
         import re
         title = path.stem
         
-        # Try to extract track number from filename like "02 - " or "02."
-        tracknum = 0
-        track_match = re.match(r'^(\d+)\s*[-.]\s*', title)
-        if track_match:
+        # Try to extract disc + track from filename like "2-01 " (common for multi-disc rips)
+        discnum = 1
+        disc_track_match = re.match(r'^\s*(\d{1,2})\s*[-_]\s*(\d{1,2})\b', title)
+        if disc_track_match:
             try:
-                tracknum = int(track_match.group(1))
+                discnum = int(disc_track_match.group(1))
+            except ValueError:
+                discnum = 1
+            try:
+                tracknum = int(disc_track_match.group(2))
             except ValueError:
                 tracknum = 0
-            # Remove track number prefix
-            title = re.sub(r'^\d+\s*[-.]\s*', '', title).strip()
+            # Remove the disc-track prefix (keep any remaining separator / title text)
+            title = re.sub(r'^\s*\d{1,2}\s*[-_]\s*\d{1,2}\s*', '', title).strip()
+        else:
+            # Try to extract track number from filename like "02 - " or "02."
+            tracknum = 0
+            track_match = re.match(r'^(\d+)\s*[-.]\s*', title)
+            if track_match:
+                try:
+                    tracknum = int(track_match.group(1))
+                except ValueError:
+                    tracknum = 0
+                # Remove track number prefix
+                title = re.sub(r'^\d+\s*[-.]\s*', '', title).strip()
         
         # Try to remove artist prefix like "Lorde - " or "Artist - "
         # This handles cases like "02 - Lorde - 400 Lux" -> "400 Lux"
@@ -85,7 +100,7 @@ def get_tags_from_path(path: Path, downloads_root: Path) -> Dict[str, Any]:
             "album": album.strip(),
             "year": "",
             "tracknum": tracknum,
-            "discnum": 1,
+            "discnum": discnum,
             "title": title.strip(),
         }
     except Exception:
@@ -398,6 +413,24 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
             disctotal = int(discno.split("/")[1]) if "/" in discno else 0
         except (ValueError, IndexError):
             disctotal = 0
+
+        # Heuristic: many multi-disc MP3 rips are tagged DISCNUMBER=1/1 for every file,
+        # but filenames are prefixed like "2-01 Track Name". When that pattern matches
+        # and the parsed track number agrees with the tag track number, treat it as disc N.
+        # This is intentionally conservative to avoid "fixing" normal single-disc albums.
+        if discnum == 1 and (not disctotal or disctotal <= 1):
+            m = re.match(r'^\s*(\d{1,2})\s*[-_]\s*(\d{1,2})\b', path.stem)
+            if m:
+                try:
+                    disc_from_name = int(m.group(1))
+                except ValueError:
+                    disc_from_name = 1
+                try:
+                    track_from_name = int(m.group(2))
+                except ValueError:
+                    track_from_name = 0
+                if disc_from_name > 1 and track_from_name > 0 and tracknum == track_from_name:
+                    discnum = disc_from_name
 
         # Raw albumartist from file (may be missing); FLAC uses ALBUMARTIST, ID3 uses albumartist
         raw_albumartist = (_get("albumartist") or _get("ALBUMARTIST") or "").strip()

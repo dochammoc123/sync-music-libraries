@@ -6,7 +6,7 @@ import os
 import shutil
 import time
 from pathlib import Path
-from typing import Set, Tuple
+from typing import Optional, Set, Tuple
 
 from config import (
     AUDIO_EXT,
@@ -276,6 +276,33 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
         logmsg.verbose("Waiting {delay}s for network share to update before T8 sync", delay=_delay)
         time.sleep(_delay)
     
+    # Fingerprint for fast equality checks when mtimes are unreliable (clock skew / SMB rounding).
+    # When sizes match, compare a small sample from the beginning and end of the file.
+    # This avoids full-file checksums while eliminating "copy thrash" due to timestamp drift.
+    def file_fingerprint(path: Path, sample_bytes: int = 128 * 1024) -> Optional[str]:
+        """
+        Return a short hex digest fingerprint based on the first/last sample_bytes of the file.
+        Includes file size in the digest input so same head/tail with different size won't collide.
+        Returns None if the file can't be read.
+        """
+        try:
+            st = path.stat()
+            size = st.st_size
+            h = hashlib.blake2b(digest_size=16)
+            h.update(str(size).encode("utf-8"))
+            with path.open("rb") as f:
+                head = f.read(sample_bytes)
+                h.update(head)
+                if size > sample_bytes:
+                    # Read tail
+                    tail_len = min(sample_bytes, size)
+                    f.seek(-tail_len, os.SEEK_END)
+                    tail = f.read(tail_len)
+                    h.update(tail)
+            return h.hexdigest()
+        except Exception:
+            return None
+
     # Copy all files from ROON to T8 (exclude .thumbnails and similar - T8 manages its own)
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
         # Don't descend into excluded directories
@@ -324,8 +351,6 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
                         dst_stat = dst_file.stat()
                         src_size = src_stat.st_size
                         dst_size = dst_stat.st_size
-                        src_mtime = src_stat.st_mtime
-                        dst_mtime = dst_stat.st_mtime
                         
                         # Quick check: if sizes differ, files are definitely different
                         if src_size != dst_size:
@@ -359,17 +384,16 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
                                     # Files are different - copy
                                     should_copy = True
                             else:
-                                # Fast mode: compare mtimes (much faster)
-                                # If mtimes match (within 1 second tolerance for network filesystem rounding), likely same file
-                                # If source is newer, copy (file was updated)
-                                # If destination is newer, could be same file or different file with newer timestamp
-                                # For safety: only skip if sizes match AND mtimes are very close (within 1 second)
-                                mtime_diff = abs(src_mtime - dst_mtime)
-                                if mtime_diff <= 1.0:
-                                    # Sizes match and mtimes are very close - likely the same file
-                                    skip_reason = f"files appear identical (size: {src_size} bytes, mtime diff: {mtime_diff:.1f}s)"
+                                # Fast mode: fingerprint (ignores clock skew / SMB mtime rounding)
+                                src_fp = file_fingerprint(src_file)
+                                dst_fp = file_fingerprint(dst_file)
+                                if src_fp is None or dst_fp is None:
+                                    # Couldn't fingerprint - copy to be safe
+                                    logmsg.warn("Could not fingerprint %item%, will copy")
+                                    should_copy = True
+                                elif src_fp == dst_fp:
+                                    skip_reason = f"files appear identical (size: {src_size} bytes, fingerprint match)"
                                 else:
-                                    # Sizes match but mtimes differ significantly - copy to be safe
                                     should_copy = True
                     except OSError as e:
                         # If we can't stat/read files, try to copy anyway

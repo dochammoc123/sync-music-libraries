@@ -500,17 +500,43 @@ def move_album_from_downloads(
         items_sorted = sorted(items, key=lambda x: (x[1]["discnum"], x[1]["tracknum"]))
         # Per track: multi-disc from tags (disctotal >= 2) → CD{n} under album, optionally under
         # VOL{n} when the title includes Vol./Volume before [Disc n] (Lilith Fair-style).
-        # Title-only Vol. with 1/1 → VOL{n} (not CD). Multiple [Disc n] without tag multi → CD{n}.
+        # Title-only Vol. with 1/1 → VOL{n} (not CD) — single disc per volume, no need for CD1.
+        # When a volume later needs multiple discs, we nest under the existing VOL{n} directory
+        # (e.g. VOL2/CD1) which is a normal subfolder, not a name conflict with the folder VOL2.
+        # Multiple [Disc n] without tag multi → CD{n}.
         # "[Disc 1]" alone + 1/1 stays flat unless multi_from_title.
         from tag_operations import parse_album_disc, parse_album_layout_from_title
 
+        # Batch-level: do tags claim this is a multi-disc set (disctotal >= 2) for any file?
+        batch_tag_says_multi = False
+        for _src, t in items:
+            dt0 = t.get("disctotal")
+            try:
+                dt0_i = int(dt0) if dt0 is not None else 0
+            except (TypeError, ValueError):
+                dt0_i = 0
+            if dt0_i >= 2:
+                batch_tag_says_multi = True
+                break
+
         title_disc_nums = set()
+        batch_has_album_with_volume = False
         for _src, t in items:
             raw_a = (t.get("album") or "").strip()
             _b, dn, _dt = parse_album_disc(raw_a)
             if dn is not None:
                 title_disc_nums.add(dn)
+            v_any, _db_any, _dta_any = parse_album_layout_from_title(raw_a)
+            if v_any is not None:
+                batch_has_album_with_volume = True
         multi_from_title = len(title_disc_nums) > 1
+
+        # If this import mixes multi-disc tagging with explicit Volume tags on *some* tracks
+        # (Lilith Fair style), we want a consistent on-disk model:
+        #   VOL1/CD1, VOL1/CD2, ..., VOL2 (single disc), VOL3, ...
+        # The "first volume" tracks often won't say "Vol.1" in the title (only [Disc 1/2]).
+        # For those, force VOL1/... instead of CD* at the album root.
+        batch_wants_forced_root_vol = bool(batch_tag_says_multi and batch_has_album_with_volume)
         
         # Track which audio files were processed (moved, upgraded, or skipped)
         # These should be cleaned up from downloads
@@ -583,18 +609,28 @@ def move_album_from_downloads(
                 except (TypeError, ValueError):
                     disc_num = 1
                 disc_label = _disc_label(disc_num, disc_title)
-                dest_parent = album_dir / disc_label
+                if batch_wants_forced_root_vol and vol_title is None:
+                    # Multi-disc *and* multi-volume (some tracks name Vol.2/3, others only [Disc 1/2]):
+                    # keep everything under explicit VOL*; implicit first volume → VOL1/CDn.
+                    dest_parent = album_dir / "VOL1" / disc_label
+                else:
+                    dest_parent = album_dir / disc_label
             elif multi_from_title:
                 _, dn_title, disc_title = parse_album_disc(album_raw)
                 if dn_title is not None:
-                    dest_parent = album_dir / _disc_label(dn_title, disc_title)
+                    # Multi-disc implied by title ([Disc N]) but tags might be 1/1.
+                    # When the batch contains explicit Vol.2/Vol.3 titles AND multi-disc tags,
+                    # force the "implicit first volume" discs under VOL1/CD{n} instead of
+                    # creating root CD{n} alongside VOL*.
+                    if batch_wants_forced_root_vol and vol_title is None:
+                        dest_parent = album_dir / "VOL1" / _disc_label(dn_title, disc_title)
+                    else:
+                        dest_parent = album_dir / _disc_label(dn_title, disc_title)
                 else:
                     dest_parent = album_dir
             else:
                 dest_parent = album_dir
 
-            if dest_parent != album_dir and not dry_run:
-                dest_parent.mkdir(parents=True, exist_ok=True)
             dest = dest_parent / filename
 
             # Check if destination exists - compare frequency first, then file size
