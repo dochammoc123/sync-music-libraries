@@ -396,7 +396,9 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
         year = date[:4] if len(date) >= 4 and date[:4].isdigit() else ""
 
         trackno = _get("tracknumber") or _get("TRACKNUMBER") or "0"
-        discno = _get("discnumber") or _get("DISCNUMBER") or "1"
+        # IMPORTANT: keep raw disc tag separate from computed discnum default.
+        # Missing disc tag should remain "" so normalization can reason about blanks vs "1" vs "1/1".
+        discno_raw = _get("discnumber") or _get("DISCNUMBER") or ""
         title = _get("title") or path.stem
 
         try:
@@ -405,12 +407,12 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
             tracknum = 0
 
         try:
-            discnum = int(discno.split("/")[0])
+            discnum = int((discno_raw or "1").split("/")[0])
         except ValueError:
             discnum = 1
         # Total discs when tag is "1/2" or "2/2" (for folder layout: use CD1 even when only disc 1 present)
         try:
-            disctotal = int(discno.split("/")[1]) if "/" in discno else 0
+            disctotal = int(discno_raw.split("/")[1]) if "/" in discno_raw else 0
         except (ValueError, IndexError):
             disctotal = 0
 
@@ -442,6 +444,7 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
             "tracknum": tracknum,
             "discnum": discnum,
             "disctotal": disctotal if disctotal > 0 else None,
+            "discnumber_raw": (discno_raw or "").strip(),
             "title": title.strip(),
             "albumartist": raw_albumartist or None,
         }
@@ -819,6 +822,26 @@ def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_v
             {normalize_album_artist(t["artist"]) for (_p, t) in items if t.get("artist")}
         )
         if distinct_artists >= 3:
+            # Heuristic: some albums use many collaboration-style artist strings but still
+            # belong under one main artist (e.g. "Paul McCartney", "Paul McCartney & Wings",
+            # "Michael Jackson & Paul McCartney"). If one normalized artist name appears
+            # inside many raw artist strings, group under that artist instead of "Various Artists".
+            raw_artist_strings = [t["artist"] for (_p, t) in items if t.get("artist")]
+            total = len(raw_artist_strings)
+            if total > 0:
+                # Candidate pool: the distinct normalized artists we already saw.
+                candidates = sorted({normalize_album_artist(a) for a in raw_artist_strings if a})
+                best = None
+                best_hits = 0
+                for cand in candidates:
+                    cl = cand.lower()
+                    hits = sum(1 for ra in raw_artist_strings if cl and cl in (ra or "").lower())
+                    if hits > best_hits:
+                        best_hits = hits
+                        best = cand
+                # Require a strong majority to avoid true compilations.
+                if best and best_hits >= max(3, int(total * 0.60)):
+                    return (best, candidate_album)
             return ("Various Artists", candidate_album)
         total_tracks = len(rows)
         if distinct_artists == 2 and max_count < total_tracks * MAJORITY_ARTIST_MIN_RATIO:
@@ -1200,6 +1223,27 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
         else:
             effective_album_artist = None
         
+        # Disc tag: do NOT rewrite disc tags unless we have to.
+        #
+        # Why: `add_missing_tags_global()` often calls `write_tags_to_file()` just to fill albumartist.
+        # Those reads can carry odd/incorrect totals (e.g. "1/10") that we must not “spread” by rewriting.
+        #
+        # Policy:
+        # - If caller provides an explicit `discnumber` string, write it (this is our “fix totals” path).
+        # - Otherwise, only write a disc tag when discnum > 1 (so disc 2/3/etc still get tagged).
+        # - Never write disc 1’s total purely because `disctotal > 1` was observed during a read.
+        discnum = int(tags.get("discnum", 1) or 1)
+        disctotal_raw = tags.get("disctotal")
+        try:
+            disctotal = int(disctotal_raw) if disctotal_raw is not None else 0
+        except (TypeError, ValueError):
+            disctotal = 0
+        discnumber_present = "discnumber" in tags
+        discnumber_raw_val = tags.get("discnumber")
+        discnumber_str = (str(discnumber_raw_val).strip() if discnumber_raw_val is not None else "")
+        discnumber_clear = discnumber_present and discnumber_str == ""
+        discnumber_str = discnumber_str if discnumber_str else None
+
         # Album name: normalized so streamers index one multi-disc album (e.g. "Instrumental Magic" not "Instrumental Magic (Disc 1)")
         if NORMALIZE_ALBUM_IN_TAGS:
             tags = {**tags, "album": normalize_album_name(tags.get("album", "") or "")}
@@ -1216,8 +1260,11 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
                 if tags.get("year"):
                     audio["DATE"] = tags["year"]
                 audio["TRACKNUMBER"] = str(tags["tracknum"])
-                if tags.get("discnum", 1) > 1:
-                    audio["DISCNUMBER"] = str(tags["discnum"])
+                if discnumber_clear:
+                    if "DISCNUMBER" in audio:
+                        del audio["DISCNUMBER"]
+                elif discnumber_str or discnum > 1:
+                    audio["DISCNUMBER"] = discnumber_str or (f"{discnum}/{disctotal}" if disctotal > 1 else str(discnum))
                 if not dry_run:
                     audio.save()
                 return True
@@ -1241,8 +1288,12 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
                 if tags.get("year"):
                     audio["\xa9day"] = tags["year"]
                 audio["trkn"] = [(tags["tracknum"], 0)]
-                if tags.get("discnum", 1) > 1:
-                    audio["disk"] = [(tags["discnum"], 0)]
+                if discnumber_clear:
+                    if "disk" in audio:
+                        del audio["disk"]
+                elif discnumber_str or discnum > 1:
+                    # MP4 uses a tuple (discnum, disctotal). Use 0 when total unknown.
+                    audio["disk"] = [(discnum, disctotal if disctotal > 0 else 0)]
                 if not dry_run:
                     audio.save()
                 return True
@@ -1264,8 +1315,11 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
                 if tags.get("year"):
                     audio["date"] = tags["year"]
                 audio["tracknumber"] = str(tags["tracknum"])
-                if tags.get("discnum", 1) > 1:
-                    audio["discnumber"] = str(tags["discnum"])
+                if discnumber_clear:
+                    if "discnumber" in audio:
+                        del audio["discnumber"]
+                elif discnumber_str or discnum > 1:
+                    audio["discnumber"] = discnumber_str or (f"{discnum}/{disctotal}" if disctotal > 1 else str(discnum))
                 if not dry_run:
                     audio.save()
                 return True
@@ -1285,8 +1339,11 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
                 if tags.get("year"):
                     audio["date"] = tags["year"]
                 audio["tracknumber"] = str(tags["tracknum"])
-                if tags.get("discnum", 1) > 1:
-                    audio["discnumber"] = str(tags["discnum"])
+                if discnumber_clear:
+                    if "discnumber" in audio:
+                        del audio["discnumber"]
+                elif discnumber_str or discnum > 1:
+                    audio["discnumber"] = discnumber_str or (f"{discnum}/{disctotal}" if disctotal > 1 else str(discnum))
                 if not dry_run:
                     audio.save()
                 return True
@@ -1296,5 +1353,174 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
         return False
         
     except Exception as e:
+        return False
+
+
+def update_discnumber_only(path: Path, discnumber: str, dry_run: bool = False, backup_enabled: bool = True) -> bool:
+    """
+    Update ONLY the disc tag for a file (do not rewrite title/artist/album/date/track).
+    `discnumber` may be "", "1", "1/1", "2/2", etc. Empty string removes the tag.
+    """
+    try:
+        if backup_enabled and not dry_run:
+            from artwork import backup_audio_file_if_needed
+            backup_audio_file_if_needed(path, dry_run, backup_enabled)
+
+        discnumber = (discnumber or "").strip()
+        ext = path.suffix.lower()
+        detected_format = None
+        try:
+            audio_test = MutagenFile(str(path))
+            if audio_test is not None:
+                class_name = type(audio_test).__name__.lower()
+                if "flac" in class_name:
+                    detected_format = "flac"
+                elif "mp4" in class_name or "m4a" in class_name:
+                    detected_format = "mp4"
+                elif "mp3" in class_name or "id3" in class_name:
+                    detected_format = "mp3"
+        except Exception:
+            pass
+        use_format = detected_format or ext.lstrip(".")
+
+        # FLAC
+        if use_format == "flac" or ext == ".flac":
+            try:
+                audio = FLAC(str(path))
+                if discnumber:
+                    audio["DISCNUMBER"] = discnumber
+                else:
+                    if "DISCNUMBER" in audio:
+                        del audio["DISCNUMBER"]
+                if not dry_run:
+                    audio.save()
+                return True
+            except Exception:
+                pass
+
+        # MP4/M4A
+        if use_format in {"mp4", "m4a"} or ext in {".mp4", ".m4a", ".m4v"}:
+            try:
+                audio = MP4(str(path))
+                if discnumber:
+                    # Parse "n/total" or "n"
+                    parts = discnumber.split("/", 1)
+                    n = int(parts[0]) if parts[0].isdigit() else 1
+                    total = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+                    audio["disk"] = [(n, total)]
+                else:
+                    if "disk" in audio:
+                        del audio["disk"]
+                if not dry_run:
+                    audio.save()
+                return True
+            except Exception:
+                pass
+
+        # MP3
+        if use_format == "mp3" or ext == ".mp3":
+            try:
+                audio = EasyID3(str(path))
+                if discnumber:
+                    audio["discnumber"] = discnumber
+                else:
+                    if "discnumber" in audio:
+                        del audio["discnumber"]
+                if not dry_run:
+                    audio.save()
+                return True
+            except Exception:
+                pass
+
+        # Generic
+        try:
+            audio = MutagenFile(str(path), easy=True)
+            if audio is not None and audio.tags:
+                if discnumber:
+                    audio["discnumber"] = discnumber
+                else:
+                    if "discnumber" in audio:
+                        del audio["discnumber"]
+                if not dry_run:
+                    audio.save()
+                return True
+        except Exception:
+            pass
+        return False
+    except Exception:
+        return False
+
+
+def update_albumartist_only(path: Path, album_artist: str, dry_run: bool = False, backup_enabled: bool = True) -> bool:
+    """
+    Update ONLY albumartist for a file (do not rewrite title/artist/album/date/track/disc).
+    """
+    try:
+        if backup_enabled and not dry_run:
+            from artwork import backup_audio_file_if_needed
+            backup_audio_file_if_needed(path, dry_run, backup_enabled)
+
+        aa = (album_artist or "").strip()
+        if NORMALIZE_ARTIST_IN_TAGS:
+            aa = normalize_album_artist(aa)
+
+        ext = path.suffix.lower()
+        detected_format = None
+        try:
+            audio_test = MutagenFile(str(path))
+            if audio_test is not None:
+                class_name = type(audio_test).__name__.lower()
+                if "flac" in class_name:
+                    detected_format = "flac"
+                elif "mp4" in class_name or "m4a" in class_name:
+                    detected_format = "mp4"
+                elif "mp3" in class_name or "id3" in class_name:
+                    detected_format = "mp3"
+        except Exception:
+            pass
+        use_format = detected_format or ext.lstrip(".")
+
+        if use_format == "flac" or ext == ".flac":
+            try:
+                audio = FLAC(str(path))
+                audio["ALBUMARTIST"] = aa
+                if not dry_run:
+                    audio.save()
+                return True
+            except Exception:
+                pass
+
+        if use_format in {"mp4", "m4a"} or ext in {".mp4", ".m4a", ".m4v"}:
+            try:
+                audio = MP4(str(path))
+                audio["aART"] = [aa]
+                if not dry_run:
+                    audio.save()
+                return True
+            except Exception:
+                pass
+
+        if use_format == "mp3" or ext == ".mp3":
+            try:
+                audio = EasyID3(str(path))
+                audio["albumartist"] = aa
+                if not dry_run:
+                    audio.save()
+                return True
+            except Exception:
+                pass
+
+        # Generic
+        try:
+            audio = MutagenFile(str(path), easy=True)
+            if audio is not None and audio.tags:
+                audio["albumartist"] = aa
+                if not dry_run:
+                    audio.save()
+                return True
+        except Exception:
+            pass
+        return False
+    except Exception:
         return False
 

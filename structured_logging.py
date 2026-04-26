@@ -62,13 +62,48 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from logging_utils import album_label_from_tags, Colors, ColoredFormatter, PlainFormatter, ICONS
-from config import DETAIL_LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, SYSTEM, STRUCTURED_SUMMARY_LOG_FILE
+from config import DETAIL_LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, ROTATE_LOGS_ON_STARTUP, SYSTEM, STRUCTURED_SUMMARY_LOG_FILE
 
 # Detail log writer (separate from summary) - file handler only
 _detail_logger = logging.getLogger("library_sync_detail")
 
 # Console logger for structured logging (console output only)
 _console_logger = logging.getLogger("library_sync_console")
+
+_did_startup_rollover = False
+
+def _rotate_simple_file(path, backup_count: int) -> None:
+    """
+    Rotate a non-handler-managed log file:
+      file -> file.1, file.1 -> file.2, ... up to backup_count
+    """
+    try:
+        p = path
+        if not p.exists() or p.stat().st_size <= 0:
+            return
+        # Delete the oldest
+        oldest = p.with_name(p.name + f".{backup_count}")
+        if oldest.exists():
+            try:
+                oldest.unlink()
+            except Exception:
+                pass
+        # Shift down
+        for i in range(backup_count - 1, 0, -1):
+            src = p.with_name(p.name + f".{i}")
+            dst = p.with_name(p.name + f".{i+1}")
+            if src.exists():
+                try:
+                    src.replace(dst)
+                except Exception:
+                    pass
+        # Move current to .1
+        try:
+            p.replace(p.with_name(p.name + ".1"))
+        except Exception:
+            pass
+    except Exception:
+        pass
 
 
 def setup_detail_logging() -> None:
@@ -90,6 +125,12 @@ def setup_detail_logging() -> None:
     _detail_logger.setLevel(logging.INFO)
     _detail_logger.handlers.clear()  # Remove any existing handlers
     
+    global _did_startup_rollover
+    if ROTATE_LOGS_ON_STARTUP and not _did_startup_rollover:
+        # Rotate the previous structured summary so each run's summary is preserved.
+        # (The current run will overwrite STRUCTURED_SUMMARY_LOG_FILE at the end.)
+        if STRUCTURED_SUMMARY_LOG_FILE is not None:
+            _rotate_simple_file(STRUCTURED_SUMMARY_LOG_FILE, LOG_BACKUP_COUNT)
     if DETAIL_LOG_FILE is not None:
         DETAIL_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
         from logging.handlers import RotatingFileHandler
@@ -99,6 +140,16 @@ def setup_detail_logging() -> None:
             backupCount=LOG_BACKUP_COUNT,
             encoding="utf-8"
         )
+        # Optional: rotate at startup so each run starts with a clean detail log.
+        # Guard to ensure we only do this once per process.
+        if ROTATE_LOGS_ON_STARTUP and not _did_startup_rollover:
+            try:
+                if DETAIL_LOG_FILE.exists() and DETAIL_LOG_FILE.stat().st_size > 0:
+                    detail_fh.doRollover()
+            except Exception:
+                # If rollover fails (e.g. file locked by sync/viewer), keep writing to the current log.
+                pass
+            _did_startup_rollover = True
         detail_fh.setFormatter(PlainFormatter("[%(asctime)s] %(message)s", "%Y-%m-%d %H:%M:%S"))
         _detail_logger.addHandler(detail_fh)
         _detail_logger.propagate = False  # Don't propagate to root logger
@@ -1130,9 +1181,47 @@ class StructuredLogger:
                     if definition.header_key not in step_groups:
                         step_groups[definition.header_key] = []
                     step_groups[definition.header_key].append((definition, instance))
+
+                # If we have warnings tied to steps that had 0 items (no header instance),
+                # synthesize a 0-count instance so the step appears in-order (instead of
+                # being appended after later steps like "Step 9").
+                displayed_header_keys = set(step_groups.keys())
+                for warn_album_label, warn_list in self.album_warnings.items():
+                    if _album_key(warn_album_label) != normalized_key:
+                        continue
+                    for warn_header_key, _warn_level, _warning_msg in warn_list:
+                        if warn_header_key is None or warn_header_key in displayed_header_keys:
+                            continue
+                        definition = self.header_definitions.get(warn_header_key)
+                        if not definition:
+                            continue
+                        step_groups[warn_header_key] = [
+                            (
+                                definition,
+                                HeaderInstance(
+                                    header_key=warn_header_key,
+                                    album_label=display_label,
+                                    instance_key="__orphaned_warning__",
+                                    count=0,
+                                    always_show=True,
+                                    creation_order=10**9,
+                                ),
+                            )
+                        ]
+                        displayed_header_keys.add(warn_header_key)
+                    break
                 
-                # Sort steps by creation order of first instance in each step
-                sorted_steps = sorted(step_groups.items(), key=lambda x: min(inst[1].creation_order for inst in x[1]))
+                def _step_sort_key(entry):
+                    header_key, step_instances = entry
+                    definition = step_instances[0][0]
+                    import re
+                    m = re.search(r"\bStep\s*(\d+)\b", definition.message_template, re.IGNORECASE)
+                    step_num = int(m.group(1)) if m else 9999
+                    first_order = min(inst[1].creation_order for inst in step_instances)
+                    return (step_num, first_order)
+
+                # Sort steps by Step N first, then creation order
+                sorted_steps = sorted(step_groups.items(), key=_step_sort_key)
                 
                 # Write instances grouped by step (warnings appear under the step they occurred in)
                 for header_key, step_instances in sorted_steps:
@@ -1161,33 +1250,7 @@ class StructuredLogger:
                                     lines.append(f"    {prefix} {warning_msg}")
                             break
                 
-                # Add warnings for this album that are tied to a step we didn't display (e.g. Step 4 fixup when no instance)
-                displayed_header_keys = set(step_groups.keys())
-                orphaned: List[Tuple[str, str, str]] = []  # (warn_header_key, warn_level, warning_msg)
-                for warn_album_label, warn_list in self.album_warnings.items():
-                    if _album_key(warn_album_label) == normalized_key:
-                        for warn_header_key, warn_level, warning_msg in warn_list:
-                            if warn_header_key is not None and warn_header_key not in displayed_header_keys:
-                                orphaned.append((warn_header_key, warn_level, warning_msg))
-                        break
-                if orphaned:
-                    # Group by step and output a step header so warnings don't appear under Step 9
-                    by_step: Dict[str, List[Tuple[str, str]]] = {}  # header_key -> [(level, msg), ...]
-                    for warn_header_key, warn_level, warning_msg in orphaned:
-                        if warn_header_key not in by_step:
-                            by_step[warn_header_key] = []
-                        by_step[warn_header_key].append((warn_level, warning_msg))
-                    for warn_header_key in sorted(
-                        by_step.keys(),
-                        key=lambda k: self.header_definitions[k].message_template if k in self.header_definitions else k
-                    ):
-                        definition = self.header_definitions.get(warn_header_key)
-                        if definition:
-                            step_label = definition.message_template.replace(definition.count_placeholder, "0").strip()
-                            lines.append(f"    -- {step_label}")
-                        for warn_level, warning_msg in by_step[warn_header_key]:
-                            prefix = "[WARN]" if warn_level == "warn" else "[ERROR]"
-                            lines.append(f"    {prefix} {warning_msg}")
+                # Orphaned warnings are now synthesized into step_groups above so step ordering remains correct.
                 
                 # Add warnings with no step context at end of album
                 for warn_album_label, warn_list in self.album_warnings.items():

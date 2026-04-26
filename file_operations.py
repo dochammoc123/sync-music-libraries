@@ -467,7 +467,7 @@ def move_album_from_downloads(
     music_root: Path,
     dry_run: bool = False,
     extracted_archives: List[Path] = None
-) -> None:
+) -> Path:
     """Move an album from downloads to the music library, organizing files."""
     from artwork import find_predownloaded_art_source_for_album
     
@@ -1064,6 +1064,7 @@ def move_album_from_downloads(
         # Cover and folder.jpg are ensured globally in Step 4 (ensure_cover_and_folder_global)
     finally:
         logmsg.pop_header(art_key)
+    return album_dir
 
     # When we merged into an existing folder (or always), ensure folder name reflects
     # combined years from all tracks (CD1–10), not just the current batch
@@ -1205,8 +1206,8 @@ def extract_archives_in_downloads(dry_run: bool = False) -> List[Path]:
     return extracted_archives
 
 
-def process_downloads(dry_run: bool = False) -> None:
-    """Process all albums in the downloads directory."""
+def process_downloads(dry_run: bool = False) -> List[Path]:
+    """Process all albums in the downloads directory. Returns album dirs touched."""
     from tag_operations import find_audio_files, group_by_album
     from structured_logging import logmsg
     
@@ -1218,11 +1219,12 @@ def process_downloads(dry_run: bool = False) -> None:
     audio_files = list(find_audio_files(DOWNLOADS_DIR))
     if not audio_files:
         logmsg.info("No audio files found in downloads")
-        return
+        return []
 
     albums = group_by_album(audio_files, downloads_root=DOWNLOADS_DIR)
     logmsg.verbose("Found {album_count} album(s) in downloads", album_count=len(albums))
 
+    processed_album_dirs: List[Path] = []
     skipped_count = 0
     for idx, (album_key, items) in enumerate(albums.items(), start=1):
         artist, album = album_key
@@ -1256,7 +1258,8 @@ def process_downloads(dry_run: bool = False) -> None:
         # Process album: set album context and organize
         album_key_val = logmsg.begin_album(artist, album, year)
         try:
-            move_album_from_downloads(album_key, items, MUSIC_ROOT, dry_run, extracted_archives)
+            album_dir = move_album_from_downloads(album_key, items, MUSIC_ROOT, dry_run, extracted_archives)
+            processed_album_dirs.append(album_dir)
         finally:
             logmsg.end_album(album_key_val)
     
@@ -1270,6 +1273,7 @@ def process_downloads(dry_run: bool = False) -> None:
     
     # Note: Cleanup is deferred to Step 10 (Cleanup downloads folder)
     # This allows Step 7 (Ensure artist images) to access artist images in downloads before cleanup
+    return processed_album_dirs
 
 
 def cleanup_downloads_folder(dry_run: bool = False, header_key: str = None) -> None:

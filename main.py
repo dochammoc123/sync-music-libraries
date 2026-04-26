@@ -471,12 +471,14 @@ def main() -> None:
         run_state.clear()
         from structured_logging import logmsg
         header_key = logmsg.header("Step 1: Process new downloads", "%msg%")
-        process_downloads(DRY_RUN)
-        # Fill missing tags / albumartist — nested under Step 1 (push/pop, don't replace)
-        fill_tags_header = logmsg.push_header("Fill missing tags / albumartist", "%msg% (%count% items)")
-        add_missing_tags_global(DRY_RUN, backup_enabled=BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
-        logmsg.pop_header(fill_tags_header)
+        touched_album_dirs = process_downloads(DRY_RUN)
         logmsg.header(None, key=header_key)  # Close Step 1 header
+
+        # Only run tag/albumartist maintenance for albums we touched this run.
+        # This prevents "whole library" changes from showing up as if they came from Downloads.
+        header_key = logmsg.header("Step 1.5: Fill missing tags / albumartist", "%msg% (%count% items)", key=header_key)
+        add_missing_tags_global(DRY_RUN, backup_enabled=BACKUP_ORIGINAL_FLAC_BEFORE_EMBED, album_dirs=touched_album_dirs)
+        logmsg.header(None, key=header_key)
 
         header_key = logmsg.header("Step 2: Apply UPDATE overlay", "%msg% (%count% items)", key=header_key)
         updated_album_dirs, albums_with_new_cover = apply_updates_from_overlay(DRY_RUN)

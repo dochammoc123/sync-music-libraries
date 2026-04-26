@@ -61,7 +61,7 @@ else:
 # ===================== CONFIG =====================
 
 # Backup root for original FLACs before embedded-art changes
-BACKUP_ROOT = MUSIC_ROOT.parent / "_EmbeddedArtOriginal"
+BACKUP_ROOT = MUSIC_ROOT.parent / "_BackupB4Changes"
 
 # Update overlay root – where you drop patch files (cover.jpg, FLACs, etc.)
 UPDATE_ROOT = MUSIC_ROOT.parent / "_UpdateOverlay"
@@ -85,6 +85,10 @@ CLEAN_EMPTY_BACKUP_FOLDERS = True
 
 LOG_MAX_BYTES = 1_000_000    # ~1 MB per log file
 LOG_BACKUP_COUNT = 5         # keep up to 5 old logs
+
+# Rotate the detail log at script startup (new run → fresh detail log),
+# regardless of current size. Keeps up to LOG_BACKUP_COUNT backups.
+ROTATE_LOGS_ON_STARTUP = True
 
 WEB_ART_LOOKUP_TIMEOUT = 4       # seconds per fetch attempt
 WEB_ART_LOOKUP_RETRIES = 3       # number of attempts
