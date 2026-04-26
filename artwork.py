@@ -91,13 +91,32 @@ def init_musicbrainz() -> None:
     musicbrainzngs.set_useragent(MB_APP, MB_VER, MB_CONTACT)
 
 
-def export_embedded_art_to_cover(first_file: Path, cover_path: Path, dry_run: bool = False) -> bool:
+def _resolve_embed_read_path(live_audio_path: Path) -> Tuple[Path, str]:
     """
-    Export embedded artwork from the first audio file to cover.jpg.
-    Returns True if successful, False otherwise.
-    Supports FLAC, MP3, and MP4/M4A formats.
+    For missing-sidecar embedded export: read tags from the backup file at the same
+    path under BACKUP_ROOT when it exists; otherwise the live file under MUSIC_ROOT.
+    No rename heuristics: same relative path only.
+    Returns (path_to_read, "backup" | "live").
     """
-    mf = MutagenFile(str(first_file))
+    try:
+        rel = live_audio_path.relative_to(MUSIC_ROOT)
+    except ValueError:
+        return live_audio_path, "live"
+    backup_p = BACKUP_ROOT / rel
+    if backup_p.is_file():
+        return backup_p, "backup"
+    return live_audio_path, "live"
+
+
+def _export_embedded_art_from_file(
+    read_path: Path, cover_path: Path, dry_run: bool = False
+) -> bool:
+    """
+    Read embedded art from a single on-disk file and write to cover_path.
+    Supports FLAC, MP3, and MP4/M4A.
+    """
+    sp = str(read_path)
+    mf = MutagenFile(sp)
     if mf is None:
         return False
 
@@ -112,21 +131,18 @@ def export_embedded_art_to_cover(first_file: Path, cover_path: Path, dry_run: bo
     # MP4/M4A files
     if isinstance(mf, MP4):
         try:
-            # MP4 files store artwork in the 'covr' atom
-            if 'covr' in mf:
-                # Get the first cover image
-                cover = mf['covr'][0]
+            if "covr" in mf:
+                cover = mf["covr"][0]
                 if isinstance(cover, MP4Cover):
                     if not dry_run:
                         cover_path.write_bytes(cover)
                     return True
-        except Exception as e:
-            # Log but don't fail - try other methods
+        except Exception:
             pass
 
     # MP3 files (ID3/APIC)
     try:
-        id3 = ID3(str(first_file))
+        id3 = ID3(sp)
         pics = [f for f in id3.values() if isinstance(f, APIC)]
         if pics:
             if not dry_run:
@@ -136,6 +152,39 @@ def export_embedded_art_to_cover(first_file: Path, cover_path: Path, dry_run: bo
         pass
 
     return False
+
+
+def export_embedded_art_to_cover(
+    live_audio_path: Path, cover_path: Path, dry_run: bool = False
+) -> Optional[str]:
+    """
+    Export embedded artwork to cover.jpg using provenance: when a file exists under
+    BACKUP_ROOT with the same path as the live file (relative to MUSIC_ROOT), read
+    embedded art only from that backup copy. If the backup has no embed, we do not
+    fall back to the live file (so missing sidecar can be filled from web with normal
+    rules). If there is no backup, read from the live file.
+
+    Returns None on failure, or "backup" / "live" to indicate which file supplied the art.
+    """
+    from structured_logging import logmsg
+
+    read_path, prov = _resolve_embed_read_path(live_audio_path)
+    logmsg.verbose(
+        "Read embedded for sidecar from: {p} (provenance={prov}, live={live})",
+        p=read_path,
+        prov=prov,
+        live=live_audio_path.name,
+    )
+
+    if _export_embedded_art_from_file(read_path, cover_path, dry_run):
+        return prov
+
+    if prov == "backup":
+        logmsg.verbose(
+            "Backup mirror has no embedded art; not using live file for this sidecar (live may be newer). "
+            "Next: web or other normal rules if enabled."
+        )
+    return None
 
 
 def fetch_art_from_web(
@@ -1175,7 +1224,7 @@ def ensure_cover_and_folder(
     """
     Ensure cover.jpg and folder.jpg exist, using (in order):
       - Standard pre-downloaded art (if already copied),
-      - embedded art from first track,
+      - embedded art from the first track (read from BACKUP_ROOT mirror when that file exists, else live),
       - web lookup via MusicBrainz.
     """
     import shutil
@@ -1300,13 +1349,15 @@ def ensure_cover_and_folder(
                                 )
                                 logmsg.verbose("Falling back to embedded art after web failure...")
                                 first_file = album_files[0][0]
-                                if export_embedded_art_to_cover(first_file, cover_path, dry_run):
+                                emb_src = export_embedded_art_to_cover(first_file, cover_path, dry_run)
+                                if emb_src:
                                     item_key = logmsg.begin_item("cover.jpg")
                                     logmsg.info("cover.jpg created from embedded art.")
                                     logmsg.end_item(item_key)
                                     logmsg.info(
-                                        "Artwork source: embedded (from {file})",
+                                        "Artwork source: embedded (from {file}, read {origin})",
                                         file=first_file.name,
+                                        origin="from backup mirror" if emb_src == "backup" else "from live file",
                                     )
                                 else:
                                     logmsg.warn(
@@ -1317,13 +1368,15 @@ def ensure_cover_and_folder(
                         else:
                             logmsg.verbose("No cover.jpg; attempting to export embedded art...")
                             first_file = album_files[0][0]
-                            if export_embedded_art_to_cover(first_file, cover_path, dry_run):
+                            emb_src = export_embedded_art_to_cover(first_file, cover_path, dry_run)
+                            if emb_src:
                                 item_key = logmsg.begin_item("cover.jpg")
                                 logmsg.info("cover.jpg created from embedded art.")
                                 logmsg.end_item(item_key)
                                 logmsg.info(
-                                    "Artwork source: embedded (from {file})",
+                                    "Artwork source: embedded (from {file}, read {origin})",
                                     file=first_file.name,
+                                    origin="from backup mirror" if emb_src == "backup" else "from live file",
                                 )
                             else:
                                 logmsg.warn("Could not obtain artwork: no embedded art and web lookup disabled")
