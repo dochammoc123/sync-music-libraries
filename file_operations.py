@@ -538,6 +538,23 @@ def move_album_from_downloads(
         # For those, force VOL1/... instead of CD* at the album root.
         batch_wants_forced_root_vol = bool(batch_tag_says_multi and batch_has_album_with_volume)
         
+        # If Vol/Volume is present, only create VOLn/CDm when we actually see multiple discs
+        # within that volume (discnum > 1). Some releases use DISCNUMBER totals for the whole
+        # series (e.g. "Vol. 1" with disctotal=8) but are still single-disc per volume.
+        max_discnum_by_vol: Dict[int, int] = {}
+        for _src, t in items_sorted:
+            raw_a = (t.get("album") or "").strip()
+            v_any, _db_any, _dta_any = parse_album_layout_from_title(raw_a)
+            if v_any is None:
+                continue
+            try:
+                dn = int(t.get("discnum", 1) or 1)
+            except (TypeError, ValueError):
+                dn = 1
+            prev = max_discnum_by_vol.get(v_any, 1)
+            if dn > prev:
+                max_discnum_by_vol[v_any] = dn
+        
         # Track which audio files were processed (moved, upgraded, or skipped)
         # These should be cleaned up from downloads
         processed_audio_files = []
@@ -599,7 +616,11 @@ def move_album_from_downloads(
                     disc_num = 1
                 _, _pdn, disc_title = parse_album_disc(album_raw)
                 disc_label = _disc_label(disc_num, disc_title)
-                dest_parent = album_dir / f"VOL{vol_title}" / disc_label
+                if max_discnum_by_vol.get(vol_title, 1) > 1:
+                    dest_parent = album_dir / f"VOL{vol_title}" / disc_label
+                else:
+                    # Single disc in this volume: keep it flat under VOLn
+                    dest_parent = album_dir / f"VOL{vol_title}"
             elif vol_title is not None:
                 dest_parent = album_dir / f"VOL{vol_title}"
             elif tag_says_multi:

@@ -334,7 +334,13 @@ def sync_music_to_t8(dry_run: bool = False, use_checksums: bool = None) -> None:
                 continue
             src_file = src_dir / name
             dst_file = dst_dir / name
-            item_key = logmsg.begin_item(name)
+            # Use a relative path for the item id so album root cover.jpg and CD1/cover.jpg
+            # count separately in the summary (otherwise everything collapses to "cover.jpg").
+            try:
+                item_label = src_file.relative_to(MUSIC_ROOT).as_posix()
+            except Exception:
+                item_label = name
+            item_key = logmsg.begin_item(item_label)
             
             try:
                 # Check if file needs to be copied
