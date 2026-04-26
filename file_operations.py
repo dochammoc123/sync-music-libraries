@@ -125,8 +125,18 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                 remaining = []
             continue
 
+        # Build a stable set of "processed" source paths.
+        # Do NOT use Path.resolve() here: after a successful move the original src no longer exists,
+        # and resolve() can raise, causing us to miss matches and leave duplicates behind.
+        import os as _os
+        processed_audio = processed_audio_files or []
+        processed_audio_norm = {
+            _os.path.normcase(_os.path.abspath(str(p))) for p in processed_audio
+        }
+
         # Recursively process all files in root directory and subdirectories
         files_found_count = 0
+        unprocessed_audio_in_root: List[str] = []
         for f in d.rglob("*"):
             if not f.is_file():
                 continue
@@ -170,8 +180,7 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                     
                     if is_audio_file:
                         # Check if this audio file was already processed (moved, upgraded, or skipped)
-                        processed_audio = processed_audio_files or []
-                        if any(f.resolve() == audio.resolve() for audio in processed_audio):
+                        if _os.path.normcase(_os.path.abspath(str(f))) in processed_audio_norm:
                             should_remove = True
                             removal_reason = "processed audio file"
                             logmsg.info("Removing processed audio file in subdirectory: %item%")
@@ -228,9 +237,8 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                 # These files were matched to an album and processed, so they should be cleaned up
                 is_audio_file = suffix in AUDIO_EXT
                 if is_audio_file:
-                    processed_audio = processed_audio_files or []
                     # Check if this audio file was processed (moved, upgraded, or skipped)
-                    if any(f.resolve() == audio.resolve() for audio in processed_audio):
+                    if _os.path.normcase(_os.path.abspath(str(f))) in processed_audio_norm:
                         # This audio file was processed - remove it
                         logmsg.info("Removing processed audio file: %item%")
                         if not dry_run:
@@ -239,6 +247,12 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                             except Exception as e:
                                 logmsg.warn("Could not delete %item%: {error}", error=str(e))
                         continue
+                    # Not processed: keep it, but record so we can explain why the folder wasn't cleaned.
+                    try:
+                        if f.parent.resolve() == d.resolve():
+                            unprocessed_audio_in_root.append(f.name)
+                    except Exception:
+                        pass
 
                 # Remove files with cleanup extensions (incomplete downloads, leftover images, archives, etc.)
                 # ZIP files and other cleanup extensions should be removed consistently
@@ -274,6 +288,21 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                 logmsg.verbose("Skipping file in root album directory (not processed): %item%")
             finally:
                 logmsg.end_item(item_key)
+
+        if unprocessed_audio_in_root:
+            # High-signal warning: the user expects the download folder to disappear, but it can't
+            # because we intentionally won't delete audio that wasn't actually processed.
+            shown = ", ".join(unprocessed_audio_in_root[:5]) + ("..." if len(unprocessed_audio_in_root) > 5 else "")
+            try:
+                rel_dir = d.relative_to(DOWNLOADS_DIR).as_posix()
+            except Exception:
+                rel_dir = str(d)
+            logmsg.warn(
+                "Downloads cleanup: {dir} not removed because {n} unprocessed audio file(s) remain in the folder (e.g. {files}). This usually means the track's tags/path didn't match the album grouping, or the file was locked during move.",
+                dir=rel_dir,
+                n=len(unprocessed_audio_in_root),
+                files=shown,
+            )
 
         # Remove empty subdirectories first (deepest first)
         # Use rglob to find all subdirectories recursively, then sort by depth (deepest first)
@@ -315,7 +344,13 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                         # Directory still has contents - log for debugging
                         logmsg.verbose("Skipping non-empty folder: {folder} (contents: {count} items)", folder=subdir.name, count=len(contents))
                 except (OSError, PermissionError, FileNotFoundError) as e:
-                    logmsg.verbose("Could not access folder {folder}: {error}", folder=subdir.name, error=str(e))
+                    # This is often a Windows handle/permissions issue (Explorer, AV scan, etc.).
+                    # Make it visible in summary so it's not mistaken for "cleanup didn't run".
+                    try:
+                        rel_subdir = subdir.relative_to(DOWNLOADS_DIR).as_posix()
+                    except Exception:
+                        rel_subdir = str(subdir)
+                    logmsg.warn("Could not remove/inspect download folder {folder}: {error}", folder=rel_subdir, error=str(e))
                     pass  # Skip if we can't access it
         except (OSError, PermissionError) as e:
             logmsg.verbose("Error during folder cleanup: {error}", error=str(e))
@@ -863,10 +898,27 @@ def move_album_from_downloads(
                     predownloaded_folder = folder_candidate
                     break
 
-        # Always check for artwork, even if cover.jpg exists (to upgrade if new art is larger)
-        # This ensures we find pattern-matched artwork like "pure-heroine-lorde.jpg"
+        # Always check for artwork, even if cover.jpg exists (to upgrade if new art is larger).
+        #
+        # Prefer putting artwork in the "primary" leaf when this album folder is only a container
+        # for a single VOLn (e.g. "Album Volume 2" imports into Artist/Album/VOL2/ ...). This keeps
+        # the container root empty and avoids later web lookups selecting the wrong cover.
         cover_dest = album_dir / "cover.jpg"
         folder_dest = album_dir / "folder.jpg"
+        try:
+            from tag_operations import album_layout_leaf_directories
+
+            leaves = album_layout_leaf_directories(album_dir)
+            has_root_audio = any(p.parent == album_dir for (p, _t) in dest_items)
+            if (
+                not has_root_audio
+                and len(leaves) == 1
+                and leaves[0].name.upper().startswith("VOL")
+            ):
+                cover_dest = leaves[0] / "cover.jpg"
+                folder_dest = leaves[0] / "folder.jpg"
+        except Exception:
+            pass
         
         # ALWAYS check for pattern-matched art, even if cover.jpg exists
         # This handles cases where pattern-matched art is in downloads root and might be larger
@@ -1402,6 +1454,50 @@ def cleanup_downloads_folder(dry_run: bool = False, header_key: str = None) -> N
         finally:
             logmsg.pop_header(cleanup_artist_folders_key)
 
+        # Final pass: if any audio is still under Downloads, warn (covers flat layouts like
+        # "Downloads\Music\Album" where the 2-level album-folder heuristic never triggers).
+        remaining_key = logmsg.push_header(
+            "[INFO] Checking for remaining audio in downloads", "%msg%", "CLEANUP"
+        )
+        try:
+            _warn_if_audio_still_in_downloads(dry_run)
+        finally:
+            logmsg.pop_header(remaining_key)
+
+
+def _warn_if_audio_still_in_downloads(dry_run: bool) -> None:
+    """
+    If audio files remain anywhere under DOWNLOADS_DIR after cleanup attempts, log a single warning
+    with a few example paths. This is intentionally broad (covers non-standard folder layouts and
+    duplicate tracks left behind by SKIP/upgrade heuristics).
+    """
+    from structured_logging import logmsg
+    if dry_run:
+        return
+    if not DOWNLOADS_DIR.exists():
+        return
+
+    remaining: list[str] = []
+    for f in DOWNLOADS_DIR.rglob("*"):
+        if not f.is_file():
+            continue
+        if f.suffix.lower() in AUDIO_EXT:
+            try:
+                remaining.append(f.relative_to(DOWNLOADS_DIR).as_posix())
+            except Exception:
+                remaining.append(f.name)
+        if len(remaining) >= 25:
+            break
+    if not remaining:
+        logmsg.verbose("No audio files remain under downloads")
+        return
+    sample = ", ".join(remaining[:5]) + (" ..." if len(remaining) > 5 else "")
+    logmsg.warn(
+        "Downloads still contains audio file(s) after processing ({n} seen; e.g. {sample}). Folders will remain until these are removed/moved. Common causes: duplicate track skipped (library already has a larger copy), or files couldn't be grouped/moved on this run.",
+        n=len(remaining),
+        sample=sample,
+    )
+
 
 def _process_cleanup_folder(folder_path: Path, downloads_dir: Path, music_root: Path, dry_run: bool, is_album_folder: bool) -> None:
     """
@@ -1496,6 +1592,26 @@ def _process_cleanup_folder(folder_path: Path, downloads_dir: Path, music_root: 
                 except Exception as e:
                     logmsg.warn("Could not remove folder %item%: {error}", error=str(e))
             logmsg.end_item(item_key)
+        else:
+            # If this is an album folder and it still contains audio, warn so it's obvious
+            # why the album didn't get removed from Downloads.
+            if is_album_folder:
+                try:
+                    from config import AUDIO_EXT
+                    audio_left = [p.name for p in items if p.is_file() and p.suffix.lower() in AUDIO_EXT]
+                except Exception:
+                    audio_left = []
+                if audio_left:
+                    try:
+                        relp = folder_path.relative_to(downloads_dir).as_posix()
+                    except Exception:
+                        relp = str(folder_path)
+                    shown = ", ".join(audio_left[:5]) + ("..." if len(audio_left) > 5 else "")
+                    logmsg.warn(
+                        "Downloads cleanup: keeping {folder} because audio files remain (e.g. {files}). This means they were not moved/processed.",
+                        folder=relp,
+                        files=shown,
+                    )
     except (OSError, PermissionError) as e:
         logmsg.verbose("Skipping folder {folder} due to error: {error}", folder=str(folder_path.relative_to(downloads_dir)), error=str(e))
     finally:

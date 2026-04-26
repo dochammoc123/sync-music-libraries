@@ -1,0 +1,25 @@
+#!/bin/sh
+# Opt-in: enable with:
+#   git config core.hooksPath githooks
+#
+# Updates last_commit timestamp in build_info.txt (semver is manual).
+# Optional: python tools/bump_build_info.py --bump-patch
+# Disable with: BUMP_BUILD_INFO_ON_COMMIT=0
+
+set -eu
+
+ROOT="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+if [ -z "$ROOT" ]; then
+  exit 0
+fi
+
+cd "$ROOT"
+
+if [ "${BUMP_BUILD_INFO_ON_COMMIT:-1}" = "0" ] || [ "${BUMP_BUILD_INFO_ON_COMMIT:-1}" = "false" ]; then
+  exit 0
+fi
+
+python "tools/bump_build_info.py"
+git add build_info.txt
+
+exit 0

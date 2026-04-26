@@ -59,10 +59,11 @@ import logging
 import logging.handlers
 import uuid
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from logging_utils import album_label_from_tags, Colors, ColoredFormatter, PlainFormatter, ICONS
-from config import DETAIL_LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, ROTATE_LOGS_ON_STARTUP, SYSTEM, STRUCTURED_SUMMARY_LOG_FILE
+from config import DETAIL_LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, ROTATE_LOGS_ON_STARTUP, SYSTEM, STRUCTURED_SUMMARY_LOG_FILE, build_info_log_lines
 
 # Detail log writer (separate from summary) - file handler only
 _detail_logger = logging.getLogger("library_sync_detail")
@@ -106,6 +107,36 @@ def _rotate_simple_file(path, backup_count: int) -> None:
         pass
 
 
+def _format_script_runtime_line(run_start: Optional[datetime], end: datetime) -> str:
+    """
+    One summary line for total wall time from run start to end (e.g. when the summary is written).
+    Uses '>' prefix so it matches other meta lines and console styling.
+    """
+    if run_start is None:
+        return "> Script runtime: (n/a)"
+    a = run_start.replace(tzinfo=None) if run_start.tzinfo else run_start
+    b = end.replace(tzinfo=None) if end.tzinfo else end
+    total = (b - a).total_seconds()
+    if total < 0:
+        total = 0.0
+    if total < 0.01:
+        text = "<0.01s"
+    elif total < 1.0:
+        text = f"{int(total * 1000)}ms" if total < 0.1 else f"{total:.1f}s"
+    else:
+        secs = int(total)
+        h, rem = divmod(secs, 3600)
+        m, s = divmod(rem, 60)
+        parts: List[str] = []
+        if h:
+            parts.append(f"{h}h")
+        if m or h:
+            parts.append(f"{m}m")
+        parts.append(f"{s}s")
+        text = " ".join(parts)
+    return f"> Script runtime: {text}"
+
+
 def setup_detail_logging() -> None:
     """
     Configure the new structured logging API:
@@ -133,6 +164,18 @@ def setup_detail_logging() -> None:
             _rotate_simple_file(STRUCTURED_SUMMARY_LOG_FILE, LOG_BACKUP_COUNT)
     if DETAIL_LOG_FILE is not None:
         DETAIL_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+        # Ensure files exist immediately so users can find them on disk even
+        # before the first log line is emitted or the summary is written.
+        try:
+            DETAIL_LOG_FILE.touch(exist_ok=True)
+        except Exception:
+            pass
+        if STRUCTURED_SUMMARY_LOG_FILE is not None:
+            try:
+                STRUCTURED_SUMMARY_LOG_FILE.parent.mkdir(parents=True, exist_ok=True)
+                STRUCTURED_SUMMARY_LOG_FILE.touch(exist_ok=True)
+            except Exception:
+                pass
         from logging.handlers import RotatingFileHandler
         detail_fh = RotatingFileHandler(
             DETAIL_LOG_FILE,
@@ -269,10 +312,13 @@ class StructuredLogger:
         # Cached counts (updated whenever warnings/errors are added)
         self._count_errors: int = 0
         self._count_warnings: int = 0
-        
-        # Cached counts (updated whenever warnings/errors are added)
-        self._count_errors: int = 0
-        self._count_warnings: int = 0
+
+        # Run start time (captured in main.py so summary header can match the detail "New run started" line)
+        self.run_start: Optional[datetime] = None
+
+    def set_run_start(self, when: datetime) -> None:
+        """Set the canonical run start timestamp (should match the detail log's first timestamp)."""
+        self.run_start = when
     
     def _get_or_create_instance(self, header_key: str, album_label: Optional[str]) -> HeaderInstance:
         """Get or create a header instance for the given header_key and album_label."""
@@ -1104,8 +1150,6 @@ class StructuredLogger:
         Organizes all header instances by album (or global), sorts them, and writes to file + console.
         Console output is colored on-the-fly.
         """
-        from datetime import datetime
-        
         if STRUCTURED_SUMMARY_LOG_FILE is None:
             return
         
@@ -1120,7 +1164,16 @@ class StructuredLogger:
 
         def _album_key(label: str) -> str:
             import re
-            from tag_operations import normalize_unicode_canonical
+            from tag_operations import normalize_unicode_canonical, normalize_album_artist
+            # Normalize the leading artist bucket so "Unknown - …" and "Various Artists - …"
+            # don't appear as two separate albums in the summary.
+            try:
+                if " - " in label:
+                    lead, rest = label.split(" - ", 1)
+                    lead_norm = normalize_album_artist(lead)
+                    label = f"{lead_norm} - {rest}"
+            except Exception:
+                pass
             # Strip trailing " (YYYY)", " (YYYY - YYYY)", or " (YYYY, YYYY, YYYY)" so same album merges
             stripped = re.sub(r"\s*\(\d{4}(?:\s*[,\-]\s*\d{4})*\)\s*$", "", label).strip()
             # Normalize underscore to colon so path-derived labels (sanitized : -> _) match tag-derived labels
@@ -1133,9 +1186,19 @@ class StructuredLogger:
             
             definition = self.header_definitions[header_key]
             if album_label:
-                key = _album_key(album_label)
+                # Also normalize the display label's artist bucket so "Unknown" doesn't show up.
+                display_album_label = album_label
+                try:
+                    from tag_operations import normalize_album_artist
+                    if " - " in display_album_label:
+                        lead, rest = display_album_label.split(" - ", 1)
+                        lead_norm = normalize_album_artist(lead)
+                        display_album_label = f"{lead_norm} - {rest}"
+                except Exception:
+                    pass
+                key = _album_key(display_album_label)
                 if key not in album_groups:
-                    album_groups[key] = (album_label, [])  # Keep first-seen label for display
+                    album_groups[key] = (display_album_label, [])  # Keep first-seen label for display
                 album_groups[key][1].append((definition, instance))
             else:
                 # Include all global headers (including nested ones - they'll be sorted by level)
@@ -1153,7 +1216,15 @@ class StructuredLogger:
         
         # Build summary lines
         lines: List[str] = []
-        lines.append(f"Library sync summary - {datetime.now():%Y-%m-%d %H:%M:%S}")
+        summary_ts = self.run_start or datetime.now()
+        lines.append(f"Library sync summary - {summary_ts:%Y-%m-%d %H:%M:%S}")
+        try:
+            for bi_line in build_info_log_lines():
+                lines.append(bi_line)
+        except Exception:
+            pass
+        if self.run_start is not None:
+            lines.append(_format_script_runtime_line(self.run_start, datetime.now()))
         lines.append("")
         
         # Write informational global headers first (if any)
@@ -1350,6 +1421,11 @@ class StructuredLogger:
                 continue
             
             line_stripped = line.lstrip(" \t")
+
+            # Preformatted summary bullets (e.g. build_info lines) already include the prompt chevron
+            if line_stripped.startswith(">"):
+                _console_logger.info(f"{Colors.CYAN}{line_stripped}{Colors.RESET}")
+                continue
             
             # Apply colors and icons based on format
             if line_stripped.startswith("[ERROR]"):

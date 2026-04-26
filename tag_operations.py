@@ -554,6 +554,27 @@ GENERIC_COMPILATION_ARTISTS = {
     "compilations",
 }
 
+UNKNOWN_ARTIST_TOKENS = {
+    "",
+    "unknown",
+    "unkown",  # common typo
+    "unknown artist",
+    "unknown album artist",
+    "various",
+    "va",
+    "n/a",
+    "na",
+}
+
+
+def is_unknown_or_bucket_artist(s: str) -> bool:
+    v = (s or "").strip().lower()
+    if v in UNKNOWN_ARTIST_TOKENS:
+        return True
+    if v in GENERIC_COMPILATION_ARTISTS:
+        return True
+    return False
+
 
 def normalize_album_artist(artist: str) -> str:
     """
@@ -564,6 +585,8 @@ def normalize_album_artist(artist: str) -> str:
       are grouped under one folder.
     """
     a = (artist or "").strip()
+    if is_unknown_or_bucket_artist(a):
+        return "Various Artists" if a.strip() else ""
     if a.lower() in GENERIC_COMPILATION_ARTISTS:
         return "Various Artists"
     return normalize_unicode_canonical(a)
@@ -796,7 +819,12 @@ def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_v
     rows: List[Tuple[str, str]] = []
     for _p, t in items:
         if t.get("artist") and t.get("album"):
-            rows.append((t["artist"], normalize_album_name(t["album"])))
+            # Prefer albumartist when it's present and meaningful; ignore placeholders like
+            # "Unknown"/"Unkown"/"Various"/"VA" so we can infer from track artists.
+            aa = (t.get("albumartist") or "").strip()
+            ar = (t.get("artist") or "").strip()
+            use_artist = aa if (aa and not is_unknown_or_bucket_artist(aa)) else ar
+            rows.append((use_artist, normalize_album_name(t["album"])))
     
     if rows:
         bucket_count: Dict[Tuple[str, str], int] = defaultdict(int)

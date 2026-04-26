@@ -5,12 +5,143 @@ Contains all paths, constants, and configuration settings.
 import os
 import platform
 import shutil
+import sys
+from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict, List
 
 # ===================== ENVIRONMENT CONFIG =====================
 
 SYSTEM = platform.system()  # "Windows", "Darwin", "Linux", etc.
+
+_MODULE_DIR = Path(__file__).resolve().parent
+_BUILD_INFO_FILE = _MODULE_DIR / "build_info.txt"
+
+# Optional "time anchor" for human-readable relative times (e.g. "3 min ago") in logs/summary.
+# Set once at run start via set_runtime_time_anchor() from main.py.
+_TIME_ANCHOR: Optional[datetime] = None
+
+
+def set_runtime_time_anchor(when: datetime) -> None:
+    global _TIME_ANCHOR
+    _TIME_ANCHOR = when
+
+
+def runtime_time_anchor() -> Optional[datetime]:
+    return _TIME_ANCHOR
+
+def read_build_info() -> Dict[str, str]:
+    """
+    Read `build_info.txt` next to this module, written by `deploy_to_icloud.bat` on deploy.
+    """
+    out: Dict[str, str] = {
+        "version": "0.0.0-dev",
+        "last_built": "",
+        "last_commit": "",
+    }
+    try:
+        if not _BUILD_INFO_FILE.exists():
+            return out
+        for raw in _BUILD_INFO_FILE.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            if "=" in line:
+                k, v = line.split("=", 1)
+                k = k.strip().lower()
+                v = v.strip()
+                if k in out:
+                    out[k] = v
+    except Exception:
+        return out
+    return out
+
+
+def _parse_iso_local(ts: str) -> Optional[datetime]:
+    s = (ts or "").strip()
+    if not s:
+        return None
+    # Python's fromisoformat is picky; normalize common "Z" suffix.
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    try:
+        dt = datetime.fromisoformat(s)
+    except Exception:
+        return None
+    if dt.tzinfo is None:
+        # Assume local if timezone missing
+        return dt
+    return dt.astimezone()
+
+
+def _format_relative_ago(when: datetime) -> str:
+    anchor = _TIME_ANCHOR
+    if anchor is None:
+        now = datetime.now(when.tzinfo) if when.tzinfo else datetime.now()
+    else:
+        # If the event is timezone-aware, align anchor to the same tzinfo; else compare naive<->naive
+        if when.tzinfo is not None and anchor.tzinfo is None:
+            now = anchor.replace(tzinfo=when.tzinfo)
+        elif when.tzinfo is None and anchor.tzinfo is not None:
+            now = anchor.replace(tzinfo=None)
+        else:
+            now = anchor
+    # Compare in the same "awareness" as best-effort: if one is naive, make both naive
+    a = when.replace(tzinfo=None) if when.tzinfo else when
+    b = now.replace(tzinfo=None) if now.tzinfo else now
+    delta = b - a
+    secs = int(delta.total_seconds())
+    # If anchor is slightly before the event (clock skew) keep output sane.
+    if secs < 0:
+        secs = 0
+    if secs < 5:
+        return "just now"
+    if secs < 60:
+        return f"{secs}s ago"
+    mins = secs // 60
+    if mins < 60:
+        return f"{mins} min ago"
+    hours = mins // 60
+    if hours < 48:
+        return f"{hours}h ago"
+    days = int(delta.days)
+    if days < 14:
+        return f"{days}d ago"
+    weeks = days // 7
+    if weeks < 8:
+        return f"{weeks}w ago"
+    return f"{days}d ago"
+
+
+def build_info_log_lines() -> List[str]:
+    """
+    A small set of user-friendly lines for startup + summary, including human-relative deploy time.
+    """
+    info = read_build_info()
+    ver = (info.get("version") or "0.0.0-dev").strip()
+    last = (info.get("last_built") or "").strip()
+    cmt = (info.get("last_commit") or "").strip()
+
+    lines: List[str] = []
+    if last:
+        dt = _parse_iso_local(last)
+        if dt is not None:
+            local_s = dt.strftime("%Y-%m-%d %H:%M:%S")
+            rel = _format_relative_ago(dt)
+            lines.append(f"> Script last deployed - {local_s}  ({rel})")
+        else:
+            lines.append(f"> Script last deployed - {last}")
+    if cmt:
+        cdt = _parse_iso_local(cmt)
+        if cdt is not None:
+            local_s = cdt.strftime("%Y-%m-%d %H:%M:%S")
+            rel = _format_relative_ago(cdt)
+            lines.append(f"> Script last committed - {local_s}  ({rel})")
+        else:
+            lines.append(f"> Script last committed - {cmt}")
+
+    lines.append(f"> Script version {ver}")
+    return lines
 
 
 def icloud_dir() -> Path:
@@ -30,33 +161,59 @@ def icloud_dir() -> Path:
 ICLOUD = icloud_dir()
 SCRIPTS_ROOT = ICLOUD / "scripts" / "sync-music-libraries"
 
+def logs_dir() -> Path:
+    """
+    Location for log files (avoid iCloud so logs don't sync/noise).
+    """
+    if SYSTEM == "Windows":
+        # Allow explicit override (useful for debugging / nonstandard setups).
+        override = os.environ.get("SYNC_MUSIC_LOGS_DIR")
+        if override:
+            return Path(override)
+
+        # Default to a non-virtualized path on Windows so logs are always visible
+        # (Store/MSIX Python can silently redirect writes under %LOCALAPPDATA%).
+        return Path("C:/temp/sync-music-libraries-logs")
+
+        base = os.environ.get("LOCALAPPDATA")
+        if base:
+            return Path(base) / "sync-music-libraries" / "logs"
+        return Path.home() / "AppData" / "Local" / "sync-music-libraries" / "logs"
+    elif SYSTEM == "Darwin":
+        return Path.home() / "Library" / "Logs" / "sync-music-libraries"
+    else:
+        return Path.home() / ".logs" / "sync-music-libraries"
+
+
+LOGS_DIR = logs_dir()
+
 # Per-OS config
 if SYSTEM == "Windows":
     DOWNLOADS_DIR = Path.home() / "Downloads" / "Music"
     MUSIC_ROOT = Path("//ROCK/Data/Storage/InternalStorage/Music")
     T8_ROOT = Path("//10.0.1.222/Share/EB5E-E9D3/Music")
-    LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_windows.log"
-    SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_windows_summary.log"
-    DETAIL_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_detail_windows.log"
-    STRUCTURED_SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_summary_windows.log"
+    LOG_FILE = LOGS_DIR / "library_sync_windows.log"
+    SUMMARY_LOG_FILE = LOGS_DIR / "library_sync_windows_summary.log"
+    DETAIL_LOG_FILE = LOGS_DIR / "library_sync_detail_windows.log"
+    STRUCTURED_SUMMARY_LOG_FILE = LOGS_DIR / "library_sync_summary_windows.log"
 
 elif SYSTEM == "Darwin":
     DOWNLOADS_DIR = Path.home() / "Downloads" / "Music"
     MUSIC_ROOT = "SMB:" / "ROCK" / "Data" / "Storage" / "InternalStorage" / "Music"
     T8_ROOT = "SMB:" / "10.0.1.222" / "Share" / "EB5E-E9D3" / "Music"
-    LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_macos.log"
-    SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_macos_summary.log"
-    DETAIL_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_detail_macos.log"
-    STRUCTURED_SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_summary_macos.log"
+    LOG_FILE = LOGS_DIR / "library_sync_macos.log"
+    SUMMARY_LOG_FILE = LOGS_DIR / "library_sync_macos_summary.log"
+    DETAIL_LOG_FILE = LOGS_DIR / "library_sync_detail_macos.log"
+    STRUCTURED_SUMMARY_LOG_FILE = LOGS_DIR / "library_sync_summary_macos.log"
 
 else:
     DOWNLOADS_DIR = Path.home() / "Downloads" / "Music"
     MUSIC_ROOT = Path.home() / "Music" / "Library"
     T8_ROOT = None
-    LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_other.log"
-    SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_other_summary.log"
-    DETAIL_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_detail_other.log"
-    STRUCTURED_SUMMARY_LOG_FILE = SCRIPTS_ROOT / "Logs" / "library_sync_summary_other.log"
+    LOG_FILE = LOGS_DIR / "library_sync_other.log"
+    SUMMARY_LOG_FILE = LOGS_DIR / "library_sync_other_summary.log"
+    DETAIL_LOG_FILE = LOGS_DIR / "library_sync_detail_other.log"
+    STRUCTURED_SUMMARY_LOG_FILE = LOGS_DIR / "library_sync_summary_other.log"
 
 # ===================== CONFIG =====================
 

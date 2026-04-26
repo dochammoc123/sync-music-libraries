@@ -29,6 +29,8 @@ from config import (
     SYSTEM,
     T8_ROOT,
     UPDATE_ROOT,
+    build_info_log_lines,
+    set_runtime_time_anchor,
     check_disk_capacity,
 )
 from file_operations import process_downloads, upgrade_albums_to_flac_only
@@ -108,10 +110,39 @@ def main() -> None:
     
     # Add run divider to detail log file (use public API)
     from structured_logging import logmsg
+    from config import (
+        DETAIL_LOG_FILE,
+        LOGS_DIR,
+        STRUCTURED_SUMMARY_LOG_FILE,
+    )
     from datetime import datetime
+    import os
+
+    # Capture a single run start time for: detail "New run started", summary header, and relative "ago" math.
+    run_start = datetime.now()
+    set_runtime_time_anchor(run_start)
+    logmsg.set_run_start(run_start)
+
+    # Print log locations (console + detail) and include in summary as informational lines.
+    header_key = logmsg.header(f"Logs directory: {LOGS_DIR}", "%msg%", always_show=True)
+    header_key = logmsg.header(f"Detail log: {DETAIL_LOG_FILE}", "%msg%", always_show=True, key=header_key)
+    header_key = logmsg.header(f"Summary log: {STRUCTURED_SUMMARY_LOG_FILE}", "%msg%", always_show=True, key=header_key)
+    try:
+        for line in build_info_log_lines():
+            logmsg.info(line)
+    except Exception:
+        pass
+    logmsg.header(None, key=header_key)
+
+    # Ensure the logs directory exists even if the logging handler setup is skipped/changed.
+    try:
+        LOGS_DIR.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        logmsg.warn("Could not create logs directory {path}: {error}", path=str(LOGS_DIR), error=str(e))
+
     divider = "=" * 80
     logmsg.verbose(divider)
-    logmsg.verbose(f"New run started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logmsg.verbose(f"New run started: {run_start.strftime('%Y-%m-%d %H:%M:%S')}")
     logmsg.verbose(divider)
     
     def exit_with_error(error_msg: str, exit_code: int = 1, is_error: bool = True) -> None:
