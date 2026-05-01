@@ -497,7 +497,7 @@ def main() -> None:
             
             sys.exit(exit_code)
 
-        # Step 1: Process new downloads (organize + art, no cleanup)
+        # Step 1: Process new downloads (organize + art + per-album downloads cleanup); Step 10 is the final sweep
         import run_state
         run_state.clear()
         from structured_logging import logmsg
@@ -521,6 +521,13 @@ def main() -> None:
 
         header_key = logmsg.header("Step 4: Ensure cover and folder artwork", "%msg%", key=header_key)
         ensure_cover_and_folder_global(DRY_RUN)
+        # High-signal follow-up for albums touched from Downloads: missing sidecars after Step 4
+        try:
+            from artwork import warn_missing_sidecars_for_album_dirs
+
+            warn_missing_sidecars_for_album_dirs(touched_album_dirs)
+        except Exception:
+            pass
         logmsg.header(None, key=header_key)  # Close Step 4 header
 
         header_key = logmsg.header("Step 5: Embed missing artwork", "%msg% (%count% items)", key=header_key)

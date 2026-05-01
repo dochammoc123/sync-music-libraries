@@ -62,7 +62,14 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
-from logging_utils import album_label_from_tags, Colors, ColoredFormatter, PlainFormatter, ICONS
+from logging_utils import (
+    album_label_from_tags,
+    Colors,
+    ColoredFormatter,
+    PlainFormatter,
+    ICONS,
+    SafeRotatingFileHandler,
+)
 from config import DETAIL_LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT, ROTATE_LOGS_ON_STARTUP, SYSTEM, STRUCTURED_SUMMARY_LOG_FILE, build_info_log_lines
 
 # Detail log writer (separate from summary) - file handler only
@@ -176,12 +183,11 @@ def setup_detail_logging() -> None:
                 STRUCTURED_SUMMARY_LOG_FILE.touch(exist_ok=True)
             except Exception:
                 pass
-        from logging.handlers import RotatingFileHandler
-        detail_fh = RotatingFileHandler(
+        detail_fh = SafeRotatingFileHandler(
             DETAIL_LOG_FILE,
             maxBytes=LOG_MAX_BYTES,
             backupCount=LOG_BACKUP_COUNT,
-            encoding="utf-8"
+            encoding="utf-8",
         )
         # Optional: rotate at startup so each run starts with a clean detail log.
         # Guard to ensure we only do this once per process.

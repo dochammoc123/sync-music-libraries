@@ -104,13 +104,14 @@ echo   3. python test_quick.py
 echo   4. python main.py --mode normal --dry
 echo.
 
-if "%FAILED%"=="1" (
-    echo.
-    echo Deployment finished with errors. Review output above.
-    pause
-) else (
-    exit /b 0
-)
+if not "%FAILED%"=="1" goto :deploy_ok
+echo.
+echo Deployment finished with errors. Review output above.
+pause
+exit /b 1
+
+:deploy_ok
+exit /b 0
 
 REM Helpers to track failures but keep going
 :_copy

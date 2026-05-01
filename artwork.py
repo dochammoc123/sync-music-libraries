@@ -40,6 +40,10 @@ _DISC_CAA_COMMENT_RE = re.compile(
     re.IGNORECASE,
 )
 _WARNED_SUBSET_RELEASES: set = set()  # (album_dir_str, mbid, need_leaves, media_count)
+# Reuse MusicBrainz release id within one ensure_cover run (root + subfolders_only pass) to
+# avoid duplicate CAA "candidate" HTTP storms.
+_CAA_MUSICBRAINZ_MBIT_CACHE: Dict[str, Tuple[str, str, str]] = {}
+# key: resolved album_dir str -> (artist, search_album, mbid)
 
 
 def _reset_last_per_disc_caa() -> None:
@@ -76,14 +80,120 @@ def all_leaf_folders_bytes_match_root(
     return True
 
 
+def _warn_and_optional_mirror_caa_front_to_vol1_cd(
+    album_dir: Optional[Path],
+    subfolders_only: bool,
+    dry_run: bool,
+    content: bytes,
+    logmsg: Any,
+) -> None:
+    """
+    If the library has VOL1/CD* plus another VOL*, CAA's single "front" is often volume-one art.
+    Warn once; optionally write the same bytes into missing VOL1/CD* sidecars only (never VOL2+).
+    """
+    if not album_dir or not album_dir.exists() or subfolders_only:
+        return
+    vol1: Optional[Path] = None
+    has_other_vol = False
+    try:
+        for p in album_dir.iterdir():
+            if not p.is_dir():
+                continue
+            nu = p.name.upper()
+            if nu.startswith("VOL1"):
+                vol1 = p
+            elif re.match(r"^VOL\d+", p.name, re.IGNORECASE):
+                has_other_vol = True
+    except OSError:
+        return
+    if not vol1 or not has_other_vol:
+        logmsg.verbose(
+            "CAA album-root image is the release front; for multi-disc sets it may be one volume/disc scan, not a separate box cover — override with overlay if needed."
+        )
+        return
+    cd_under: List[Path] = []
+    try:
+        for p in vol1.iterdir():
+            if p.is_dir() and re.match(r"^CD\d+", p.name, re.IGNORECASE):
+                cd_under.append(p)
+    except OSError:
+        return
+    if not cd_under:
+        logmsg.verbose(
+            "CAA album-root image is the release front; for multi-disc sets it may be one volume/disc scan, not a separate box cover — override with overlay if needed."
+        )
+        return
+    logmsg.warn(
+        'Cover Art Archive "front" is often the first volume\'s art (not a separate box) when VOL2+ exist. '
+        "Album root was filled from CAA; missing VOL1/CD* sidecars get the same image. Use overlay for a true box or per-volume art."
+    )
+    if dry_run:
+        return
+    for leaf in sorted(cd_under, key=lambda x: x.name.lower()):
+        c, f = leaf / "cover.jpg", leaf / "folder.jpg"
+        try:
+            if not c.is_file():
+                c.write_bytes(content)
+            if not f.is_file() and c.is_file():
+                shutil.copy2(c, f)
+        except OSError:
+            pass
+
+
+# Extra CAA comment pattern: per-medium art is often "Volume 2", "Vol.1", etc. (in addition to Disc/CD).
+_CAA_VOLUME_IN_COMMENT_RE = re.compile(
+    r"(?:\bVolume\b|\bVol\.?)\s*#?\s*(\d+)", re.IGNORECASE
+)
+_CAA_N_OF_M_RE = re.compile(r"\b(\d+)\s+of\s+\d+\b", re.IGNORECASE)  # "1 of 4" booklet markers
+
+
 def _caa_comment_disc_set_from_data(data: Dict[str, Any]) -> set:
     s: set = set()
     for img in data.get("images", []):
         c = (img.get("comment") or "").strip()
         m = _DISC_CAA_COMMENT_RE.search(c)
         if m:
-            s.add(int(m.group(1)))
+            try:
+                s.add(int(m.group(1)))
+            except ValueError:
+                pass
+        m = _CAA_VOLUME_IN_COMMENT_RE.search(c)
+        if m:
+            try:
+                s.add(int(m.group(1)))
+            except ValueError:
+                pass
+        m = _CAA_N_OF_M_RE.search(c)
+        if m:
+            try:
+                s.add(int(m.group(1)))
+            except ValueError:
+                pass
     return s
+
+
+def _caa_first_disc_index_from_comment(comment: str) -> Optional[int]:
+    """Map a CAA image comment to a 1-based disc index (Disc/CD/Volume/N of M)."""
+    c = (comment or "").strip()
+    m = _DISC_CAA_COMMENT_RE.search(c)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    m = _CAA_VOLUME_IN_COMMENT_RE.search(c)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    m = _CAA_N_OF_M_RE.search(c)
+    if m:
+        try:
+            return int(m.group(1))
+        except ValueError:
+            pass
+    return None
 
 
 def init_musicbrainz() -> None:
@@ -152,6 +262,45 @@ def _export_embedded_art_from_file(
         pass
 
     return False
+
+
+def _read_embedded_art_bytes(read_path: Path) -> Optional[bytes]:
+    """
+    Read embedded artwork bytes from a single on-disk file (no writing).
+    Supports FLAC, MP3, and MP4/M4A.
+    """
+    sp = str(read_path)
+    mf = MutagenFile(sp)
+    if mf is None:
+        return None
+
+    if isinstance(mf, FLAC):
+        if mf.pictures:
+            return mf.pictures[0].data
+        return None
+
+    if isinstance(mf, MP4):
+        try:
+            if "covr" in mf and mf["covr"]:
+                cover = mf["covr"][0]
+                if isinstance(cover, MP4Cover):
+                    return bytes(cover)
+                try:
+                    return bytes(cover)
+                except Exception:
+                    return None
+        except Exception:
+            return None
+
+    try:
+        id3 = ID3(sp)
+        pics = [f for f in id3.values() if isinstance(f, APIC)]
+        if pics:
+            return pics[0].data
+    except Exception:
+        return None
+
+    return None
 
 
 def export_embedded_art_to_cover(
@@ -258,71 +407,8 @@ def fetch_art_from_web(
             search_album = f"{(vol_base or search_album).strip()} Vol. {vol_n}"
 
         limit = 25 if num_discs_wanted else 5
-        logmsg.verbose(
-            "MusicBrainz search: artist={artist} release={release} (raw={raw})",
-            artist=artist,
-            release=search_album,
-            raw=search_album_raw,
-        )
-        result = musicbrainzngs.search_releases(
-            artist=artist, release=search_album, limit=limit
-        )
-        releases = result.get("release-list", [])
-        if not releases and search_album != search_album_raw:
-            # Fallback: try the raw album string if normalization stripped too much
-            raw_album = search_album_raw
-            logmsg.verbose(
-                "MusicBrainz search fallback: artist={artist} release={release}",
-                artist=artist,
-                release=raw_album,
-            )
-            result = musicbrainzngs.search_releases(
-                artist=artist, release=raw_album, limit=limit
-            )
-            releases = result.get("release-list", [])
-        if not releases:
-            return (False, f"no MusicBrainz release (searched: {search_album!r})")
 
-        # Safety filter: MusicBrainz text search can return wrong artists even when `artist=` is provided.
-        # For non-compilation artists, prefer releases whose artist credit phrase contains the artist name.
-        if artist and artist.strip() and artist.strip().lower() != "various artists":
-            want = artist.strip().lower()
-            filtered_by_artist = []
-            for r in releases:
-                acp = (r.get("artist-credit-phrase") or "").strip().lower()
-                if not acp:
-                    # Older MB search responses may omit this; keep for now.
-                    filtered_by_artist.append(r)
-                    continue
-                if want in acp:
-                    filtered_by_artist.append(r)
-            if filtered_by_artist and len(filtered_by_artist) != len(releases):
-                logmsg.verbose(
-                    "MusicBrainz: filtered candidates by artist credit ({a}->{b})",
-                    a=len(releases),
-                    b=len(filtered_by_artist),
-                )
-                releases = filtered_by_artist
-
-        # If we were searching for a specific volume, prefer MB releases whose title/disambiguation
-        # also contains that volume token.
-        if vol_n is not None:
-            vol_re = re.compile(rf"\bVol\.?\s*{vol_n}\b|\bVolume\s*{vol_n}\b", re.IGNORECASE)
-            filtered = []
-            for r in releases:
-                t = (r.get("title") or "") + " " + (r.get("disambiguation") or "")
-                if vol_re.search(t):
-                    filtered.append(r)
-            if filtered:
-                logmsg.verbose(
-                    "MusicBrainz: filtered candidates by Vol {n} hint ({a}->{b})",
-                    n=vol_n,
-                    a=len(releases),
-                    b=len(filtered),
-                )
-                releases = filtered
-
-        # Build CD subdir map early so we can prefer a release with disc-specific CAA art.
+        # Build CD subdir map before MusicBrainz (same for full search and cached mbid pass).
         # IMPORTANT: Only treat leaf folders as "discs" when they are actually CD* leaves.
         # Volume leaves (VOL1/VOL2/…) are separate releases/parts in many libraries and should NOT
         # be mapped to "Disc 1/Disc 2" CAA art, otherwise we end up writing the wrong cover into VOL2.
@@ -361,43 +447,167 @@ def fetch_art_from_web(
                     used.add(next_i)
                     next_i += 1
 
-        mbid = releases[0]["id"]
-        selected_release_title: Optional[str] = None
-        if num_discs_wanted and cd_subdirs and len(releases) > 0:
-            # Prefer the release whose CAA has the best "Disc 1..N cover" comment coverage.
-            # Do NOT require MB "medium-list" lookups here (they're slower and can rate-limit);
-            # use CAA as the primary signal for per-disc art availability.
-            best_score = -1
-            best_idx = 9999
-            best_mbid: Optional[str] = None
-            for idx, r in enumerate(releases):
-                rid = r.get("id")
-                if not rid:
-                    continue
-                try:
-                    crm = requests.get(
-                        f"https://coverartarchive.org/release/{rid}",
-                        timeout=WEB_ART_LOOKUP_TIMEOUT,
-                    )
-                    if crm.status_code != 200:
-                        continue
-                    cset = _caa_comment_disc_set_from_data(crm.json())
-                except Exception:
-                    continue
-                score = sum(1 for d in range(1, num_discs_wanted + 1) if d in cset)
-                logmsg.verbose(
-                    "CAA candidate {rid}: disc-comment score={score}/{need}",
-                    rid=rid,
-                    score=score,
-                    need=num_discs_wanted,
-                )
-                if score > best_score or (score == best_score and idx < best_idx):
-                    best_score, best_idx, best_mbid = score, idx, rid
-                if score == num_discs_wanted:
-                    break
+        use_mb_cache = False
+        if subfolders_only and album_dir:
+            try:
+                _k_dir = str(album_dir.resolve())
+            except OSError:
+                _k_dir = str(album_dir)
+            _hit = _CAA_MUSICBRAINZ_MBIT_CACHE.get(_k_dir)
+            if _hit and _hit[0] == artist and _hit[1] == search_album:
+                use_mb_cache = True
+                mbid = _hit[2]
 
-            if best_mbid and best_score > 0:
-                mbid = best_mbid
+        releases: List[Dict[str, Any]] = []
+        mbid: str = ""
+        selected_release_title: Optional[str] = None
+
+        if not use_mb_cache:
+            if not subfolders_only and album_dir:
+                try:
+                    _CAA_MUSICBRAINZ_MBIT_CACHE.pop(str(album_dir.resolve()), None)
+                except OSError:
+                    _CAA_MUSICBRAINZ_MBIT_CACHE.pop(str(album_dir), None)
+            logmsg.verbose(
+                "MusicBrainz search: artist={artist} release={release} (raw={raw})",
+                artist=artist,
+                release=search_album,
+                raw=search_album_raw,
+            )
+            result = musicbrainzngs.search_releases(
+                artist=artist, release=search_album, limit=limit
+            )
+            releases = result.get("release-list", [])
+            if not releases and search_album != search_album_raw:
+                # Fallback: try the raw album string if normalization stripped too much
+                raw_album = search_album_raw
+                logmsg.verbose(
+                    "MusicBrainz search fallback: artist={artist} release={release}",
+                    artist=artist,
+                    release=raw_album,
+                )
+                result = musicbrainzngs.search_releases(
+                    artist=artist, release=raw_album, limit=limit
+                )
+                releases = result.get("release-list", [])
+            if not releases:
+                return (False, f"no MusicBrainz release (searched: {search_album!r})")
+
+            # Safety filter: MusicBrainz text search can return wrong artists even when `artist=` is provided.
+            # For non-compilation artists, prefer releases whose artist credit phrase contains the artist name.
+            if artist and artist.strip() and artist.strip().lower() != "various artists":
+                want = artist.strip().lower()
+                filtered_by_artist = []
+                for r in releases:
+                    acp = (r.get("artist-credit-phrase") or "").strip().lower()
+                    if not acp:
+                        # Older MB search responses may omit this; keep for now.
+                        filtered_by_artist.append(r)
+                        continue
+                    if want in acp:
+                        filtered_by_artist.append(r)
+                if filtered_by_artist and len(filtered_by_artist) != len(releases):
+                    logmsg.verbose(
+                        "MusicBrainz: filtered candidates by artist credit ({a}->{b})",
+                        a=len(releases),
+                        b=len(filtered_by_artist),
+                    )
+                    releases = filtered_by_artist
+
+            # If we were searching for a specific volume, prefer MB releases whose title/disambiguation
+            # also contains that volume token.
+            if vol_n is not None:
+                vol_re = re.compile(rf"\bVol\.?\s*{vol_n}\b|\bVolume\s*{vol_n}\b", re.IGNORECASE)
+                filtered = []
+                for r in releases:
+                    t = (r.get("title") or "") + " " + (r.get("disambiguation") or "")
+                    if vol_re.search(t):
+                        filtered.append(r)
+                if filtered:
+                    logmsg.verbose(
+                        "MusicBrainz: filtered candidates by Vol {n} hint ({a}->{b})",
+                        n=vol_n,
+                        a=len(releases),
+                        b=len(filtered),
+                    )
+                    releases = filtered
+
+            mbid = releases[0]["id"]
+            if num_discs_wanted and cd_subdirs and len(releases) > 0:
+                # Prefer the release whose CAA has the best "Disc 1..N cover" comment coverage.
+                # Do NOT require MB "medium-list" lookups here (they're slower and can rate-limit);
+                # use CAA as the primary signal for per-disc art availability.
+                best_score = -1
+                best_idx = 9999
+                best_mbid: Optional[str] = None
+                for idx, r in enumerate(releases):
+                    rid = r.get("id")
+                    if not rid:
+                        continue
+                    try:
+                        crm = requests.get(
+                            f"https://coverartarchive.org/release/{rid}",
+                            timeout=WEB_ART_LOOKUP_TIMEOUT,
+                        )
+                        if crm.status_code != 200:
+                            continue
+                        cset = _caa_comment_disc_set_from_data(crm.json())
+                    except Exception:
+                        continue
+                    score = sum(1 for d in range(1, num_discs_wanted + 1) if d in cset)
+                    logmsg.verbose(
+                        "CAA candidate {rid}: disc-comment score={score}/{need}",
+                        rid=rid,
+                        score=score,
+                        need=num_discs_wanted,
+                    )
+                    if score > best_score or (score == best_score and idx < best_idx):
+                        best_score, best_idx, best_mbid = score, idx, rid
+                    if score == num_discs_wanted:
+                        break
+
+                if best_mbid and best_score > 0:
+                    mbid = best_mbid
+                if num_discs_wanted and cd_subdirs:
+                    try:
+                        rel = musicbrainzngs.get_release_by_id(mbid, includes=["media"])
+                        nmed = len(rel.get("release", {}).get("medium-list", []))
+                        selected_release_title = rel.get("release", {}).get("title")
+                    except Exception:
+                        nmed = -1
+                    logmsg.verbose(
+                        "CAA release selected: {mbid} (media={nmed}, need_leaves={need})",
+                        mbid=mbid,
+                        nmed=nmed,
+                        need=num_discs_wanted,
+                    )
+                    # If we have fewer local discs than the selected release, we are applying a subset of
+                    # that release's per-disc art. This can be correct (you own part of a box set) or wrong
+                    # (different compilation where Disc 3 isn't the same). Warn once per album so it appears
+                    # in the summary and prompts a manual overlay when needed.
+                    # Only warn when the local layout is itself multi-disc (2+ leaves). For 1-disc layouts,
+                    # selecting a multi-disc release just to get a front cover isn't inherently suspicious.
+                    if album_dir and num_discs_wanted > 1 and nmed > num_discs_wanted:
+                        key = (str(album_dir), mbid, int(num_discs_wanted), int(nmed))
+                        if key not in _WARNED_SUBSET_RELEASES:
+                            _WARNED_SUBSET_RELEASES.add(key)
+                            logmsg.warn(
+                                "Using disc art from a larger MusicBrainz release (media={nmed}) for this {need}-disc folder layout. If disc titles differ, use overlay/manual artwork.",
+                                nmed=nmed,
+                                need=num_discs_wanted,
+                            )
+
+            if album_dir:
+                try:
+                    _CAA_MUSICBRAINZ_MBIT_CACHE[str(album_dir.resolve())] = (artist, search_album, mbid)
+                except OSError:
+                    _CAA_MUSICBRAINZ_MBIT_CACHE[str(album_dir)] = (artist, search_album, mbid)
+        else:
+            logmsg.verbose(
+                "MusicBrainz: reusing release id from prior web pass in this run (no repeat CAA candidate scan)"
+            )
+            releases = [{"id": mbid, "title": None}]
+            nmed = -1
             if num_discs_wanted and cd_subdirs:
                 try:
                     rel = musicbrainzngs.get_release_by_id(mbid, includes=["media"])
@@ -406,26 +616,11 @@ def fetch_art_from_web(
                 except Exception:
                     nmed = -1
                 logmsg.verbose(
-                    "CAA release selected: {mbid} (media={nmed}, need_leaves={need})",
+                    "CAA release (cached mbid): {mbid} (media={nmed}, need_leaves={need})",
                     mbid=mbid,
                     nmed=nmed,
                     need=num_discs_wanted,
                 )
-                # If we have fewer local discs than the selected release, we are applying a subset of
-                # that release's per-disc art. This can be correct (you own part of a box set) or wrong
-                # (different compilation where Disc 3 isn't the same). Warn once per album so it appears
-                # in the summary and prompts a manual overlay when needed.
-                # Only warn when the local layout is itself multi-disc (2+ leaves). For 1-disc layouts,
-                # selecting a multi-disc release just to get a front cover isn't inherently suspicious.
-                if album_dir and num_discs_wanted > 1 and nmed > num_discs_wanted:
-                    key = (str(album_dir), mbid, int(num_discs_wanted), int(nmed))
-                    if key not in _WARNED_SUBSET_RELEASES:
-                        _WARNED_SUBSET_RELEASES.add(key)
-                        logmsg.warn(
-                            "Using disc art from a larger MusicBrainz release (media={nmed}) for this {need}-disc folder layout. If disc titles differ, use overlay/manual artwork.",
-                            nmed=nmed,
-                            need=num_discs_wanted,
-                        )
 
         def _title_token_overlap(a: str, b: str) -> float:
             """
@@ -475,14 +670,13 @@ def fetch_art_from_web(
 
         def _is_disc_specific(img: dict) -> bool:
             c = (img.get("comment") or "").strip()
-            return bool(_DISC_CAA_COMMENT_RE.search(c))
+            return _caa_first_disc_index_from_comment(c) is not None
 
         # When we have CD subfolders, fetch full CAA metadata to get disc-specific images
         if cd_subdirs:
             global _LAST_PER_DISC_CAA
             n_wanted_leaves = len(cd_subdirs)
             leaf_indices = sorted(cd_subdirs.keys())
-            skip_per_disc_writes = (n_wanted_leaves == 1 and leaf_indices and leaf_indices[0] != 1)
             # Multi-disc: fetch metadata and get all disc covers
             meta_url = f"https://coverartarchive.org/release/{mbid}"
             rm = requests.get(meta_url, timeout=WEB_ART_LOOKUP_TIMEOUT)
@@ -527,8 +721,17 @@ def fetch_art_from_web(
                                 _LAST_PER_DISC_CAA = (0, n_wanted_leaves, True)
                                 return (False, f"failed to fetch front image: HTTP {r.status_code}")
                         else:
+                            content = r.content
                             if not dry_run:
-                                cover_path.write_bytes(r.content)
+                                cover_path.write_bytes(content)
+                            if n_wanted_leaves > 1:
+                                _warn_and_optional_mirror_caa_front_to_vol1_cd(
+                                    album_dir,
+                                    subfolders_only,
+                                    dry_run,
+                                    content,
+                                    logmsg,
+                                )
             else:
                 logmsg.verbose(
                     "CAA: skip writing album root (cover already present); fetching per-disc art only"
@@ -548,29 +751,8 @@ def fetch_art_from_web(
                     break
             if n_wanted_leaves > 1 and not disc_dir_has_titles and subfolders_only:
                 logmsg.warn(
-                    "Disc folders are generic (CD1/CD2/…); using album front/box art for all discs instead of disc-specific CAA images. Overlay/manual artwork if you want per-disc art."
+                    "Disc folders are generic (CD1/CD2/...); skipping disc-specific CAA assignment because mapping is ambiguous. Use overlay/manual artwork if you want per-disc art."
                 )
-                _LAST_PER_DISC_CAA = (0, 0, False)
-                return (True, None)
-
-            # If the local library only contains a later disc (e.g. only CD2 exists), per-disc art
-            # from CAA is likely to be misleading and will then be embedded. Keep the root cover
-            # (front/box) but skip writing disc-specific art. Allow later "copy root -> CD folder"
-            # behavior to populate the lone disc folder with the front art.
-            if skip_per_disc_writes:
-                # Root pass: still download the album front/box cover above, but avoid writing any
-                # disc-specific art. Warn only on the subfolders pass (that's where the user
-                # expects disc art decisions).
-                if subfolders_only and album_dir:
-                    leaf_dir = cd_subdirs[leaf_indices[0]]
-                    try:
-                        leaf_rel = leaf_dir.relative_to(album_dir).as_posix()
-                    except Exception:
-                        leaf_rel = leaf_dir.name
-                    logmsg.warn(
-                        "Only {leaf} is present for this multi-disc release; skipping per-disc art download to avoid embedding the wrong disc cover. Disc folder will use the album front/box art unless you overlay manual artwork.",
-                        leaf=leaf_rel,
-                    )
                 _LAST_PER_DISC_CAA = (0, 0, False)
                 return (True, None)
 
@@ -579,20 +761,13 @@ def fetch_art_from_web(
             if not front_images:
                 front_images = [i for i in images if "Front" in (i.get("types") or [])]
 
-            # Save disc-specific covers: first by comment ("Disc N cover", "Disc N", "CD N", etc.)
-            disc_comment_re = re.compile(
-                r"(?:Disc|CD)\s*(\d+)(?:\s*cover)?",
-                re.IGNORECASE
-            )
+            # Save disc-specific covers: first by comment (Disc/CD/Volume / "N of M", etc.)
             available_disc_nums: set = set()
             for img in images:
                 comment = (img.get("comment") or "").strip()
-                m = disc_comment_re.search(comment)
-                if m:
-                    try:
-                        available_disc_nums.add(int(m.group(1)))
-                    except ValueError:
-                        pass
+                di = _caa_first_disc_index_from_comment(comment)
+                if di is not None:
+                    available_disc_nums.add(di)
 
             leaf_indices = sorted(cd_subdirs.keys())
             overlap = sorted([d for d in leaf_indices if d in available_disc_nums])
@@ -627,9 +802,9 @@ def fetch_art_from_web(
             last_http_status: Optional[int] = None
             for img in images:
                 comment = (img.get("comment") or "").strip()
-                m = disc_comment_re.search(comment)
-                if m:
-                    disc_num = int(m.group(1))
+                di = _caa_first_disc_index_from_comment(comment)
+                if di is not None:
+                    disc_num = int(di)
                     if disc_num in cd_subdirs and disc_num not in saved_discs:
                         disc_url = _image_url(img)
                         if disc_url:
@@ -1260,15 +1435,16 @@ def ensure_cover_and_folder(
         return ("error", r)
 
     # Determine album layout leaves once (CD*, VOL*/CD*, or VOL*).
-    # For multi-disc layouts, prefer web (CAA) root cover over embedded art so a random
-    # "CD1 embedded" image doesn't become the album/box cover.
+    # Whenever tracks sit under detected CD/VOL leaf folders — even only one leaf (CD1-, CD3-only,
+    # lone VOL2, …) — treat like multi-folder layout at album root so embedded disc art does not become
+    # the presumed box/front without consistency checks vs web.
     try:
         from tag_operations import album_layout_leaf_directories
 
         layout_leaves = album_layout_leaf_directories(album_dir) if album_dir.exists() else []
     except Exception:
         layout_leaves = []
-    is_multidisc_layout = len(layout_leaves) > 1
+    is_multidisc_layout = len(layout_leaves) >= 1
 
     primary_art_dir = album_dir
     try:
@@ -1309,9 +1485,61 @@ def ensure_cover_and_folder(
             # Neither exists - try to create cover.jpg from embedded art or web
             if not skip_cover_creation:
                 if not cover_path.exists():
-                    # Multi-disc: try web first (box/front-of-book), then fall back to embedded.
+                    # Multi-disc root cover:
+                    # - Use embedded art only if it's consistent across disc/volume leaves (backup mirror when present).
+                    # - Otherwise prefer web "front/box" art (CAA) to avoid stamping a random disc image as the box cover.
                     if is_multidisc_layout and ENABLE_WEB_ART_LOOKUP:
-                        logmsg.verbose("No cover.jpg; multi-disc layout detected; attempting web fetch first...")
+                        # Multi-disc consistency: only use embedded art for the album root when it is
+                        # consistent across disc/volume leaves (read from backup mirror when present).
+                        # Otherwise prefer web box/front art to avoid stamping a random disc cover.
+                        try:
+                            from tag_operations import album_layout_leaf_directories
+
+                            leaf_dirs = album_layout_leaf_directories(album_dir)
+                        except Exception:
+                            leaf_dirs = []
+                        embedded_bytes: List[bytes] = []
+                        if leaf_dirs:
+                            for leaf in leaf_dirs:
+                                # Pick a representative audio file under this leaf (first in sorted order)
+                                leaf_audio: Optional[Path] = None
+                                try:
+                                    for r, _d, fns in os.walk(leaf):
+                                        for fn in sorted(fns):
+                                            if Path(fn).suffix.lower() in AUDIO_EXT:
+                                                leaf_audio = Path(r) / fn
+                                                break
+                                        if leaf_audio:
+                                            break
+                                except Exception:
+                                    leaf_audio = None
+                                if not leaf_audio:
+                                    continue
+                                rp, prov = _resolve_embed_read_path(leaf_audio)
+                                b = _read_embedded_art_bytes(rp)
+                                try:
+                                    leaf_label = leaf.relative_to(album_dir).as_posix()
+                                except Exception:
+                                    leaf_label = leaf.name
+                                logmsg.verbose(
+                                    "Multi-disc embedded probe: {leaf} -> {file} (read {prov}) => {has}",
+                                    leaf=leaf_label,
+                                    file=leaf_audio.name,
+                                    prov=prov,
+                                    has="yes" if b else "no",
+                                )
+                                if b:
+                                    embedded_bytes.append(b)
+                        can_use_embedded_root = bool(embedded_bytes) and all(x == embedded_bytes[0] for x in embedded_bytes)
+                        if can_use_embedded_root:
+                            item_key = logmsg.begin_item("cover.jpg")
+                            logmsg.info("cover.jpg created from embedded art.")
+                            logmsg.end_item(item_key)
+                            if not dry_run:
+                                cover_path.write_bytes(embedded_bytes[0])
+                            logmsg.info("Artwork source: embedded (consistent across discs; read from backup when present)")
+                        else:
+                            logmsg.verbose("No cover.jpg; multi-disc layout detected; attempting web fetch first...")
                         ok, reason = fetch_art_from_web(
                             artist, album, cover_path, dry_run, album_dir=album_dir, subfolders_only=False
                         )
@@ -1328,43 +1556,76 @@ def ensure_cover_and_folder(
                             )
                             logmsg.info("Artwork source: none (multi-disc root left empty)")
                     else:
-                        # Single-disc: try web first, then fall back to embedded.
-                        # This makes "delete cover.jpg to re-attempt web art" work reliably.
+                        # Single-disc: prefer embedded art (backup mirror when present; else live),
+                        # then fall back to web when sidecar is missing.
                         if ENABLE_WEB_ART_LOOKUP:
-                            logmsg.verbose("No cover.jpg; attempting web fetch first...")
-                            ok, reason = fetch_art_from_web(
-                                artist, album, cover_path, dry_run, album_dir=album_dir, subfolders_only=False
-                            )
-                            if ok and cover_path.exists():
-                                item_key = logmsg.begin_item("cover.jpg")
-                                logmsg.info("cover.jpg downloaded from web.")
-                                logmsg.end_item(item_key)
-                                logmsg.info("Artwork source: web (Cover Art Archive)")
-                            else:
-                                kind, msg = _classify_web_art_reason(reason)
+                            # Before web: prefer embedded art from the "original" source of truth per file:
+                            # - if a backup mirror exists at the same relative path, read embedded only from that
+                            # - otherwise read from the live file
+                            # This supports partial backups: if only some tracks were backed up, we still allow
+                            # live tracks (no backup) to supply embedded art.
+                            chosen: Optional[Tuple[Path, str]] = None  # (live_file, provenance)
+                            for live_file, _tags in (album_files or []):
+                                rp, prov = _resolve_embed_read_path(live_file)
+                                b = _read_embedded_art_bytes(rp)
                                 logmsg.verbose(
-                                    "Web art fetch failed ({kind}): {reason}",
-                                    kind=kind,
-                                    reason=reason or "(none)",
+                                    "Sidecar embedded probe: {file} -> {read} (prov={prov}) => {has}",
+                                    file=live_file.name,
+                                    read=str(rp),
+                                    prov=prov,
+                                    has="yes" if b else "no",
                                 )
-                                logmsg.verbose("Falling back to embedded art after web failure...")
-                                first_file = album_files[0][0]
-                                emb_src = export_embedded_art_to_cover(first_file, cover_path, dry_run)
-                                if emb_src:
+                                if b:
+                                    chosen = (live_file, prov)
+                                    if not dry_run:
+                                        cover_path.write_bytes(b)
+                                    break
+                            if chosen:
+                                live_file, prov = chosen
+                                item_key = logmsg.begin_item("cover.jpg")
+                                logmsg.info("cover.jpg created from embedded art.")
+                                logmsg.end_item(item_key)
+                                logmsg.info(
+                                    "Artwork source: embedded (from {file}, read {origin})",
+                                    file=live_file.name,
+                                    origin=("from backup mirror" if prov == "backup" else "from live file"),
+                                )
+
+                            if not cover_path.exists():
+                                logmsg.verbose("No cover.jpg; attempting web fetch first...")
+                                ok, reason = fetch_art_from_web(
+                                    artist, album, cover_path, dry_run, album_dir=album_dir, subfolders_only=False
+                                )
+                                if ok and cover_path.exists():
                                     item_key = logmsg.begin_item("cover.jpg")
-                                    logmsg.info("cover.jpg created from embedded art.")
+                                    logmsg.info("cover.jpg downloaded from web.")
                                     logmsg.end_item(item_key)
-                                    logmsg.info(
-                                        "Artwork source: embedded (from {file}, read {origin})",
-                                        file=first_file.name,
-                                        origin="from backup mirror" if emb_src == "backup" else "from live file",
-                                    )
+                                    logmsg.info("Artwork source: web (Cover Art Archive)")
                                 else:
-                                    logmsg.warn(
-                                        "Could not obtain artwork from web ({kind}): {msg}",
+                                    kind, msg = _classify_web_art_reason(reason)
+                                    logmsg.verbose(
+                                        "Web art fetch failed ({kind}): {reason}",
                                         kind=kind,
-                                        msg=msg,
+                                        reason=reason or "(none)",
                                     )
+                                    logmsg.verbose("Falling back to embedded art after web failure...")
+                                    first_file = album_files[0][0]
+                                    emb_src = export_embedded_art_to_cover(first_file, cover_path, dry_run)
+                                    if emb_src:
+                                        item_key = logmsg.begin_item("cover.jpg")
+                                        logmsg.info("cover.jpg created from embedded art.")
+                                        logmsg.end_item(item_key)
+                                        logmsg.info(
+                                            "Artwork source: embedded (from {file}, read {origin})",
+                                            file=first_file.name,
+                                        origin=("from backup mirror" if emb_src == "backup" else "from live file"),
+                                        )
+                                    else:
+                                        logmsg.warn(
+                                            "Could not obtain artwork from web ({kind}): {msg}",
+                                            kind=kind,
+                                            msg=msg,
+                                        )
                         else:
                             logmsg.verbose("No cover.jpg; attempting to export embedded art...")
                             first_file = album_files[0][0]
@@ -1376,7 +1637,7 @@ def ensure_cover_and_folder(
                                 logmsg.info(
                                     "Artwork source: embedded (from {file}, read {origin})",
                                     file=first_file.name,
-                                    origin="from backup mirror" if emb_src == "backup" else "from live file",
+                                    origin=("from backup mirror" if emb_src == "backup" else "from live file"),
                                 )
                             else:
                                 logmsg.warn("Could not obtain artwork: no embedded art and web lookup disabled")
@@ -1431,79 +1692,62 @@ def ensure_cover_and_folder(
                 and len(leaves) > 1
                 and all_leaf_folders_bytes_match_root(album_dir, leaves, ref)
             )
-            # Special-case: if we only have a single disc leaf and it's not disc 1 (e.g. only CD2),
-            # don't attempt per-disc CAA at all; we'll copy the album front/box art into that folder.
             import re as _re
-            single_late_leaf = False
-            if len(leaves) == 1:
-                m = _re.search(r"\bCD\s*(\d+)\b", leaves[0].name, _re.IGNORECASE)
-                if m:
-                    try:
-                        single_late_leaf = int(m.group(1)) != 1
-                    except ValueError:
-                        single_late_leaf = False
-            if (missing or all_same_as_root) and single_late_leaf:
-                leaf = leaves[0]
-                try:
-                    leaf_rel = leaf.relative_to(album_dir).as_posix()
-                except Exception:
-                    leaf_rel = leaf.name
-                logmsg.warn(
-                    "Only {leaf} is present for this multi-disc release; skipping per-disc web art lookup to avoid embedding the wrong disc cover. Disc folder will use the album front/box art unless you overlay manual artwork.",
-                    leaf=leaf_rel,
-                )
-            else:
-                # If disc folders are generic (CD1/CD2/…) and all leaves already match the album root,
-                # that's a desired end-state for "same art on every disc" albums. Don't keep warning
-                # or retrying per-disc CAA on every run.
-                generic_disc_dirs = False
-                if len(leaves) > 1 and all_same_as_root:
-                    generic_disc_dirs = True
-                    for p in leaves:
-                        remainder = _re.sub(
-                            r"^\s*CD\s*\d+\s*[-–—_:]*\s*",
-                            "",
-                            p.name,
-                            flags=_re.IGNORECASE,
-                        ).strip()
-                        if remainder:
-                            generic_disc_dirs = False
-                            break
+            # If disc folders are generic (CD1/CD2/...) and all leaves already match the album root,
+            # that's a desired end-state for "same art on every disc" albums. Don't keep warning
+            # or retrying per-disc CAA on every run.
+            generic_disc_dirs = False
+            if len(leaves) > 1 and all_same_as_root:
+                generic_disc_dirs = True
+                for p in leaves:
+                    remainder = _re.sub(
+                        r"^\s*CD\s*\d+\s*[-–—_:]*\s*",
+                        "",
+                        p.name,
+                        flags=_re.IGNORECASE,
+                    ).strip()
+                    if remainder:
+                        generic_disc_dirs = False
+                        break
 
-                if generic_disc_dirs and not missing:
-                    # No action needed; keep quiet.
-                    pass
-                elif missing or all_same_as_root:
-                    if all_same_as_root and not missing:
-                        logmsg.verbose(
-                            "All CD/VOL subfolder art matches album root; re-trying CAA per-disc (not stamping root to every subfolder)…"
-                        )
-                    else:
-                        logmsg.verbose(
-                            "Web art: {n} of {t} album subfolders need art; trying CAA per-disc (booklet/comment)…",
-                            n=len(missing),
-                            t=len(leaves),
-                        )
-                    ok, reason = fetch_art_from_web(
-                        artist,
-                        album,
-                        cover_path,
-                        dry_run,
-                        album_dir=album_dir,
-                        subfolders_only=True,
+            if generic_disc_dirs and not missing:
+                # No action needed; keep quiet.
+                pass
+            elif missing:
+                logmsg.verbose(
+                    "Web art: {n} of {t} album subfolders need art; trying CAA per-disc (booklet/comment)...",
+                    n=len(missing),
+                    t=len(leaves),
+                )
+                ok, reason = fetch_art_from_web(
+                    artist,
+                    album,
+                    cover_path,
+                    dry_run,
+                    album_dir=album_dir,
+                    subfolders_only=True,
+                )
+                if not ok and reason:
+                    kind, msg = _classify_web_art_reason(reason)
+                    logmsg.verbose(
+                        "Per-subfolder web art ({kind}): {reason}",
+                        kind=kind,
+                        reason=reason,
                     )
-                    if not ok and reason:
-                        kind, msg = _classify_web_art_reason(reason)
-                        logmsg.verbose(
-                            "Per-subfolder web art ({kind}): {reason}",
-                            kind=kind,
-                            reason=reason,
-                        )
-                        if reason and "per-disc CAA" in reason:
-                            logmsg.warn("Could not fill per-disc art from CAA: {msg}", msg=msg)
+                    if reason and "per-disc CAA" in reason:
+                        logmsg.warn("Could not fill per-disc art from CAA: {msg}", msg=msg)
 
     # Always ensure CD1/CD2/... subdirectories have folder.jpg and cover.jpg if they don't already
     if album_dir.exists():
+        try:
+            from tag_operations import album_layout_leaf_directories
+
+            _layout_leaves = list(album_layout_leaf_directories(album_dir))
+            _layout_leaf_set = set(_layout_leaves)
+        except Exception:
+            _layout_leaves = []
+            _layout_leaf_set = set()
+
         source_for_subfolders = None
         if cover_path.exists():
             source_for_subfolders = cover_path
@@ -1511,142 +1755,149 @@ def ensure_cover_and_folder(
             source_for_subfolders = folder_path
 
         if source_for_subfolders:
-            from tag_operations import album_layout_leaf_directories
-
             n_saved, n_w, caa_tried = last_per_disc_caa_stats()
             caa_incomplete = caa_tried and n_w > 1 and n_saved < n_w and ENABLE_WEB_ART_LOOKUP
-            copied_from_root_any = False
-            for subdir in album_layout_leaf_directories(album_dir):
+            # We no longer stamp album-root art into leaves.
+            missing_leaf_paths: List[str] = []
+            for subdir in _layout_leaves:
                 subfolder_folder = subdir / "folder.jpg"
                 subfolder_cover = subdir / "cover.jpg"
-                if not subfolder_folder.exists():
-                    if caa_incomplete:
-                        logmsg.verbose(
-                            "Not copying root art to {subdir} — CAA per-disc was incomplete for this album ({a}/{b})",
-                            subdir=subdir.relative_to(album_dir).as_posix(),
-                            a=n_saved,
-                            b=n_w,
-                        )
-                    else:
-                        item_key = logmsg.begin_item(f"{subdir.name}/folder.jpg")
-                        logmsg.info(
-                            "Creating folder.jpg in {subdir}/ from album root",
-                            subdir=subdir.relative_to(album_dir).as_posix(),
-                        )
-                        logmsg.end_item(item_key)
-                        if not dry_run:
-                            try:
-                                shutil.copy2(source_for_subfolders, subfolder_folder)
-                                copied_from_root_any = True
-                            except Exception as e:
-                                if label:
-                                    from structured_logging import logmsg
-                                    logmsg.warn(
-                                        "Failed to create folder.jpg in {subdir}/: {error}",
-                                        subdir=subdir.relative_to(album_dir).as_posix(),
-                                        error=str(e),
-                                    )
-                if not subfolder_cover.exists():
-                    if caa_incomplete:
-                        logmsg.verbose(
-                            "Not copying root art to {subdir} — CAA per-disc was incomplete for this album ({a}/{b})",
-                            subdir=subdir.relative_to(album_dir).as_posix(),
-                            a=n_saved,
-                            b=n_w,
-                        )
-                    else:
-                        item_key = logmsg.begin_item(f"{subdir.name}/cover.jpg")
-                        logmsg.info(
-                            "Creating cover.jpg in {subdir}/ from album root",
-                            subdir=subdir.relative_to(album_dir).as_posix(),
-                        )
-                        logmsg.end_item(item_key)
-                        if not dry_run:
-                            try:
-                                shutil.copy2(source_for_subfolders, subfolder_cover)
-                                copied_from_root_any = True
-                            except Exception as e:
-                                if label:
-                                    from structured_logging import logmsg
-                                    logmsg.warn(
-                                        "Failed to create cover.jpg in {subdir}/: {error}",
-                                        subdir=subdir.relative_to(album_dir).as_posix(),
-                                        error=str(e),
-                                    )
-            # Nested VOLn/CDm: also place art on VOLn if it only contains CD subdirs
+
+                # Leaf precedence (like single-disc): if the leaf is missing sidecar art, first try to
+                # create from embedded art for that leaf (reading from BACKUP_ROOT mirror when present).
+                # This keeps disc/volume folders aligned with their tracks even when the album root uses
+                # web "front/box" art.
+                if (not subfolder_folder.exists()) or (not subfolder_cover.exists()):
+                    leaf_audio: Optional[Path] = None
+                    try:
+                        for r, _d, fns in os.walk(subdir):
+                            for fn in sorted(fns):
+                                if Path(fn).suffix.lower() in AUDIO_EXT:
+                                    leaf_audio = Path(r) / fn
+                                    break
+                            if leaf_audio:
+                                break
+                    except Exception:
+                        leaf_audio = None
+
+                    if leaf_audio:
+                        if not subfolder_cover.exists():
+                            emb_src = export_embedded_art_to_cover(leaf_audio, subfolder_cover, dry_run)
+                            if emb_src:
+                                item_key = logmsg.begin_item(f"{subdir.name}/cover.jpg")
+                                logmsg.info("cover.jpg created from embedded art.")
+                                logmsg.end_item(item_key)
+                                logmsg.info(
+                                    "Leaf artwork source: embedded (read {origin})",
+                                    origin="from backup mirror" if emb_src == "backup" else "from live file",
+                                )
+                        if subfolder_cover.exists() and not subfolder_folder.exists():
+                            item_key = logmsg.begin_item(f"{subdir.name}/folder.jpg")
+                            logmsg.info("Creating folder.jpg in {subdir}/ from cover.jpg", subdir=subdir.name)
+                            logmsg.end_item(item_key)
+                            if not dry_run:
+                                try:
+                                    shutil.copy2(subfolder_cover, subfolder_folder)
+                                except Exception as e:
+                                    if label:
+                                        logmsg.warn(
+                                            "Failed to create folder.jpg in {subdir}/ from cover.jpg: {error}",
+                                            subdir=subdir.relative_to(album_dir).as_posix(),
+                                            error=str(e),
+                                        )
+
+                # If embedded art filled in, keep going (avoid stamping root cover).
+                if subfolder_cover.exists() and subfolder_folder.exists():
+                    continue
+
+                # If leaf art is still missing here, DO NOT stamp album-root art into leaves.
+                # This used to be a convenience fallback, but it can mis-assign VOL/CD art and then get embedded.
+                if not subfolder_folder.exists() or not subfolder_cover.exists():
+                    try:
+                        rel_leaf = subdir.relative_to(album_dir).as_posix()
+                    except Exception:
+                        rel_leaf = subdir.name
+                    missing_leaf_paths.append(rel_leaf)
+                    continue
+            if missing_leaf_paths:
+                logmsg.warn(
+                    "Leaf artwork still missing ({n}): {leaves}. Not copying album root art into leaves. Preserve downloads assets and overlay/manual artwork if needed.",
+                    n=len(missing_leaf_paths),
+                    leaves=", ".join(missing_leaf_paths),
+                )
+            # Nested VOLn/CDm: do not stamp album-root art onto VOLn automatically.
+            # If VOLn needs art, it should come from its own tracks (embedded/web) or manual overlay.
+            # Skip VOL* container dirs that already have CD* children (leaves are VOLn/CDm; avoid duplicate warnings).
+            _cd_dir_re = re.compile(r"^CD\d+", re.IGNORECASE)
             for subdir in album_dir.iterdir():
                 if not subdir.is_dir() or not re.match(
                     r"^VOL\d+", subdir.name, re.IGNORECASE
                 ):
                     continue
+                if subdir in _layout_leaf_set:
+                    continue
+                try:
+                    if any(
+                        c.is_dir() and _cd_dir_re.match(c.name) for c in subdir.iterdir()
+                    ):
+                        continue
+                except OSError:
+                    pass
                 vol_folder = subdir / "folder.jpg"
                 vol_cover = subdir / "cover.jpg"
-                if not vol_folder.exists():
-                    if caa_incomplete:
-                        logmsg.verbose(
-                            "Not copying root art to {subdir} — CAA per-disc was incomplete for this album ({a}/{b})",
-                            subdir=subdir.name,
-                            a=n_saved,
-                            b=n_w,
-                        )
-                    else:
-                        item_key = logmsg.begin_item(f"{subdir.name}/folder.jpg")
-                        logmsg.info(
-                            "Creating folder.jpg in {subdir}/ from album root",
-                            subdir=subdir.name,
-                        )
-                        logmsg.end_item(item_key)
-                        if not dry_run:
-                            try:
-                                shutil.copy2(source_for_subfolders, vol_folder)
-                                copied_from_root_any = True
-                            except Exception as e:
-                                if label:
-                                    from structured_logging import logmsg
-                                    logmsg.warn(
-                                        "Failed to create folder.jpg in {subdir}/: {error}",
-                                        subdir=subdir.name,
-                                        error=str(e),
-                                    )
-                if not vol_cover.exists():
-                    if caa_incomplete:
-                        logmsg.verbose(
-                            "Not copying root art to {subdir} — CAA per-disc was incomplete for this album ({a}/{b})",
-                            subdir=subdir.name,
-                            a=n_saved,
-                            b=n_w,
-                        )
-                    else:
-                        item_key = logmsg.begin_item(f"{subdir.name}/cover.jpg")
-                        logmsg.info(
-                            "Creating cover.jpg in {subdir}/ from album root",
-                            subdir=subdir.name,
-                        )
-                        logmsg.end_item(item_key)
-                        if not dry_run:
-                            try:
-                                shutil.copy2(source_for_subfolders, vol_cover)
-                                copied_from_root_any = True
-                            except Exception as e:
-                                if label:
-                                    from structured_logging import logmsg
-                                    logmsg.warn(
-                                        "Failed to create cover.jpg in {subdir}/: {error}",
-                                        subdir=subdir.name,
-                                        error=str(e),
-                                    )
+                # Try embedded from a representative track under this VOLn (including nested CD subdirs).
+                if (not vol_cover.exists()) or (not vol_folder.exists()):
+                    vol_audio: Optional[Path] = None
+                    try:
+                        for r, _d, fns in os.walk(subdir):
+                            for fn in sorted(fns):
+                                if Path(fn).suffix.lower() in AUDIO_EXT:
+                                    vol_audio = Path(r) / fn
+                                    break
+                            if vol_audio:
+                                break
+                    except Exception:
+                        vol_audio = None
 
-            if copied_from_root_any and len(album_layout_leaf_directories(album_dir)) > 1:
-                logmsg.warn(
-                    "No per-disc/per-volume artwork was found; copied the album front/box artwork into disc/volume folders. Use overlay/manual artwork if you want distinct disc art."
-                )
+                    if vol_audio and not vol_cover.exists():
+                        emb_src = export_embedded_art_to_cover(vol_audio, vol_cover, dry_run)
+                        if emb_src:
+                            item_key = logmsg.begin_item(f"{subdir.name}/cover.jpg")
+                            logmsg.info("cover.jpg created from embedded art.")
+                            logmsg.end_item(item_key)
+                            logmsg.info(
+                                "Leaf artwork source: embedded (read {origin})",
+                                origin="from backup mirror" if emb_src == "backup" else "from live file",
+                            )
+                    if vol_cover.exists() and not vol_folder.exists():
+                        item_key = logmsg.begin_item(f"{subdir.name}/folder.jpg")
+                        logmsg.info("Creating folder.jpg in {subdir}/ from cover.jpg", subdir=subdir.name)
+                        logmsg.end_item(item_key)
+                        if not dry_run:
+                            try:
+                                shutil.copy2(vol_cover, vol_folder)
+                            except Exception as e:
+                                if label:
+                                    logmsg.warn(
+                                        "Failed to create folder.jpg in {subdir}/ from cover.jpg: {error}",
+                                        subdir=subdir.name,
+                                        error=str(e),
+                                    )
+                if not vol_cover.exists() or not vol_folder.exists():
+                    logmsg.warn(
+                        "Leaf artwork missing for {leaf} (volume container only; nested CDs are separate leaves). Not copying album root art. Preserve downloads / overlay if needed.",
+                        leaf=subdir.name,
+                    )
+
+            # We no longer stamp root art into leaves; missing leaf art is surfaced via warnings above.
 
 
 def ensure_cover_and_folder_global(dry_run: bool = False) -> None:
     """
     For every album directory under MUSIC_ROOT: ensure cover.jpg and folder.jpg
     exist (create from embedded or web if missing, else copy between them).
-    Also ensures CD1/CD2 subdirs have folder.jpg from the album root.
+    Note: we do not blindly stamp album-root art into CD/VOL leaves. Leaf folders should get artwork
+    from their own tracks (embedded/web) or manual overlay when ambiguous.
     Single place for all cover/folder logic; used instead of per-album ensure in Step 1.
     """
     from config import AUDIO_EXT, MUSIC_ROOT
@@ -1693,6 +1944,88 @@ def ensure_cover_and_folder_global(dry_run: bool = False) -> None:
             skip_cover_creation=False,
         )
         logmsg.end_album(album_key)
+
+
+def warn_missing_sidecars_for_album_dirs(album_dirs: List[Path]) -> None:
+    """
+    After Step 4, warn for albums processed from downloads that still have missing
+    cover.jpg/folder.jpg next to audio files (root or leaf dirs).
+    """
+    from config import AUDIO_EXT, MUSIC_ROOT
+    from structured_logging import logmsg
+    from tag_operations import album_layout_leaf_directories, get_tags, normalize_album_name
+    from logging_utils import album_label_from_tags
+
+    def _has_audio(p: Path) -> bool:
+        try:
+            for r, _d, fns in os.walk(p):
+                for fn in fns:
+                    if Path(fn).suffix.lower() in AUDIO_EXT:
+                        return True
+        except Exception:
+            return False
+        return False
+
+    for album_dir in sorted(set(album_dirs or [])):
+        if not album_dir or not album_dir.exists():
+            continue
+        try:
+            leaves = album_layout_leaf_directories(album_dir)
+        except Exception:
+            leaves = []
+
+        targets: List[Path] = []
+        if _has_audio(album_dir):
+            targets.append(album_dir)
+        for leaf in leaves:
+            if leaf != album_dir and _has_audio(leaf):
+                targets.append(leaf)
+
+        missing: List[str] = []
+        for t in targets:
+            cp = t / "cover.jpg"
+            fp = t / "folder.jpg"
+            try:
+                base = "." if t == album_dir else t.relative_to(album_dir).as_posix()
+            except Exception:
+                base = t.name
+            if not cp.exists():
+                missing.append(f"{base}/cover.jpg")
+            if not fp.exists():
+                missing.append(f"{base}/folder.jpg")
+
+        if missing:
+            try:
+                rel = album_dir.relative_to(MUSIC_ROOT).as_posix()
+            except Exception:
+                rel = str(album_dir)
+            label = rel
+            try:
+                probe = None
+                for r, _d, fns in os.walk(album_dir):
+                    for fn in sorted(fns):
+                        if Path(fn).suffix.lower() in AUDIO_EXT:
+                            probe = Path(r) / fn
+                            break
+                    if probe:
+                        break
+                if probe:
+                    tags = get_tags(probe) or {}
+                    album_name = normalize_album_name(tags.get("album", "") or "")
+                    label = album_label_from_tags(
+                        tags.get("artist", ""),
+                        album_name or tags.get("album", ""),
+                        tags.get("year", ""),
+                    )
+            except Exception:
+                pass
+            shown = ", ".join(missing[:10]) + ("..." if len(missing) > 10 else "")
+            logmsg.warn(
+                "Missing sidecar artwork files ({n}): {files}. Downloads images were preserved for manual review.",
+                album=label,
+                n=len(missing),
+                files=shown,
+            )
 
 
 def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_enabled: bool = True) -> None:
@@ -2018,9 +2351,9 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True, 
                         )
                 else:
                     logmsg.verbose(
-                        "Disc tag normalize: skip (no multi-disc totals found) for {group} ({count} files)",
+                        "Disc tag normalize: skip (no multi-disc totals found) for {group} ({count_files} files)",
                         group=_vol_key or "ALBUM_ROOT",
-                        count=len(rows),
+                        count_files=len(rows),
                     )
                 continue
             # If we only ever see disc 1 in this group, we cannot safely "fix" disc totals:
@@ -2071,11 +2404,11 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True, 
                 )
                 continue
             logmsg.verbose(
-                "Disc tag normalize: target total={total} for {group} (max_disc={max_disc}, files={count})",
+                "Disc tag normalize: target total={total} for {group} (max_disc={max_disc}, files={count_files})",
                 total=target_total,
                 group=_vol_key or "ALBUM_ROOT",
                 max_disc=max_disc,
-                count=len(rows),
+                count_files=len(rows),
             )
 
             for audio_file, tags in rows:
@@ -2278,15 +2611,15 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                 # No album-root art; nothing to embed at the album root.
                 continue
 
-        # If this is a multi-disc layout, require disc-level covers to exist before embedding.
-        # Only log this ONCE per album (at the album root) and then block all subdirs.
+        # Subfolder leaf layout (any detected CD/VOL leaves, including a single leaf): require each
+        # leaf to have local artwork before embedding. Log once per album at album-root walk.
         try:
             from tag_operations import album_layout_leaf_directories
 
             leaves = album_layout_leaf_directories(parent_album_dir) if parent_album_dir.exists() else []
         except Exception:
             leaves = []
-        if len(leaves) > 1 and not is_subdirectory:
+        if len(leaves) >= 1 and not is_subdirectory:
             missing_leaf_art = [
                 L
                 for L in leaves

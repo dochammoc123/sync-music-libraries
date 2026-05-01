@@ -7,6 +7,7 @@ import logging
 import logging.handlers
 import os
 import platform
+import shutil
 import subprocess
 import sys
 import re
@@ -29,20 +30,49 @@ def __getattr__(name: str):
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
 
 
+def _is_windows_file_in_use(exc: BaseException) -> bool:
+    """WinError 32: another process has the file open (tail viewer, AV, second sync)."""
+    if isinstance(exc, OSError):
+        return getattr(exc, "winerror", None) == 32
+    return False
+
+
 class SafeRotatingFileHandler(logging.handlers.RotatingFileHandler):
     """
-    RotatingFileHandler that gracefully handles Windows file locking issues.
-    If rotation fails due to file being locked, it continues logging without rotation.
+    RotatingFileHandler that handles Windows file locking during rollover.
+
+    1. If os.rename fails (sharing violation), try copy backup + truncate the live file
+       so rotation still happens when another process holds a read handle.
+    2. If rollover still fails, reopen the stream so logging continues (log may exceed maxBytes).
     """
-    def doRollover(self):
-        """Override doRollover to handle Windows file locking gracefully."""
+
+    def rotate(self, source: str, dest: str) -> None:
+        try:
+            super().rotate(source, dest)
+        except OSError as exc:
+            if not _is_windows_file_in_use(exc):
+                raise
+            enc = self.encoding or "utf-8"
+            try:
+                shutil.copy2(source, dest)
+            except OSError:
+                raise exc from None
+            try:
+                with open(source, "w", encoding=enc, newline="") as wf:
+                    wf.write("")
+            except OSError:
+                raise exc from None
+
+    def doRollover(self) -> None:
         try:
             super().doRollover()
         except (PermissionError, OSError):
-            # On Windows, if the log file is locked (by another process or log viewer),
-            # rotation will fail. Continue logging without rotation.
-            # The log will grow beyond maxBytes, but the script won't crash.
-            pass
+            # Parent may have closed the stream before rename failed; must reopen or every emit errors.
+            if not self.delay and self.stream is None:
+                try:
+                    self.stream = self._open()
+                except OSError:
+                    pass
 
 # ANSI color codes for console output
 class Colors:

@@ -19,6 +19,285 @@ from config import (
 from logging_utils import album_label_from_tags
 from tag_operations import choose_album_year, format_track_filename, sanitize_filename_component, write_tags_to_file, normalize_album_name, parse_album_disc
 
+# Download folder paths (norm-cased) that must keep image assets through Step 10 when multi-disc
+# assignment was ambiguous (register from move_album_from_downloads; read in _process_cleanup_folder).
+PRESERVED_DOWNLOADS_IMAGE_ROOTS: set[str] = set()
+# When preservation was registered, optional library album path (norm-cased) so Step 10 can drop
+# preservation after all layout leaves have cover.jpg + folder.jpg (post–Step 4).
+PRESERVED_DOWNLOADS_LIBRARY_ALBUM: Dict[str, str] = {}
+
+
+def clear_preserved_downloads_image_roots() -> None:
+    PRESERVED_DOWNLOADS_IMAGE_ROOTS.clear()
+    PRESERVED_DOWNLOADS_LIBRARY_ALBUM.clear()
+
+
+def _norm_path_key(p: Path) -> str:
+    try:
+        return os.path.normcase(os.path.abspath(str(p.resolve())))
+    except OSError:
+        return os.path.normcase(os.path.abspath(str(p)))
+
+
+def library_album_sidecars_complete(album_dir: Path) -> bool:
+    """
+    True when every layout leaf (or the album root for flat single-disc) has both cover.jpg and folder.jpg.
+    Used to decide if downloads images can be cleaned up after a full sync (Step 10).
+    """
+    if not album_dir.is_dir():
+        return False
+    try:
+        from tag_operations import album_layout_leaf_directories
+
+        leaves = album_layout_leaf_directories(album_dir)
+    except Exception:
+        leaves = []
+    if not leaves:
+        c = album_dir / "cover.jpg"
+        f = album_dir / "folder.jpg"
+        return c.is_file() and f.is_file()
+    for L in leaves:
+        if not (L / "cover.jpg").is_file() or not (L / "folder.jpg").is_file():
+            return False
+    return True
+
+
+def release_downloads_preservation_when_library_complete() -> None:
+    """
+    After Step 4, multi-disc albums may have gained sidecars on all leaves. Drop download-folder
+    preservation for those trees so Step 10 can remove leftover artwork files.
+    """
+    to_drop: List[str] = []
+    for dl_key, lib_key in list(PRESERVED_DOWNLOADS_LIBRARY_ALBUM.items()):
+        try:
+            lib = Path(lib_key)
+        except Exception:
+            continue
+        if not lib.is_dir():
+            continue
+        if library_album_sidecars_complete(lib):
+            to_drop.append(dl_key)
+    for dl_key in to_drop:
+        PRESERVED_DOWNLOADS_IMAGE_ROOTS.discard(dl_key)
+        PRESERVED_DOWNLOADS_LIBRARY_ALBUM.pop(dl_key, None)
+
+
+def register_preserved_downloads_image_roots(
+    *paths: Path, library_album_dir: Optional[Path] = None
+) -> None:
+    for p in paths:
+        PRESERVED_DOWNLOADS_IMAGE_ROOTS.add(_norm_path_key(p))
+    if library_album_dir is not None:
+        lib_k = _norm_path_key(library_album_dir)
+        for p in paths:
+            PRESERVED_DOWNLOADS_LIBRARY_ALBUM[_norm_path_key(p)] = lib_k
+
+
+def _downloads_cleanup_path_is_preserved(folder_path: Path) -> bool:
+    """
+    True if this path lies under any preserved subtree, equals a preserved root, OR is an
+    ancestor directory of preserved content (Step 10 must not remove an empty Various Artists
+    folder while (...)/Lilith is still guarded).
+    """
+    try:
+        k = os.path.normcase(os.path.abspath(str(folder_path.resolve())))
+    except OSError:
+        k = os.path.normcase(os.path.abspath(str(folder_path)))
+    sep = os.sep
+    for a in PRESERVED_DOWNLOADS_IMAGE_ROOTS:
+        if k == a or k.startswith(a + sep):
+            return True
+        if a.startswith(k + sep):
+            return True
+    return False
+
+
+_IMG_EXT_PRESERVE = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+
+
+def _folder_tree_contains_audio(folder: Path) -> bool:
+    try:
+        for f in folder.rglob("*"):
+            if f.is_file() and f.suffix.lower() in AUDIO_EXT:
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _folder_tree_contains_image(folder: Path) -> bool:
+    try:
+        for f in folder.rglob("*"):
+            if f.is_file() and f.suffix.lower() in _IMG_EXT_PRESERVE:
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _download_folder_names_likely_same_album(name_a: str, name_b: str) -> bool:
+    """Heuristic: same release as different folder names (truncation, year prefix, etc.)."""
+
+    def core(name: str) -> str:
+        s = (name or "").strip()
+        s = re.sub(r"^\([^)]*\)\s*", "", s)
+        return re.sub(r"[^a-z0-9]+", "", s.lower())
+
+    ca, cb = core(name_a), core(name_b)
+    if not ca or not cb:
+        return False
+    if ca == cb:
+        return True
+    shorter, longer = (ca, cb) if len(ca) <= len(cb) else (cb, ca)
+    return len(shorter) >= 14 and longer.startswith(shorter)
+
+
+def register_preserved_sibling_art_spillovers(
+    root_dirs: set,
+    library_album_dir: Optional[Path],
+    downloads_dir: Path,
+) -> None:
+    """
+    Register image-only folders that sit next to the real download album root (same artist parent).
+    Those siblings are not under root_dirs, so Step 10 used to delete them even when we preserved
+    ambiguous multi-disc artwork for the album that was moved.
+    """
+    if not root_dirs or library_album_dir is None:
+        return
+    extra: List[Path] = []
+    seen_norm: set[str] = set()
+    root_list = list(root_dirs)
+
+    for rd in root_list:
+        try:
+            par = rd.parent
+        except Exception:
+            continue
+        if not par.is_dir():
+            continue
+        try:
+            if downloads_dir and par.resolve() == downloads_dir.resolve():
+                continue
+        except OSError:
+            continue
+        try:
+            siblings = [x for x in par.iterdir() if x.is_dir()]
+        except OSError:
+            continue
+
+        image_only: List[Path] = []
+        for sib in siblings:
+            if sib in root_dirs:
+                continue
+            try:
+                if sib.resolve() == rd.resolve():
+                    continue
+            except OSError:
+                pass
+            if _folder_tree_contains_audio(sib):
+                continue
+            if not _folder_tree_contains_image(sib):
+                continue
+            image_only.append(sib)
+
+        for sib in image_only:
+            nk = _norm_path_key(sib)
+            if nk in seen_norm:
+                continue
+            name_match = any(
+                _download_folder_names_likely_same_album(sib.name, r.name) for r in root_list
+            )
+            if name_match or len(image_only) == 1:
+                extra.append(sib)
+                seen_norm.add(nk)
+
+    if not extra:
+        return
+    try:
+        from structured_logging import logmsg
+
+        logmsg.verbose(
+            "Downloads preservation: guarding {n} image-only sibling folder(s) for manual artwork review",
+            n=len(extra),
+        )
+    except Exception:
+        pass
+    register_preserved_downloads_image_roots(*extra, library_album_dir=library_album_dir)
+
+
+def register_preserved_music_level_art_spillovers(
+    root_dirs: set,
+    library_album_dir: Optional[Path],
+    downloads_dir: Path,
+) -> None:
+    """
+    When audio was under Downloads_DIR/Various Artists/(year) Album/… but scanner images landed in
+    Downloads_DIR/(truncated name)/ … (sibling TOP-LEVEL folders), sibling-only registration misses
+    them. Scan other immediate children of downloads_dir for image-only folders that belong to this
+    release (same heuristics as register_preserved_sibling_art_spillovers).
+    """
+    if not root_dirs or library_album_dir is None:
+        return
+    try:
+        if not downloads_dir.is_dir():
+            return
+        dnorm = downloads_dir.resolve()
+    except OSError:
+        return
+
+    spill: List[Path] = []
+    try:
+        for branch in downloads_dir.iterdir():
+            if not branch.is_dir():
+                continue
+            is_wrapped = False
+            for rd in root_dirs:
+                try:
+                    rd.resolve().relative_to(branch.resolve())
+                    is_wrapped = True
+                    break
+                except (ValueError, OSError):
+                    continue
+            if is_wrapped:
+                continue
+            if _folder_tree_contains_audio(branch):
+                continue
+            if not _folder_tree_contains_image(branch):
+                continue
+            spill.append(branch)
+    except OSError:
+        return
+
+    if not spill:
+        return
+
+    root_list = list(root_dirs)
+    extra: List[Path] = []
+    seen_norm: set[str] = set()
+    for branch in spill:
+        nk = _norm_path_key(branch)
+        if nk in seen_norm:
+            continue
+        name_match = any(
+            _download_folder_names_likely_same_album(branch.name, r.name) for r in root_list
+        )
+        if name_match or len(spill) == 1:
+            extra.append(branch)
+            seen_norm.add(nk)
+
+    if not extra:
+        return
+    try:
+        from structured_logging import logmsg
+
+        logmsg.verbose(
+            "Downloads preservation: guarding {n} image-only top-level folder(s) under downloads for manual artwork review",
+            n=len(extra),
+        )
+    except Exception:
+        pass
+    register_preserved_downloads_image_roots(*extra, library_album_dir=library_album_dir)
+
 
 def find_existing_album_dir(root: Path, artist: str, album: str) -> Optional[Path]:
     """
@@ -69,12 +348,20 @@ def make_album_dir(root: Path, artist: str, album: str, year: str, dry_run: bool
     return album_dir
 
 
-def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dry_run: bool = False, used_artwork_files: List[Path] = None, processed_audio_files: List[Path] = None, extracted_archives: List[Path] = None) -> None:
+def cleanup_download_dirs_for_album(
+    items: List[Tuple[Path, Dict[str, Any]]],
+    dry_run: bool = False,
+    used_artwork_files: List[Path] = None,
+    processed_audio_files: List[Path] = None,
+    extracted_archives: List[Path] = None,
+    preserve_all_images: bool = False,
+) -> None:
     """
     After we've moved an album's audio files out of Downloads/Music
     and processed its artwork, clean up leftover images and junk files,
     then remove any now-empty directories (including empty parent dirs),
-    stopping at DOWNLOADS_DIR.
+    stopping at DOWNLOADS_DIR. Runs at end of each album move (Step 1);
+    cleanup_downloads_folder (Step 10) is the final pass.
     """
     from tag_operations import find_root_album_directory
     from config import DOWNLOADS_DIR
@@ -189,22 +476,31 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                             logmsg.verbose("Keeping audio in subdirectory (not part of this album): %item%")
                             continue
                     elif is_artwork_file:
-                        # For artwork files in subdirectories, always remove them (they're leftovers)
-                        # This is safe because artwork processing already found the best artwork from the root directory
-                        # Even if this file wasn't "used", it's a duplicate/leftover in a subdirectory
-                        should_remove = True
+                        if preserve_all_images:
+                            logmsg.verbose(
+                                "Downloads cleanup: preserving image asset in subdirectory (disc/volume assignment ambiguous): %item%"
+                            )
+                            continue
+                        # Artwork in subdirectories can be disc/volume-specific (e.g. CD1 scans) even when the script
+                        # can't reliably determine which disc they belong to. Only remove if we *know* we used it.
                         used_artwork = used_artwork_files or []
                         if any(f.resolve() == art.resolve() for art in used_artwork):
+                            should_remove = True
                             removal_reason = "used artwork file"
                             logmsg.info("Removing used artwork file in subdirectory: %item%")
                         else:
-                            removal_reason = "unused artwork file (leftover)"
-                            logmsg.info("Removing unused artwork file in subdirectory: %item%")
+                            # Preserve by default; user can manually copy/assign after review.
+                            logmsg.warn(
+                                "Downloads cleanup: preserving artwork asset in subdirectory (not used by script; may be disc/volume-specific): %item%"
+                            )
+                            continue
                     else:
-                        # Non-audio, non-artwork file in subdirectory - remove it (leftover from processing)
-                        should_remove = True
-                        removal_reason = "leftover file"
-                        logmsg.info("Removing leftover file in subdirectory: %item%")
+                        # Non-audio, non-image file in a subdirectory: preserve by default (manual review).
+                        # We only auto-delete known garbage extensions/filenames elsewhere.
+                        logmsg.warn(
+                            "Downloads cleanup: preserving non-audio asset in subdirectory (manual review): %item%"
+                        )
+                        continue
                     
                     if should_remove:
                         if dry_run:
@@ -218,6 +514,11 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                     continue
                 
                 if is_artwork_file and is_in_downloads_root:
+                    if preserve_all_images:
+                        logmsg.verbose(
+                            "Downloads cleanup: preserving image in download root (disc/volume assignment ambiguous): %item%"
+                        )
+                        continue
                     used_artwork = used_artwork_files or []
                     # Check if this artwork file was used/matched for this album
                     if any(f.resolve() == art.resolve() for art in used_artwork):
@@ -262,7 +563,15 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                     if is_artwork_file and is_in_downloads_root:
                         # Already handled above - skip
                         continue
-                    
+                    # Images anywhere under this album download tree must survive when multi-disc assignment
+                    # was ambiguous — .jpg etc. are in CLEANUP_EXTENSIONS, so without this branch we deleted
+                    # album-folder root art (parent is the album dir, not DOWNLOADS_DIR).
+                    if preserve_all_images and is_artwork_file:
+                        logmsg.verbose(
+                            "Downloads cleanup: preserving image under ambiguous multi-disc album tree: %item%"
+                        )
+                        continue
+
                     # Remove cleanup extension files (ZIP, partial downloads, etc.)
                     # No special case needed - just remove them regardless of location
                     logmsg.info("Removing file: %item%")
@@ -391,8 +700,16 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                         is_in_downloads_root = f.parent.resolve() == DOWNLOADS_DIR.resolve()
                         is_artwork_file = f.suffix.lower() in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
                         is_audio_file = f.suffix.lower() in AUDIO_EXT
-                        
-                        if is_artwork_file and is_in_downloads_root:
+
+                        # Must match the main rglob loop: images listed in CLEANUP_EXTENSIONS would
+                        # otherwise be deleted here while walking up parents, after "preserve" verbose.
+                        if preserve_all_images and is_artwork_file:
+                            logmsg.verbose(
+                                "Downloads cleanup: preserving image during empty-folder walk (ambiguous multi-disc album tree): %item%"
+                            )
+                            logmsg.end_item(item_key)
+                            remaining.append(f)
+                        elif is_artwork_file and is_in_downloads_root:
                             used_artwork = used_artwork_files or []
                             # Check if this artwork file was used/matched for this album
                             if any(f.resolve() == art.resolve() for art in used_artwork):
@@ -425,7 +742,18 @@ def cleanup_download_dirs_for_album(items: List[Tuple[Path, Dict[str, Any]]], dr
                                 # This audio file wasn't processed - preserve it (may be for future album)
                                 logmsg.end_item(item_key)
                                 remaining.append(f)
-                        elif f.name in CLEANUP_FILENAMES or f.suffix.lower() in CLEANUP_EXTENSIONS:
+                        elif f.name in CLEANUP_FILENAMES:
+                            logmsg.info("Removing file: %item%")
+                            try:
+                                if not dry_run:
+                                    f.unlink()
+                            except Exception as e:
+                                logmsg.warn("Could not delete %item%: {error}", error=str(e))
+                                logmsg.end_item(item_key)
+                                remaining.append(f)
+                            else:
+                                logmsg.end_item(item_key)
+                        elif f.suffix.lower() in CLEANUP_EXTENSIONS:
                             logmsg.info("Removing file: %item%")
                             try:
                                 if not dry_run:
@@ -849,23 +1177,6 @@ def move_album_from_downloads(
     # Push artwork header
     art_key = logmsg.push_header("Processing album artwork", "%msg%", "ARTWORK")
     try:
-        # Find best art file (standard names + pattern-matched, always largest)
-        # This function now handles:
-        # - Standard art files (large_cover.jpg, cover.jpg)
-        # - Pattern-matched art (e.g., "pure-heroine-lorde.jpg")
-        # - Always selects largest by pixel dimensions, then file size
-        # IMPORTANT: Always check for pattern-matched art, even if cover.jpg exists,
-        # to upgrade if the new art is larger (by pixel dimensions, then file size)
-        predownloaded_art = find_predownloaded_art_source_for_album(items)
-        used_predownloaded_art = predownloaded_art is not None
-        # Log artwork selection (structured logging - detail log only via verbose)
-        if used_predownloaded_art and predownloaded_art:
-            from artwork import get_image_size
-            art_size = get_image_size(predownloaded_art)
-            if art_size:
-                file_size = predownloaded_art.stat().st_size if predownloaded_art.exists() else 0
-                logmsg.verbose("Selected best art: {name} ({width}x{height}, {size} bytes)", name=predownloaded_art.name, width=art_size[0], height=art_size[1], size=file_size)
-        
         # Also check for folder.jpg separately (may be different from cover)
         from tag_operations import find_root_album_directory
         from config import DOWNLOADS_DIR
@@ -877,53 +1188,113 @@ def move_album_from_downloads(
             root_dirs.add(root_dir)
             if p.parent != root_dir:
                 child_dirs.add(p.parent)
-        
-        # Check for folder.jpg: prioritize root directories (parent as source of truth)
-        # NOTE: We do NOT copy folder.jpg from CD1/CD2 subfolders to album root
-        # CD1/CD2 subfolders should keep their own folder.jpg files
-        predownloaded_folder = None
-        for d in sorted(root_dirs, key=lambda x: len(str(x))):
-            folder_candidate = d / "folder.jpg"
-            if folder_candidate.exists():
-                predownloaded_folder = folder_candidate
-                break
-        # Only check child directories (CD1/CD2) if no root folder.jpg found
-        # But we won't copy it to album root - it stays in the subfolder
-        if not predownloaded_folder:
-            for d in sorted(child_dirs, key=lambda x: len(str(x))):
-                folder_candidate = d / "folder.jpg"
-                if folder_candidate.exists():
-                    # Found folder.jpg in CD1/CD2 - don't copy to album root, leave it there
-                    # Only use it if we need to create cover.jpg and no other art exists
-                    predownloaded_folder = folder_candidate
-                    break
 
-        # Always check for artwork, even if cover.jpg exists (to upgrade if new art is larger).
-        #
-        # Prefer putting artwork in the "primary" leaf when this album folder is only a container
-        # for a single VOLn (e.g. "Album Volume 2" imports into Artist/Album/VOL2/ ...). This keeps
-        # the container root empty and avoids later web lookups selecting the wrong cover.
+        # Determine destination layout first (single-disc vs multi-disc target album).
         cover_dest = album_dir / "cover.jpg"
         folder_dest = album_dir / "folder.jpg"
+        target_leaves = []
         try:
             from tag_operations import album_layout_leaf_directories
 
-            leaves = album_layout_leaf_directories(album_dir)
+            target_leaves = album_layout_leaf_directories(album_dir)
             has_root_audio = any(p.parent == album_dir for (p, _t) in dest_items)
             if (
                 not has_root_audio
-                and len(leaves) == 1
-                and leaves[0].name.upper().startswith("VOL")
+                and len(target_leaves) == 1
+                and target_leaves[0].name.upper().startswith("VOL")
             ):
-                cover_dest = leaves[0] / "cover.jpg"
-                folder_dest = leaves[0] / "folder.jpg"
+                cover_dest = target_leaves[0] / "cover.jpg"
+                folder_dest = target_leaves[0] / "folder.jpg"
         except Exception:
-            pass
-        
-        # ALWAYS check for pattern-matched art, even if cover.jpg exists
-        # This handles cases where pattern-matched art is in downloads root and might be larger
-        if not used_predownloaded_art:
-            # Re-check for pattern-matched art (might be in downloads root)
+            target_leaves = []
+
+        # Subfolder layouts (ANY detected CD*/VOL*/VOL*/CD* leaf, even exactly one leaf):
+        # multi-disc-style Downloads ambiguity — collapse to single logical image family or preserve.
+        # Flat albums have zero leaves from layout scan.
+        preserve_download_images = False
+        stamp_all_multidisc_from_downloads = False
+        try:
+            img_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+            is_multidisc_target = len(target_leaves) >= 1
+            subset_leaf_target = False
+            import re as _re
+
+            subset_name_re = _re.compile(
+                r"\b(?:vol(?:ume)?|disc|cd)\s*\.?\s*(\d+)\b", _re.IGNORECASE
+            )
+            names_to_check = [album_dir.name] + [rd.name for rd in root_dirs]
+            try:
+                for p, _tags in items:
+                    cur = p.parent
+                    while True:
+                        names_to_check.append(cur.name)
+                        if cur == DOWNLOADS_DIR or cur.parent == cur:
+                            break
+                        cur = cur.parent
+            except Exception:
+                pass
+            for nm in names_to_check:
+                m = subset_name_re.search(nm or "")
+                if m:
+                    try:
+                        if int(m.group(1)) != 1:
+                            subset_leaf_target = True
+                            break
+                    except ValueError:
+                        continue
+
+            if is_multidisc_target:
+                candidates = []
+                for rd in root_dirs:
+                    try:
+                        for p in rd.rglob("*"):
+                            if p.is_file() and p.suffix.lower() in img_exts:
+                                candidates.append(p)
+                    except Exception:
+                        continue
+                logical_groups = set()
+                if candidates:
+                    import hashlib
+                    from PIL import Image
+
+                    for p in candidates:
+                        try:
+                            with Image.open(p) as img:
+                                # Normalize to a small grayscale fingerprint so resized versions
+                                # and cover/folder aliases count as one logical image.
+                                fp = img.convert("L").resize((32, 32))
+                                digest = hashlib.sha1(fp.tobytes()).hexdigest()
+                                logical_groups.add(digest)
+                        except Exception:
+                            # If unreadable, conservatively treat as another distinct candidate.
+                            logical_groups.add(f"raw:{p.name.lower()}:{p.stat().st_size if p.exists() else 0}")
+                # If we saw image candidates but couldn't classify any (unexpected), force ambiguity.
+                if candidates and not logical_groups:
+                    logical_groups.add("unknown")
+                # Multi-disc binary rule:
+                # - exactly one logical image group => allow and stamp sidecars everywhere
+                # - otherwise => preserve downloads images and do not copy
+                if len(logical_groups) == 1:
+                    stamp_all_multidisc_from_downloads = True
+                else:
+                    preserve_download_images = True
+                    if subset_leaf_target:
+                        logmsg.warn(
+                            "Downloads artwork: subset leaf target (e.g. VOL2/CD2) and not a single image group (groups={g}); not auto-assigning/copying images. Images will be preserved for manual review.",
+                            g=len(logical_groups),
+                        )
+                    else:
+                        logmsg.warn(
+                            "Downloads artwork: multi-disc target did not resolve to a single image group (groups={g}); not auto-assigning/copying images. Images will be preserved for manual review.",
+                            g=len(logical_groups),
+                        )
+        except Exception:
+            preserve_download_images = False
+
+        # Find best art file (standard names + pattern-matched, always largest) only when unambiguous.
+        predownloaded_art = None
+        used_predownloaded_art = False
+        if not preserve_download_images:
             predownloaded_art = find_predownloaded_art_source_for_album(items)
             used_predownloaded_art = predownloaded_art is not None
             # Log artwork selection (structured logging - detail log only via verbose)
@@ -932,9 +1303,38 @@ def move_album_from_downloads(
                 art_size = get_image_size(predownloaded_art)
                 if art_size:
                     file_size = predownloaded_art.stat().st_size if predownloaded_art.exists() else 0
-                    logmsg.verbose("Selected best art: {name} ({width}x{height}, {size} bytes)", name=predownloaded_art.name, width=art_size[0], height=art_size[1], size=file_size)
+                    logmsg.verbose(
+                        "Selected best art: {name} ({width}x{height}, {size} bytes)",
+                        name=predownloaded_art.name,
+                        width=art_size[0],
+                        height=art_size[1],
+                        size=file_size,
+                    )
         
-        if used_predownloaded_art or predownloaded_folder:
+        # Check for folder.jpg: prioritize root directories (parent as source of truth)
+        # NOTE: We do NOT copy folder.jpg from CD1/CD2 subfolders to album root
+        # CD1/CD2 subfolders should keep their own folder.jpg files
+        predownloaded_folder = None
+        if not preserve_download_images:
+            for d in sorted(root_dirs, key=lambda x: len(str(x))):
+                folder_candidate = d / "folder.jpg"
+                if folder_candidate.exists():
+                    predownloaded_folder = folder_candidate
+                    break
+        # Only check child directories (CD1/CD2) if no root folder.jpg found
+        # But we won't copy it to album root - it stays in the subfolder
+        if not preserve_download_images and not predownloaded_folder:
+            for d in sorted(child_dirs, key=lambda x: len(str(x))):
+                folder_candidate = d / "folder.jpg"
+                if folder_candidate.exists():
+                    # Found folder.jpg in CD1/CD2 - don't copy to album root, leave it there
+                    # Only use it if we need to create cover.jpg and no other art exists
+                    predownloaded_folder = folder_candidate
+                    break
+
+        # In preserve-download-images mode we intentionally do not pick a "best" art.
+        
+        if (used_predownloaded_art or predownloaded_folder) and not preserve_download_images:
             if not dry_run:
                 cover_dest.parent.mkdir(parents=True, exist_ok=True)
                 
@@ -1127,6 +1527,10 @@ def move_album_from_downloads(
                 logmsg.verbose("folder.jpg already exists, preserving it (may differ from cover.jpg)")
         
             # Event tracked automatically by structured logging
+        elif preserve_download_images:
+            art_check_key = logmsg.begin_item("artwork check")
+            logmsg.info("Downloads artwork preserved (ambiguous for multi-disc); Step 4 will use embedded/web rules.")
+            logmsg.end_item(art_check_key)
         else:
             # Log that we checked for artwork (so header shows something)
             # Use a generic item context for "artwork check"
@@ -1134,10 +1538,39 @@ def move_album_from_downloads(
             logmsg.info("No pre-downloaded art files found")
             logmsg.end_item(art_check_key)
 
+        # If a multi-disc target resolved to exactly one logical downloads image group, stamp sidecars
+        # to all audio-bearing leaves for consistency.
+        if stamp_all_multidisc_from_downloads and cover_dest.exists():
+            from config import AUDIO_EXT as _AUDIO_EXT
+
+            def _leaf_has_audio(pth: Path) -> bool:
+                try:
+                    for rr, _dd, fns in os.walk(pth):
+                        for fn in fns:
+                            if Path(fn).suffix.lower() in _AUDIO_EXT:
+                                return True
+                except Exception:
+                    return False
+                return False
+
+            for leaf in target_leaves:
+                if not _leaf_has_audio(leaf):
+                    continue
+                leaf_cover = leaf / "cover.jpg"
+                leaf_folder = leaf / "folder.jpg"
+                try:
+                    leaf_cover.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(cover_dest, leaf_cover)
+                    shutil.copy2(cover_dest, leaf_folder)
+                    item_key = logmsg.begin_item(str(leaf.relative_to(album_dir)))
+                    logmsg.info("Stamping sidecars to %item% from single downloads image group")
+                    logmsg.end_item(item_key)
+                except Exception as e:
+                    logmsg.warn("Could not stamp sidecars in {leaf}: {error}", leaf=str(leaf), error=str(e))
+
         # Cover and folder.jpg are ensured globally in Step 4 (ensure_cover_and_folder_global)
     finally:
         logmsg.pop_header(art_key)
-    return album_dir
 
     # When we merged into an existing folder (or always), ensure folder name reflects
     # combined years from all tracks (CD1–10), not just the current batch
@@ -1191,17 +1624,71 @@ def move_album_from_downloads(
             used_artwork_files.append(predownloaded_art)
         if predownloaded_folder:
             used_artwork_files.append(predownloaded_folder)
+
+        # If we're processing a multi-disc/volume download folder and we can't see artwork for every disc/vol,
+        # preserve all images in downloads so the user can manually assign/copy them after the run.
+        preserve_all_images = False
+        try:
+            # Heuristic: look at the *downloads* roots we walked for this album (root_dirs) and see if they
+            # contain CD/VOL subfolders. If so, require each leaf to have at least one image somewhere under it.
+            leaves = []
+            for rd in list(root_dirs):
+                try:
+                    for child in rd.iterdir():
+                        if child.is_dir() and (child.name.upper().startswith("CD") or child.name.upper().startswith("VOL")):
+                            leaves.append(child)
+                except Exception:
+                    continue
+            if leaves:
+                img_exts = {".jpg", ".jpeg", ".png", ".gif", ".webp"}
+                leaves_without_images = 0
+                for L in leaves:
+                    has_img = False
+                    try:
+                        for p in L.rglob("*"):
+                            if p.is_file() and p.suffix.lower() in img_exts:
+                                has_img = True
+                                break
+                    except Exception:
+                        has_img = False
+                    if not has_img:
+                        leaves_without_images += 1
+                if leaves_without_images:
+                    preserve_all_images = True
+                    logmsg.warn(
+                        "Downloads cleanup: multi-disc/volume artwork appears incomplete ({missing}/{total} leaf folders have no images). Preserving all images in downloads for manual review.",
+                        missing=leaves_without_images,
+                        total=len(leaves),
+                    )
+        except Exception:
+            preserve_all_images = False
         
         # Per-album cleanup: remove processed audio, used artwork, empty folders from downloads
         # Step 10 does a final pass too; per-album cleanup runs here so album folders
         # (e.g. Lorde/Pure Heroine) are cleaned right after processing
+        if preserve_all_images or preserve_download_images:
+            try:
+                register_preserved_downloads_image_roots(
+                    *list(root_dirs), library_album_dir=album_dir
+                )
+                register_preserved_sibling_art_spillovers(
+                    root_dirs, album_dir, DOWNLOADS_DIR
+                )
+                register_preserved_music_level_art_spillovers(
+                    root_dirs, album_dir, DOWNLOADS_DIR
+                )
+            except Exception:
+                pass
         cleanup_download_dirs_for_album(
             items,
             dry_run=dry_run,
             used_artwork_files=used_artwork_files if used_artwork_files else None,
             processed_audio_files=processed_audio_files,
             extracted_archives=extracted_archives,
+            preserve_all_images=preserve_all_images or preserve_download_images,
         )
+
+    return album_dir
 
 
 def extract_archives_in_downloads(dry_run: bool = False) -> List[Path]:
@@ -1283,7 +1770,9 @@ def process_downloads(dry_run: bool = False) -> List[Path]:
     """Process all albums in the downloads directory. Returns album dirs touched."""
     from tag_operations import find_audio_files, group_by_album
     from structured_logging import logmsg
-    
+
+    clear_preserved_downloads_image_roots()
+
     # First, extract any archive files (ZIP, etc.) found in downloads
     # Track extracted archives for cleanup
     extracted_archives = extract_archives_in_downloads(dry_run)
@@ -1344,8 +1833,7 @@ def process_downloads(dry_run: bool = False) -> List[Path]:
         finally:
             logmsg.end_album(unmatched_key)
     
-    # Note: Cleanup is deferred to Step 10 (Cleanup downloads folder)
-    # This allows Step 7 (Ensure artist images) to access artist images in downloads before cleanup
+    # Step 10 (cleanup_downloads_folder) finishes anything left plus preserved-path handling after library art is settled.
     return processed_album_dirs
 
 
@@ -1362,6 +1850,12 @@ def cleanup_downloads_folder(dry_run: bool = False, header_key: str = None) -> N
     
     if not CLEAN_EMPTY_DOWNLOAD_FOLDERS or not DOWNLOADS_DIR.exists():
         return
+
+    # After Step 4, all leaves may have sidecars; allow cleaning preserved download artwork.
+    try:
+        release_downloads_preservation_when_library_complete()
+    except Exception:
+        pass
     
     # Match leftover artwork in downloads root to existing albums in library
     match_root_artwork_to_existing_albums(dry_run)
@@ -1491,11 +1985,9 @@ def _warn_if_audio_still_in_downloads(dry_run: bool) -> None:
     if not remaining:
         logmsg.verbose("No audio files remain under downloads")
         return
-    sample = ", ".join(remaining[:5]) + (" ..." if len(remaining) > 5 else "")
     logmsg.warn(
-        "Downloads still contains audio file(s) after processing ({n} seen; e.g. {sample}). Folders will remain until these are removed/moved. Common causes: duplicate track skipped (library already has a larger copy), or files couldn't be grouped/moved on this run.",
+        "Downloads still contains audio file(s) after processing ({n} seen). Folders will remain until these are removed/moved. Common causes: duplicate track skipped (library already has a larger copy), or files couldn't be grouped/moved on this run.",
         n=len(remaining),
-        sample=sample,
     )
 
 
@@ -1547,7 +2039,13 @@ def _process_cleanup_folder(folder_path: Path, downloads_dir: Path, music_root: 
         # Check if folder is empty or only contains cleanup files
         items = list(folder_path.iterdir())
         if not items:
-            # Empty folder - remove it
+            # Empty folder - remove unless still an ancestor or target of guarded artwork trees
+            if _downloads_cleanup_path_is_preserved(folder_path):
+                logmsg.verbose(
+                    "Skipping empty folder removal (ancestor of or overlaps preserved ambiguous artwork paths): {p}",
+                    p=str(folder_path.relative_to(downloads_dir)),
+                )
+                return
             item_key = logmsg.begin_item(str(folder_path.relative_to(downloads_dir)))
             logmsg.info("Removing empty folder: %item%")
             if not dry_run:
@@ -1574,6 +2072,12 @@ def _process_cleanup_folder(folder_path: Path, downloads_dir: Path, music_root: 
                 all_cleanup = False
                 break
         
+        if all_cleanup and _downloads_cleanup_path_is_preserved(folder_path):
+            logmsg.verbose(
+                "Skipping cleanup: folder is under a preserved multi-disc/ambiguous download tree: {p}",
+                p=str(folder_path.relative_to(downloads_dir)),
+            )
+            return
         if all_cleanup:
             # Remove only cleanup files and the folder if empty afterward
             item_key = logmsg.begin_item(str(folder_path.relative_to(downloads_dir)))
