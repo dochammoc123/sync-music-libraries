@@ -520,7 +520,9 @@ def main() -> None:
         logmsg.header(None, key=header_key)  # Close Step 3 header
 
         header_key = logmsg.header("Step 4: Ensure cover and folder artwork", "%msg%", key=header_key)
-        ensure_cover_and_folder_global(DRY_RUN)
+        ensure_cover_and_folder_global(
+            DRY_RUN, new_from_downloads_album_dirs=set(touched_album_dirs)
+        )
         # High-signal follow-up for albums touched from Downloads: missing sidecars after Step 4
         try:
             from artwork import warn_missing_sidecars_for_album_dirs

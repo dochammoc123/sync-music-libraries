@@ -25,11 +25,16 @@ PRESERVED_DOWNLOADS_IMAGE_ROOTS: set[str] = set()
 # When preservation was registered, optional library album path (norm-cased) so Step 10 can drop
 # preservation after all layout leaves have cover.jpg + folder.jpg (post–Step 4).
 PRESERVED_DOWNLOADS_LIBRARY_ALBUM: Dict[str, str] = {}
+# Library album keys (norm-cased) for which Step 1 chose preserve_download_images (ambiguous multi-disc).
+# Step 10 must NOT release preservation in the same process run: Step 4 may complete sidecars immediately,
+# which would otherwise clear guards and delete downloads artwork before a second run for manual review.
+AMBIGUOUS_MULTI_DISC_IMPORT_LIB_KEYS: set[str] = set()
 
 
 def clear_preserved_downloads_image_roots() -> None:
     PRESERVED_DOWNLOADS_IMAGE_ROOTS.clear()
     PRESERVED_DOWNLOADS_LIBRARY_ALBUM.clear()
+    AMBIGUOUS_MULTI_DISC_IMPORT_LIB_KEYS.clear()
 
 
 def _norm_path_key(p: Path) -> str:
@@ -74,6 +79,8 @@ def release_downloads_preservation_when_library_complete() -> None:
         except Exception:
             continue
         if not lib.is_dir():
+            continue
+        if lib_key in AMBIGUOUS_MULTI_DISC_IMPORT_LIB_KEYS:
             continue
         if library_album_sidecars_complete(lib):
             to_drop.append(dl_key)
@@ -1677,6 +1684,22 @@ def move_album_from_downloads(
                 register_preserved_music_level_art_spillovers(
                     root_dirs, album_dir, DOWNLOADS_DIR
                 )
+                # Ambiguous multi-disc / incomplete vol art: root_dirs + spillovers may still miss a
+                # sibling folder under the same artist (e.g. "…Greatest Hits Volume 2" with only art).
+                # Guard the whole Downloads artist directory so Step 10 does not remove it until
+                # library leaves have sidecars and release_downloads_preservation drops this mapping.
+                if preserve_download_images or preserve_all_images:
+                    try:
+                        safe_art = sanitize_filename_component(artist)
+                        artist_dl = DOWNLOADS_DIR / safe_art
+                        if artist_dl.is_dir():
+                            register_preserved_downloads_image_roots(
+                                artist_dl, library_album_dir=album_dir
+                            )
+                    except Exception:
+                        pass
+                if preserve_download_images:
+                    AMBIGUOUS_MULTI_DISC_IMPORT_LIB_KEYS.add(_norm_path_key(album_dir))
             except Exception:
                 pass
         cleanup_download_dirs_for_album(

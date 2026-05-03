@@ -5,7 +5,7 @@ import os
 import re
 import shutil
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 import musicbrainzngs
@@ -361,6 +361,23 @@ def fetch_art_from_web(
     try:
         _reset_last_per_disc_caa()
         init_musicbrainz()
+
+        def _title_token_overlap(a: str, b: str) -> float:
+            """0..1 token overlap between album search string and MB release title (guardrail helper)."""
+            try:
+                from tag_operations import normalize_album_name
+
+                aa = normalize_album_name(a or "").lower()
+                bb = normalize_album_name(b or "").lower()
+            except Exception:
+                aa = (a or "").lower()
+                bb = (b or "").lower()
+            ta = {t for t in re.split(r"[^a-z0-9]+", aa) if len(t) >= 3}
+            tb = {t for t in re.split(r"[^a-z0-9]+", bb) if len(t) >= 3}
+            if not ta or not tb:
+                return 0.0
+            return len(ta & tb) / float(min(len(ta), len(tb)))
+
         # When we have CD subdirs, fetch more candidates and prefer a release with matching disc count
         num_discs_wanted: Optional[int] = None
         if album_dir and album_dir.exists():
@@ -402,7 +419,75 @@ def fetch_art_from_web(
             vol_base, vol_n = _parse_vol(search_album_raw)
         except Exception:
             vol_base, vol_n = (None, None)
-        if vol_n is not None:
+
+        # Tags may still say "…Greatest Hits Volume 2" while the merged library folder is
+        # "(1975 - 1980) Eagles Greatest Hits" with a single VOL2 leaf. For album-root web
+        # art, prefer the folder title (no volume suffix) so MB finds the combined release,
+        # not a standalone Vol. 2 disc.
+        use_folder_title_for_root = False
+        tag_vol_n_for_log: Optional[int] = vol_n
+        if (
+            not subfolders_only
+            and album_dir
+            and album_dir.is_dir()
+            and num_discs_wanted == 1
+            and vol_n is not None
+        ):
+            try:
+                from tag_operations import (
+                    album_layout_leaf_directories,
+                    normalize_album_name,
+                    parse_album_disc,
+                    parse_trailing_volume_base_and_num as _pvol,
+                )
+
+                _leaves = list(album_layout_leaf_directories(album_dir))
+                if len(_leaves) == 1 and re.match(
+                    r"^VOL\d+", _leaves[0].name, re.IGNORECASE
+                ):
+                    fn = album_dir.name
+                    fn = re.sub(
+                        r"^\s*\(\d{4}(?:\s*[-–—,]\s*\d{4})*\)\s*",
+                        "",
+                        fn,
+                    ).strip()
+                    if artist:
+                        ap = f"{artist.strip()} - "
+                        if fn.lower().startswith(ap.lower()):
+                            fn = fn[len(ap) :].strip()
+                    fn = re.sub(r"\s{2,}", " ", fn).strip()
+                    _, folder_vol_n = _pvol(fn)
+                    if not fn or folder_vol_n is not None:
+                        pass
+                    else:
+                        use_folder_title_for_root = True
+                        search_album = fn
+                        try:
+                            search_album = normalize_album_name(search_album)
+                            base_album, _dn, _dt = parse_album_disc(search_album)
+                            search_album = (base_album or search_album).strip()
+                        except Exception:
+                            pass
+                        search_album = re.sub(
+                            r"\s*\(\d{4}(?:\s*[,\-]\s*\d{4})*\)\s*$",
+                            "",
+                            search_album,
+                        ).strip()
+                        if artist:
+                            ap = f"{artist.strip()} - "
+                            if search_album.lower().startswith(ap.lower()):
+                                search_album = search_album[len(ap) :].strip()
+                        search_album = re.sub(r"\s{2,}", " ", search_album).strip()
+                        vol_base, vol_n = (None, None)
+                        logmsg.verbose(
+                            "MusicBrainz: root search uses merged folder title (tags implied Vol {n}, folder does not): {title}",
+                            n=tag_vol_n_for_log,
+                            title=search_album,
+                        )
+            except Exception:
+                pass
+
+        if vol_n is not None and not use_folder_title_for_root:
             # Normalize to "Vol. N" (short form tends to work well)
             search_album = f"{(vol_base or search_album).strip()} Vol. {vol_n}"
 
@@ -533,6 +618,67 @@ def fetch_art_from_web(
                     releases = filtered
 
             mbid = releases[0]["id"]
+            if num_discs_wanted and num_discs_wanted > 1 and len(releases) > 0 and not cd_subdirs:
+                # VOL1/VOL2-only leaves (no CD* folder names): MB text order is unreliable and CAA disc
+                # comment scoring never runs — rank releases by medium count vs our leaf count + title overlap.
+                best_key = (-1.0, -1.0, 9999)
+                best_pick_id: Optional[str] = None
+                best_pick_title: Optional[str] = None
+                scan_cap = min(15, len(releases), limit)
+                for idx in range(scan_cap):
+                    r = releases[idx]
+                    rid = r.get("id")
+                    if not rid:
+                        continue
+                    rt_short = (r.get("title") or "").strip()
+                    overlap = _title_token_overlap(search_album, rt_short)
+                    rt_full = rt_short
+                    nmed = -1
+                    try:
+                        rel = musicbrainzngs.get_release_by_id(rid, includes=["media"])
+                        relb = rel.get("release") or {}
+                        nmed = len(relb.get("medium-list", []))
+                        rt_full = (relb.get("title") or rt_short or "").strip()
+                        overlap = max(overlap, _title_token_overlap(search_album, rt_full))
+                    except Exception:
+                        continue
+                    if nmed <= 0:
+                        continue
+                    if nmed == num_discs_wanted:
+                        mb_bonus = 1.0
+                    elif nmed in (num_discs_wanted - 1, num_discs_wanted + 1):
+                        mb_bonus = 0.72
+                    elif nmed > num_discs_wanted:
+                        mb_bonus = 0.48
+                    else:
+                        mb_bonus = 0.28
+                    key_t = (mb_bonus, overlap, -idx)
+                    if key_t > best_key:
+                        best_key = key_t
+                        best_pick_id = rid
+                        best_pick_title = rt_full or None
+                if best_pick_id:
+                    mbid = best_pick_id
+                    selected_release_title = best_pick_title
+                    logmsg.verbose(
+                        "MusicBrainz: VOL-style leaf layout chose mbid={mbid} (medium/title ranking {scores})",
+                        mbid=mbid,
+                        scores=repr(best_key),
+                    )
+                try:
+                    rel = musicbrainzngs.get_release_by_id(mbid, includes=["media"])
+                    nmed_v = len(rel.get("release", {}).get("medium-list", []))
+                    if selected_release_title is None:
+                        selected_release_title = rel.get("release", {}).get("title")
+                    logmsg.verbose(
+                        "MusicBrainz release (VOL-layout): {mbid} (media={nmed}, need_leaves={need})",
+                        mbid=mbid,
+                        nmed=nmed_v,
+                        need=num_discs_wanted,
+                    )
+                except Exception:
+                    pass
+
             if num_discs_wanted and cd_subdirs and len(releases) > 0:
                 # Prefer the release whose CAA has the best "Disc 1..N cover" comment coverage.
                 # Do NOT require MB "medium-list" lookups here (they're slower and can rate-limit);
@@ -621,24 +767,6 @@ def fetch_art_from_web(
                     nmed=nmed,
                     need=num_discs_wanted,
                 )
-
-        def _title_token_overlap(a: str, b: str) -> float:
-            """
-            Return a conservative 0..1 token overlap score between two strings.
-            Used as a guardrail to avoid downloading clearly-wrong web art.
-            """
-            try:
-                from tag_operations import normalize_album_name
-                aa = normalize_album_name(a or "").lower()
-                bb = normalize_album_name(b or "").lower()
-            except Exception:
-                aa = (a or "").lower()
-                bb = (b or "").lower()
-            ta = {t for t in re.split(r"[^a-z0-9]+", aa) if len(t) >= 3}
-            tb = {t for t in re.split(r"[^a-z0-9]+", bb) if len(t) >= 3}
-            if not ta or not tb:
-                return 0.0
-            return len(ta & tb) / float(min(len(ta), len(tb)))
 
         # Guardrail: MusicBrainz search can return a different compilation with a "valid" CAA cover.
         # If the selected MB release title barely overlaps our (normalized) album string, skip web art
@@ -1394,13 +1522,19 @@ def ensure_cover_and_folder(
     album: str,
     label: Optional[str],
     dry_run: bool = False,
-    skip_cover_creation: bool = False
+    skip_cover_creation: bool = False,
+    allow_multi_disc_root_box_art_attempt: bool = False,
 ) -> None:
     """
     Ensure cover.jpg and folder.jpg exist, using (in order):
       - Standard pre-downloaded art (if already copied),
       - embedded art from the first track (read from BACKUP_ROOT mirror when that file exists, else live),
       - web lookup via MusicBrainz.
+
+    For multi-folder layouts (CD*/VOL* leaves), album-root "box" art (consistent embedded across
+    leaves, else CAA front) runs only when ``allow_multi_disc_root_box_art_attempt`` is True
+    (typically: this album was imported from Downloads in the current run). Otherwise an empty
+    root is left empty so disc-only releases stay that way on later passes.
     """
     import shutil
     
@@ -1488,73 +1622,103 @@ def ensure_cover_and_folder(
                     # Multi-disc root cover:
                     # - Use embedded art only if it's consistent across disc/volume leaves (backup mirror when present).
                     # - Otherwise prefer web "front/box" art (CAA) to avoid stamping a random disc image as the box cover.
+                    # - Only on the run that imported this album from Downloads (see allow_multi_disc_root_box_art_attempt);
+                    #   later runs leave an empty root as "no box art" instead of re-fetching CAA every time.
                     if is_multidisc_layout and ENABLE_WEB_ART_LOOKUP:
-                        # Multi-disc consistency: only use embedded art for the album root when it is
-                        # consistent across disc/volume leaves (read from backup mirror when present).
-                        # Otherwise prefer web box/front art to avoid stamping a random disc cover.
-                        try:
-                            from tag_operations import album_layout_leaf_directories
-
-                            leaf_dirs = album_layout_leaf_directories(album_dir)
-                        except Exception:
-                            leaf_dirs = []
-                        embedded_bytes: List[bytes] = []
-                        if leaf_dirs:
-                            for leaf in leaf_dirs:
-                                # Pick a representative audio file under this leaf (first in sorted order)
-                                leaf_audio: Optional[Path] = None
-                                try:
-                                    for r, _d, fns in os.walk(leaf):
-                                        for fn in sorted(fns):
-                                            if Path(fn).suffix.lower() in AUDIO_EXT:
-                                                leaf_audio = Path(r) / fn
-                                                break
-                                        if leaf_audio:
-                                            break
-                                except Exception:
-                                    leaf_audio = None
-                                if not leaf_audio:
-                                    continue
-                                rp, prov = _resolve_embed_read_path(leaf_audio)
-                                b = _read_embedded_art_bytes(rp)
-                                try:
-                                    leaf_label = leaf.relative_to(album_dir).as_posix()
-                                except Exception:
-                                    leaf_label = leaf.name
-                                logmsg.verbose(
-                                    "Multi-disc embedded probe: {leaf} -> {file} (read {prov}) => {has}",
-                                    leaf=leaf_label,
-                                    file=leaf_audio.name,
-                                    prov=prov,
-                                    has="yes" if b else "no",
-                                )
-                                if b:
-                                    embedded_bytes.append(b)
-                        can_use_embedded_root = bool(embedded_bytes) and all(x == embedded_bytes[0] for x in embedded_bytes)
-                        if can_use_embedded_root:
-                            item_key = logmsg.begin_item("cover.jpg")
-                            logmsg.info("cover.jpg created from embedded art.")
-                            logmsg.end_item(item_key)
-                            if not dry_run:
-                                cover_path.write_bytes(embedded_bytes[0])
-                            logmsg.info("Artwork source: embedded (consistent across discs; read from backup when present)")
-                        else:
-                            logmsg.verbose("No cover.jpg; multi-disc layout detected; attempting web fetch first...")
-                        ok, reason = fetch_art_from_web(
-                            artist, album, cover_path, dry_run, album_dir=album_dir, subfolders_only=False
-                        )
-                        if ok and cover_path.exists():
-                            item_key = logmsg.begin_item("cover.jpg")
-                            logmsg.info("cover.jpg downloaded from web.")
-                            logmsg.end_item(item_key)
-                            logmsg.info("Artwork source: web (Cover Art Archive)")
-                        else:
-                            kind, msg = _classify_web_art_reason(reason)
-                            logmsg.verbose("Web art fetch failed ({kind}): {reason}", kind=kind, reason=reason or "(none)")
+                        if not allow_multi_disc_root_box_art_attempt:
+                            try:
+                                rel_root = cover_path.parent.relative_to(album_dir).as_posix()
+                            except ValueError:
+                                rel_root = "."
                             logmsg.verbose(
-                                "Multi-disc: leaving album root cover.jpg empty (not falling back to embedded art)"
+                                "Multi-disc: no cover/folder at {root}; skipping album-root 'box' art (not imported from Downloads this run; leaving disc-only / no-box layout).",
+                                root=rel_root or "album root",
                             )
-                            logmsg.info("Artwork source: none (multi-disc root left empty)")
+                            logmsg.verbose(
+                                "Artwork source: none (multi-disc root left empty; not a new-downloads pass)"
+                            )
+                        else:
+                            # Multi-disc consistency: only use embedded art for the album root when it is
+                            # consistent across disc/volume leaves (read from backup mirror when present).
+                            # Otherwise prefer web box/front art to avoid stamping a random disc cover.
+                            try:
+                                from tag_operations import album_layout_leaf_directories
+
+                                leaf_dirs = album_layout_leaf_directories(album_dir)
+                            except Exception:
+                                leaf_dirs = []
+                            embedded_bytes: List[bytes] = []
+                            if leaf_dirs:
+                                for leaf in leaf_dirs:
+                                    # Pick a representative audio file under this leaf (first in sorted order)
+                                    leaf_audio: Optional[Path] = None
+                                    try:
+                                        for r, _d, fns in os.walk(leaf):
+                                            for fn in sorted(fns):
+                                                if Path(fn).suffix.lower() in AUDIO_EXT:
+                                                    leaf_audio = Path(r) / fn
+                                                    break
+                                            if leaf_audio:
+                                                break
+                                    except Exception:
+                                        leaf_audio = None
+                                    if not leaf_audio:
+                                        continue
+                                    rp, prov = _resolve_embed_read_path(leaf_audio)
+                                    b = _read_embedded_art_bytes(rp)
+                                    try:
+                                        leaf_label = leaf.relative_to(album_dir).as_posix()
+                                    except Exception:
+                                        leaf_label = leaf.name
+                                    logmsg.verbose(
+                                        "Multi-disc embedded probe: {leaf} -> {file} (read {prov}) => {has}",
+                                        leaf=leaf_label,
+                                        file=leaf_audio.name,
+                                        prov=prov,
+                                        has="yes" if b else "no",
+                                    )
+                                    if b:
+                                        embedded_bytes.append(b)
+                            can_use_embedded_root = bool(embedded_bytes) and all(
+                                x == embedded_bytes[0] for x in embedded_bytes
+                            )
+                            if can_use_embedded_root:
+                                item_key = logmsg.begin_item("cover.jpg")
+                                logmsg.info("cover.jpg created from embedded art.")
+                                logmsg.end_item(item_key)
+                                if not dry_run:
+                                    cover_path.write_bytes(embedded_bytes[0])
+                                logmsg.info(
+                                    "Artwork source: embedded (consistent across discs; read from backup when present)"
+                                )
+                            else:
+                                logmsg.verbose(
+                                    "No cover.jpg; multi-disc layout detected; attempting web fetch first..."
+                                )
+                                ok, reason = fetch_art_from_web(
+                                    artist,
+                                    album,
+                                    cover_path,
+                                    dry_run,
+                                    album_dir=album_dir,
+                                    subfolders_only=False,
+                                )
+                                if ok and cover_path.exists():
+                                    item_key = logmsg.begin_item("cover.jpg")
+                                    logmsg.info("cover.jpg downloaded from web.")
+                                    logmsg.end_item(item_key)
+                                    logmsg.info("Artwork source: web (Cover Art Archive)")
+                                else:
+                                    kind, msg = _classify_web_art_reason(reason)
+                                    logmsg.verbose(
+                                        "Web art fetch failed ({kind}): {reason}",
+                                        kind=kind,
+                                        reason=reason or "(none)",
+                                    )
+                                    logmsg.verbose(
+                                        "Multi-disc: leaving album root cover.jpg empty (not falling back to inconsistent embedded art)"
+                                    )
+                                    logmsg.verbose("Artwork source: none (multi-disc root left empty)")
                     else:
                         # Single-disc: prefer embedded art (backup mirror when present; else live),
                         # then fall back to web when sidecar is missing.
@@ -1820,7 +1984,7 @@ def ensure_cover_and_folder(
                     missing_leaf_paths.append(rel_leaf)
                     continue
             if missing_leaf_paths:
-                logmsg.warn(
+                logmsg.verbose(
                     "Leaf artwork still missing ({n}): {leaves}. Not copying album root art into leaves. Preserve downloads assets and overlay/manual artwork if needed.",
                     n=len(missing_leaf_paths),
                     leaves=", ".join(missing_leaf_paths),
@@ -1884,7 +2048,7 @@ def ensure_cover_and_folder(
                                         error=str(e),
                                     )
                 if not vol_cover.exists() or not vol_folder.exists():
-                    logmsg.warn(
+                    logmsg.verbose(
                         "Leaf artwork missing for {leaf} (volume container only; nested CDs are separate leaves). Not copying album root art. Preserve downloads / overlay if needed.",
                         leaf=subdir.name,
                     )
@@ -1892,18 +2056,35 @@ def ensure_cover_and_folder(
             # We no longer stamp root art into leaves; missing leaf art is surfaced via warnings above.
 
 
-def ensure_cover_and_folder_global(dry_run: bool = False) -> None:
+def _album_dir_step4_touch_key(p: Path) -> str:
+    """Stable key for comparing MUSIC_ROOT album dirs to Step 1 downloads-touched paths."""
+    try:
+        return os.path.normcase(os.path.abspath(str(p.resolve(strict=False))))
+    except OSError:
+        return os.path.normcase(os.path.abspath(str(p)))
+
+
+def ensure_cover_and_folder_global(
+    dry_run: bool = False,
+    new_from_downloads_album_dirs: Optional[Set[Path]] = None,
+) -> None:
     """
     For every album directory under MUSIC_ROOT: ensure cover.jpg and folder.jpg
     exist (create from embedded or web if missing, else copy between them).
     Note: we do not blindly stamp album-root art into CD/VOL leaves. Leaf folders should get artwork
     from their own tracks (embedded/web) or manual overlay when ambiguous.
     Single place for all cover/folder logic; used instead of per-album ensure in Step 1.
+
+    ``new_from_downloads_album_dirs``: album folder paths touched when processing Downloads in this
+    same run. Multi-disc "box" art at album root (consistent embedded + CAA) is attempted only for
+    those albums; other multi-disc albums keep an empty root on later runs if they have no sidecars.
     """
     from config import AUDIO_EXT, MUSIC_ROOT
     from tag_operations import get_tags
     from logging_utils import album_label_from_tags
     from structured_logging import logmsg
+
+    downloads_touch_keys = {_album_dir_step4_touch_key(p) for p in (new_from_downloads_album_dirs or set())}
 
     for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
         current = Path(dirpath)
@@ -1934,6 +2115,7 @@ def ensure_cover_and_folder_global(dry_run: bool = False) -> None:
         album_files = [(first_file, tags)]
 
         album_key = logmsg.begin_album(album_dir)
+        allow_box = _album_dir_step4_touch_key(album_dir) in downloads_touch_keys
         ensure_cover_and_folder(
             album_dir,
             album_files,
@@ -1942,6 +2124,7 @@ def ensure_cover_and_folder_global(dry_run: bool = False) -> None:
             label,
             dry_run=dry_run,
             skip_cover_creation=False,
+            allow_multi_disc_root_box_art_attempt=allow_box,
         )
         logmsg.end_album(album_key)
 
@@ -1953,8 +2136,8 @@ def warn_missing_sidecars_for_album_dirs(album_dirs: List[Path]) -> None:
     """
     from config import AUDIO_EXT, MUSIC_ROOT
     from structured_logging import logmsg
-    from tag_operations import album_layout_leaf_directories, get_tags, normalize_album_name
-    from logging_utils import album_label_from_tags
+    from tag_operations import album_layout_leaf_directories
+    from logging_utils import album_label_from_dir
 
     def _has_audio(p: Path) -> bool:
         try:
@@ -1999,26 +2182,12 @@ def warn_missing_sidecars_for_album_dirs(album_dirs: List[Path]) -> None:
                 rel = album_dir.relative_to(MUSIC_ROOT).as_posix()
             except Exception:
                 rel = str(album_dir)
-            label = rel
+            # Folder-based label matches Step 1 / summary grouping; tag years can differ per track
+            # and split warnings into a second album_warnings bucket with the same normalized key.
             try:
-                probe = None
-                for r, _d, fns in os.walk(album_dir):
-                    for fn in sorted(fns):
-                        if Path(fn).suffix.lower() in AUDIO_EXT:
-                            probe = Path(r) / fn
-                            break
-                    if probe:
-                        break
-                if probe:
-                    tags = get_tags(probe) or {}
-                    album_name = normalize_album_name(tags.get("album", "") or "")
-                    label = album_label_from_tags(
-                        tags.get("artist", ""),
-                        album_name or tags.get("album", ""),
-                        tags.get("year", ""),
-                    )
+                label = album_label_from_dir(album_dir)
             except Exception:
-                pass
+                label = rel
             shown = ", ".join(missing[:10]) + ("..." if len(missing) > 10 else "")
             logmsg.warn(
                 "Missing sidecar artwork files ({n}): {files}. Downloads images were preserved for manual review.",

@@ -8,7 +8,7 @@ import shutil
 import sys
 from datetime import datetime
 from pathlib import Path
-from typing import Optional, Tuple, Dict, List
+from typing import Iterable, Optional, Tuple, Dict, List
 
 # ===================== ENVIRONMENT CONFIG =====================
 
@@ -161,6 +161,73 @@ def icloud_dir() -> Path:
 ICLOUD = icloud_dir()
 SCRIPTS_ROOT = ICLOUD / "scripts" / "sync-music-libraries"
 
+
+def _windows_path_suggests_store_python_redirect(p: Path) -> bool:
+    """True if resolved path looks like Microsoft Store / MSIX Python."""
+    try:
+        s = p.resolve().as_posix().lower()
+    except Exception:
+        return False
+    return "pythonsoftwarefoundation" in s or "windowsapps" in s
+
+
+def _localappdata_log_dir_is_msix_redirect(probe: Path) -> bool:
+    """True when an existing ...\\AppData\\Local\\sync-music-libraries\\logs resolves into Store LocalCache."""
+    if not probe.exists():
+        return False
+    try:
+        s = probe.resolve().as_posix().lower()
+    except Exception:
+        return False
+    return "pythonsoftwarefoundation" in s
+
+
+def _windows_python_candidates(primary: Path) -> Iterable[Path]:
+    yield primary
+    base = getattr(sys, "base_executable", None)
+    if base:
+        yield Path(base)
+
+
+def windows_logs_dir_for_executable(python_exe: Path) -> Path:
+    """
+    Default Windows log directory for a given interpreter.
+
+    Microsoft Store Python redirects writes under %LOCALAPPDATA% to its package
+    LocalCache (see Path.resolve()). Tools like cmd.exe still read the normal
+    profile path, so logs look \"missing\". Use a dot-directory under USERPROFILE
+    for Store builds only.
+
+    Venvs often hide this: ``sys.executable`` is the shim under ``.venv\\Scripts``,
+    but ``sys.base_executable`` points at the Store runtime — check both.
+    """
+    storeish = any(
+        _windows_path_suggests_store_python_redirect(p)
+        for p in _windows_python_candidates(python_exe)
+    )
+
+    if not storeish:
+        # Old runs may have created Local\\sync-music-libraries\\logs; resolve() shows MSIX redirect.
+        try:
+            la = os.environ.get("LOCALAPPDATA")
+            if la:
+                probe = Path(la) / "sync-music-libraries" / "logs"
+                if _localappdata_log_dir_is_msix_redirect(probe):
+                    storeish = True
+        except Exception:
+            pass
+
+    if storeish:
+        profile = os.environ.get("USERPROFILE")
+        home = Path(profile) if profile else Path.home()
+        return home / ".sync-music-libraries" / "logs"
+
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        return Path(base) / "sync-music-libraries" / "logs"
+    return Path.home() / "AppData" / "Local" / "sync-music-libraries" / "logs"
+
+
 def logs_dir() -> Path:
     """
     Location for log files (avoid iCloud so logs don't sync/noise).
@@ -171,14 +238,7 @@ def logs_dir() -> Path:
         if override:
             return Path(override)
 
-        # Default to a non-virtualized path on Windows so logs are always visible
-        # (Store/MSIX Python can silently redirect writes under %LOCALAPPDATA%).
-        return Path("C:/temp/sync-music-libraries-logs")
-
-        base = os.environ.get("LOCALAPPDATA")
-        if base:
-            return Path(base) / "sync-music-libraries" / "logs"
-        return Path.home() / "AppData" / "Local" / "sync-music-libraries" / "logs"
+        return windows_logs_dir_for_executable(Path(sys.executable))
     elif SYSTEM == "Darwin":
         return Path.home() / "Library" / "Logs" / "sync-music-libraries"
     else:

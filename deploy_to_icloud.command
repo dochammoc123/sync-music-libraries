@@ -35,11 +35,6 @@ cp -f "$SOURCE_DIR/sync_operations.py" "$DEPLOY_FOLDER/sync_operations.py"
 cp -f "$SOURCE_DIR/run_state.py" "$DEPLOY_FOLDER/run_state.py"
 cp -f "$SOURCE_DIR/roon_refresh.py" "$DEPLOY_FOLDER/roon_refresh.py"
 
-# Copy test script
-if [ -f "$SOURCE_DIR/test_quick.py" ]; then
-    cp -f "$SOURCE_DIR/test_quick.py" "$DEPLOY_FOLDER/test_quick.py"
-fi
-
 # Copy existing run scripts
 echo "Copying run scripts..."
 if [ -f "$SOURCE_DIR/normal_run.command" ]; then
@@ -75,6 +70,14 @@ if [ -f "$SOURCE_DIR/requirements.txt" ]; then
     cp -f "$SOURCE_DIR/requirements.txt" "$DEPLOY_FOLDER/requirements.txt"
 fi
 
+# Documentation
+echo "Copying documentation..."
+for f in README.md USER_GUIDE.md SIDECAR_RULES.md; do
+    if [ -f "$SOURCE_DIR/$f" ]; then
+        cp -f "$SOURCE_DIR/$f" "$DEPLOY_FOLDER/$f"
+    fi
+done
+
 echo ""
 echo "========================================"
 echo "Deployment Complete!"
@@ -85,8 +88,7 @@ echo ""
 echo "To test:"
 echo "  1. Activate venv: source ~/local_python_envs/t8sync/bin/activate"
 echo "  2. cd \"$DEPLOY_FOLDER\""
-echo "  3. python3 test_quick.py"
-echo "  4. python3 main.py --mode normal --dry"
+echo "  3. python3 main.py --mode normal --dry"
 echo ""
 echo "Or use your existing test scripts (safe_test_run.command, etc.)"
 echo ""

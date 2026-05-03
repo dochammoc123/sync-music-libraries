@@ -24,12 +24,14 @@ Requires:
     pip install pystray pillow
 """
 
+import os
 import platform
 import subprocess
 import sys
 import time
 import threading
 from pathlib import Path
+from typing import Tuple
 
 import pystray
 from pystray import MenuItem as item
@@ -38,12 +40,33 @@ from PIL import Image, ImageDraw
 SYSTEM = platform.system()
 
 # SCRIPT PATHS
-SCRIPTS_ROOT = Path(__file__).resolve().parent
-# Try new main.py first, fall back to old script for compatibility
-SYNC_SCRIPT = SCRIPTS_ROOT / "main.py"
-if not SYNC_SCRIPT.exists():
-    SYNC_SCRIPT = SCRIPTS_ROOT / "library_sync_and_upgrade.py"
-ICON_DIR = SCRIPTS_ROOT / "icons"
+# Launcher may live next to main.py OR one level above (legacy "scripts\" with code in .\sync-music-libraries).
+_SCRIPTS_HERE = Path(__file__).resolve().parent
+_SYNC_NESTED = _SCRIPTS_HERE / "sync-music-libraries"
+
+def _pick_sync_bundle() -> Tuple[Path, Path, Path]:
+    """Return (work_dir_for_cwd, main_or_legacy_script, icons_dir)."""
+    if (_SCRIPTS_HERE / "main.py").exists():
+        return (_SCRIPTS_HERE, _SCRIPTS_HERE / "main.py", _SCRIPTS_HERE / "icons")
+    nested_main = _SYNC_NESTED / "main.py"
+    if nested_main.exists():
+        return (_SYNC_NESTED, nested_main, _SYNC_NESTED / "icons")
+    legacy = _SCRIPTS_HERE / "library_sync_and_upgrade.py"
+    return (_SCRIPTS_HERE, legacy, _SCRIPTS_HERE / "icons")
+
+SCRIPTS_ROOT, SYNC_SCRIPT, ICON_DIR = _pick_sync_bundle()
+
+# Let the tray import project config (for log path resolution that matches child Python).
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
+
+# Fallback if icons only exist next to launcher
+if not ICON_DIR.exists() and (_SCRIPTS_HERE / "icons").exists():
+    ICON_DIR = _SCRIPTS_HERE / "icons"
+
+if not SYNC_SCRIPT.exists() and (_SCRIPTS_HERE / "main.py").exists():
+    SYNC_SCRIPT = _SCRIPTS_HERE / "main.py"
+    SCRIPTS_ROOT = _SCRIPTS_HERE
 
 # Which Python to use to run the sync script
 if SYSTEM == "Windows":
@@ -160,8 +183,27 @@ def run_sync(mode="normal", dry=False, checksums=False):
             if checksums:
                 args.append("--t8-checksums")
 
-            # Run the sync script from the scripts directory
-            proc = subprocess.run(args, cwd=str(SCRIPTS_ROOT))
+            # cwd = folder containing main.py so imports and paths match a CLI run from that directory.
+            work_dir = SYNC_SCRIPT.parent
+            env = os.environ.copy()
+            # Match config.logs_dir() for the child interpreter (Store Python uses USERPROFILE\.sync…).
+            if "SYNC_MUSIC_LOGS_DIR" not in env and SYSTEM == "Windows":
+                try:
+                    from config import windows_logs_dir_for_executable
+
+                    env["SYNC_MUSIC_LOGS_DIR"] = str(
+                        windows_logs_dir_for_executable(Path(PYTHON_EXE))
+                    )
+                except Exception:
+                    try:
+                        base = os.environ.get("LOCALAPPDATA", "")
+                        if base:
+                            env["SYNC_MUSIC_LOGS_DIR"] = str(
+                                Path(base) / "sync-music-libraries" / "logs"
+                            )
+                    except Exception:
+                        pass
+            proc = subprocess.run(args, cwd=str(work_dir), env=env)
             state["last_exit_code"] = proc.returncode
         except Exception:
             state["last_exit_code"] = 1

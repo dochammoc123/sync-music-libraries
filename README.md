@@ -1,141 +1,150 @@
 # Music Library Sync and Upgrade
 
-A comprehensive Python script for organizing, syncing, and managing music libraries with automatic artwork handling, FLAC-only enforcement, and cross-platform support.
+Python tooling to turn **downloads → organized FLAC library**, keep **covers** sane, apply **overlay** patches, **embed** artwork when desired, optionally **sync to a portable**.
+
+**Start here:** [USER_GUIDE.md](USER_GUIDE.md) · **Multi-disc / sidecar specifics:** [SIDECAR_RULES.md](SIDECAR_RULES.md) · **Install:** [PREREQUISITES.md](PREREQUISITES.md)
+
+---
 
 ## Features
 
-- **Automatic Organization**: Organizes downloaded music files into structured library format (Artist/Album)
-- **Artwork Management**: Automatically finds, embeds, and manages album artwork
-- **FLAC-Only Enforcement**: Removes non-FLAC files when FLAC versions exist
-- **Update Overlay System**: Apply patches and updates via overlay directory
-- **T8 Library Sync**: Syncs master library to T8 destination
-- **Cross-Platform**: Works on Windows, macOS, and Linux
-- **Tray Launcher**: System tray application for easy access
-- **Comprehensive Logging**: Detailed logs with summary reports
+- **Downloads → library**: organizes into Artist/Album (and VOL/CD layouts from tags).
+- **Artwork**: sidecars (`cover.jpg` / `folder.jpg`), web (CAA) where enabled, embedding.
+- **Update overlay**: drop patches mirrored under `_UpdateOverlay`, applied into the library early in each run.
+- **FLAC-only**: drops lossy cousins when FLAC is present for the same track.
+- **Portable sync**: optional push to configured `T8_ROOT`.
+- **Tray launcher**: queues the same `**main.py`** CLI.
+- **Logging**: Windows defaults vary by Python install — see [Logging](#logging).
+
+---
 
 ## Prerequisites
 
-**⚠️ IMPORTANT: See [PREREQUISITES.md](PREREQUISITES.md) for detailed setup instructions.**
+Python 3.11+, venv, `pip install -r requirements.txt` — see **[PREREQUISITES.md](PREREQUISITES.md)**.
 
-Before using this script, you need:
-
-- Python 3.11 or later
-- Virtual environment set up at:
-  - Windows: `C:\Users\docha\local_python_envs\t8sync`
-  - macOS: `~/local_python_envs/t8sync`
-- All dependencies installed (see PREREQUISITES.md)
-
-## Installation
-
-1. Clone or download this repository
-2. **Set up virtual environment** (see [PREREQUISITES.md](PREREQUISITES.md)):
-  ```bash
-   # Windows
-   cd C:\Users\docha\local_python_envs
-   python -m venv t8sync
-
-   # macOS
-   cd ~/local_python_envs
-   python3 -m venv t8sync
-  ```
-3. **Activate the virtual environment:**
-  - Windows: `C:\Users\docha\local_python_envs\t8sync\Scripts\activate`
-  - macOS: `source ~/local_python_envs/t8sync/bin/activate`
-4. **Install dependencies:**
-  ```bash
-   pip install -r requirements.txt
-  ```
+---
 
 ## Configuration
 
-Edit the configuration section in `config.py` to set your paths:
+Paths and behavior live in `**config.py`**, including:
 
-- `DOWNLOADS_DIR`: Where new music downloads are located
-- `MUSIC_ROOT`: Your main music library root
-- `T8_ROOT`: Destination for T8 sync (optional)
-- `UPDATE_ROOT`: Overlay directory for updates
-- `BACKUP_ROOT`: Backup location for original FLACs
 
-## Artwork sidecar rules
+| Setting                            | Typical role                            |
+| ---------------------------------- | --------------------------------------- |
+| `DOWNLOADS_DIR`                    | Incoming music staging area             |
+| `MUSIC_ROOT`                       | Canonical library tree                  |
+| `UPDATE_ROOT`                      | Overlay (**mirror `MUSIC_ROOT` paths**) |
+| `BACKUP_ROOT`                      | Pre–embed FLAC snapshots                |
+| `T8_ROOT`                          | Device share (optional)                 |
+| `LOGS_DIR` / `SYNC_MUSIC_LOGS_DIR` | Logs on disk                            |
 
-**Sidecar artwork** means `cover.jpg` and `folder.jpg` **next to your tracks** (album folder and/or disc subfolders such as `CD1/` or `VOL1/CD2/`). That is separate from *embedded* art inside the files.
 
-Plain rules:
+---
 
-- **Tracks only in the album folder** (**no** `CD*`/`VOL*` layout leaves detected) → **simple album**: both images at **album root** for cleanup completeness; embed from **`album_root/cover.jpg` only**.
-- **Tracks live under leaf-shaped folders — even once** (**`CD1` only, `VOL3` only, `VOL1` only, lone `VOL1/CD2`, Lilith layouts, …**) → **same rule family as multi-disc everywhere**: Downloads auto-art only when image candidates collapse cleanly; guarded root vs leaf behavior in Step 4; **embedding** skips the whole album until **every leaf folder you actually have** has **at least** `cover.jpg` **or** `folder.jpg`; cleanup completeness wants **both** files **inside each** leaf (**one leaf ⇒ just that folder**). Album root artwork does **not** satisfy leaf completeness.
-- **`Vol 2`**-style naming in folders can tweak warnings; **what matters is folder shape**, not whether you personally “meant” a single-disc release.
+## Usage (canonical entry point)
 
-**Embedding (Step 5) short version:** Runs in **normal** / **embed** (not restore). Copies from **the same folder as each track** (`cover.jpg` preferred, else `folder.jpg`); **never** silently uses album root art for tracks under `CD2/` etc. **`--mode embed`** can also force-update from overlay; **`--embed-all`** is a blunt-force option.
-
-Ambiguous download artwork: Step 10 skips cleanup for **paths recorded during that album’s Step 1 import** (filesystem layout, not tag-based re-matching). See **“How Step 10 knows what to keep”** in [SIDECAR_RULES.md](SIDECAR_RULES.md).
-
-See that file for full step-by-step detail (Downloads hints, Step 4, CAA, lifting preservation when the library is leaf-complete).
-
-## Usage
-
-### Command Line
+Use `**main.py`** (not the legacy `**library_sync_and_upgrade*.py**` copies unless you maintain them yourself):
 
 ```bash
-# Normal mode (process downloads, sync, embed missing art)
-python library_sync_and_upgrade.py --mode normal
+# Typical full run from repository root / sync-music-libraries folder
+python main.py --mode normal
 
-# Embed mode (also embed cover.jpg from UPDATE overlay)
-python library_sync_and_upgrade.py --mode embed
+# Embed mode: overlay cover.jpg copied this run gets written into FLAC tags (after backup logic)
+python main.py --mode embed
 
-# Restore mode (restore FLACs from backup)
-python library_sync_and_upgrade.py --mode restore
+# Restore from backup mirror (+ sync workflow per mode)
+python main.py --mode restore
 
-# Dry run (no changes, just log what would happen)
-python library_sync_and_upgrade.py --mode normal --dry
+# No writes
+python main.py --mode normal --dry
 ```
 
-### Tray Launcher
-
-Run the tray launcher for easy access:
+**Tray:**
 
 ```bash
 python library_tray_launcher.py
 ```
 
-Right-click the tray icon to access:
+---
 
-- Run (normal/embed/restore)
-- DRY Run options
-- Quit
+## Artwork overview
 
-## Modes
+**Sidecars** (`cover.jpg` / `folder.jpg`) live **next to the audio** — album root for flat albums, or under `**CD*`** / `**VOL***` leaf folders when the library is laid out that way. **Embedded** pictures are handled in separate steps (`main.py` Steps 5+).
 
-- **normal**: Process new downloads, apply updates, embed missing art, enforce FLAC-only, sync to T8
-- **embed**: Same as normal, but also embed cover.jpg from UPDATE overlay into FLACs
-- **restore**: Restore FLACs from backup and sync to T8
+Rough rules (full detail → **SIDECAR_RULES.md**):
 
-## Project Structure
+- **Flat album** → sidecars + embed use **album root** `cover.jpg`.
+- **Folders like `VOL1/CD1**` → put art **inside the folder that holds the FLACs**.
+- Album-root “box” CAA/embed attempt for multi-disc layouts is focused on albums **fresh from Downloads on that same run**; later runs leave an intentionally empty album root alone if neither root sidecar exists — see **SIDECAR_RULES** / **ensure_cover_and_folder** behavior.
 
-```
-sync-music-libraries/
-├── library_sync_and_upgrade.py  # Main script (legacy, being refactored)
-├── library_sync_and_upgrade_updated.py  # Has wip for logging refactor and some fixes (merged)
-├── library_tray_launcher.py      # Tray launcher (live)
-├── library_tray_launcher_updated.py # Some changes (merged into live)
-├── config.py                     # Configuration module
-├── logging_utils.py              # Logging utilities
-├── file_operations.py            # File operations
-├── tag_operations.py             # Tag reading/writing
-├── artwork.py                    # Artwork handling
-├── sync_operations.py            # Sync operations
-├── main.py                       # Entry point
-├── requirements.txt              # Python dependencies
-└── README.md                     # This file
-```
+Ambiguous Downloads artwork stays under Downloads until leaf sidecars complete; Step 10 uses paths registered during that import.
+
+---
+
+## Modes (`main.py`)
+
+
+| Mode        | Typical use                                                                                                 |
+| ----------- | ----------------------------------------------------------------------------------------------------------- |
+| **normal**  | Downloads, overlay apply, FLAC-only, cover ensure, embed **if tags lack** art, overlay-driven embed omitted |
+| **embed**   | Like normal, plus embedding **albums that gained `cover.jpg` from overlay this run** into FLAC files        |
+| **restore** | Restore backed-up originals; embedding off                                                                  |
+
+
+Hidden `**--embed-all**`: brute-force embed from `**cover.jpg` per walked folder — avoid unless you know you need it.
+
+---
 
 ## Logging
 
-Logs are written to:
+Everything goes under `**config.LOGS_DIR**` (never under iCloud `scripts\`). Detail + summary filenames are platform-specific (e.g. `library_sync_detail_windows.log`).
 
-- Detailed log: `{SCRIPTS_ROOT}/Logs/library_sync_{platform}.log`
-- Summary log: `{SCRIPTS_ROOT}/Logs/library_sync_{platform}_summary.log`
+**Windows**
+
+| Python | Default log directory |
+| ------ | ---------------------- |
+| Normal install / typical venv (`python.org`) | `%LOCALAPPDATA%\sync-music-libraries\logs` |
+| **Microsoft Store** Python (including many venvs whose `sys.base_executable` points at the Store runtime) | `%USERPROFILE%\.sync-music-libraries\logs` |
+
+Store builds redirect writes under `%LOCALAPPDATA%` into an app-package `LocalCache`, so **Explorer and `cmd` could not see** logs at the “logical” path while Python could — using the dot-folder avoids that.
+
+Override anytime: set **`SYNC_MUSIC_LOGS_DIR`** to an absolute folder (User env, Task Scheduler, or shell).
+
+**Smoke test:** from a checkout of this repo, `python test_log_paths.py` prints the resolved paths and writes a line to the detail log (not copied by deploy).
+
+**macOS:** `~/Library/Logs/sync-music-libraries/` (see `config.py`).
+
+---
+
+## Deploy to iCloud (Windows)
+
+- **Source:** run **`deploy_to_icloud.bat` from the full repository root** (same folder as `sync_operations.py`, `artwork.py`, etc.). That directory is the copy **source** (`%~dp0`); nothing is pulled from `git` by path.
+- **Target:** the iCloud `…\scripts\sync-music-libraries` folder may be **empty** — the script creates it and copies all listed files in. “Empty target” is not the problem.
+- **What goes wrong:** if the **.bat is started from a folder that is not the full repo** (e.g. only `main.py` was copied there), the source files are missing and the deploy is incomplete. Always start the batch from your **complete** `C:\src\sync-music-libraries` (or equivalent) tree.
+
+---
+
+## Project layout (maintained codebase)
+
+```
+sync-music-libraries/
+├── main.py                     # Canonical CLI entrypoint
+├── config.py                   # Paths + toggles
+├── library_tray_launcher.py    # Tray → runs main.py
+├── artwork.py, file_operations.py, sync_operations.py, …
+├── USER_GUIDE.md               # Typical workflow (lightweight)
+├── SIDECAR_RULES.md            # Cover/folder/embed rules detail
+├── PREREQUISITES.md            # Setup
+├── requirements.txt
+└── README.md                   # This file
+
+# Legacy snapshots (prefer main.py flows):
+├── library_sync_and_upgrade.py
+└── library_sync_and_upgrade_updated.py
+```
+
+---
 
 ## License
 
-Private project - All rights reserved
+Private project – all rights reserved.

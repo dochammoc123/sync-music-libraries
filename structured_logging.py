@@ -311,7 +311,9 @@ class StructuredLogger:
         self._current_item_key: Optional[str] = None  # Key for current item (for sanity checking)
         
         # Track warnings and errors for summary (album -> list of (header_key, level, message))
-        # header_key = step where warning occurred (from active_definition_stack[0]); None = no step context
+        # header_key = outermost active header (stack[0]) for summary grouping: main "Step N" line.
+        # Nested push_headers (e.g. "Processing album artwork" under Step 1) must not steal warnings
+        # or they sort after later steps. Detail still attaches to innermost instance via active_instance_stack.
         self.album_warnings: Dict[str, List[Tuple[Optional[str], str, str]]] = {}  # album_label -> [(header_key, level, message), ...]
         self.global_warnings: List[Tuple[str, str]] = []  # [(level, message), ...]
         
@@ -992,7 +994,8 @@ class StructuredLogger:
         # Track warnings/errors for summary
         if level in ("warn", "error"):
             if use_album:
-                # Associate warning with current step (so it appears under correct step in summary)
+                # Roll up to outermost header so summary lists warnings under "Step 1" / "Step 4", not
+                # under a nested sub-header (which would sort out of order at the end of the album block).
                 step_header_key = self.active_definition_stack[0] if self.active_definition_stack else None
                 if use_album not in self.album_warnings:
                     self.album_warnings[use_album] = []
@@ -1286,7 +1289,8 @@ class StructuredLogger:
                             )
                         ]
                         displayed_header_keys.add(warn_header_key)
-                    break
+                # Do not break: multiple warn_album_label strings (e.g. different year in tags vs folder)
+                # normalize to the same album; every bucket must be scanned for step synthesis.
                 
                 def _step_sort_key(entry):
                     header_key, step_instances = entry
@@ -1320,23 +1324,23 @@ class StructuredLogger:
                     
                     # Add warnings that occurred during this step (any label that normalizes to this album)
                     for warn_album_label, warn_list in self.album_warnings.items():
-                        if _album_key(warn_album_label) == normalized_key:
-                            for warn_header_key, warn_level, warning_msg in warn_list:
-                                if warn_header_key == header_key:
-                                    prefix = "[WARN]" if warn_level == "warn" else "[ERROR]"
-                                    lines.append(f"    {prefix} {warning_msg}")
-                            break
+                        if _album_key(warn_album_label) != normalized_key:
+                            continue
+                        for warn_header_key, warn_level, warning_msg in warn_list:
+                            if warn_header_key == header_key:
+                                prefix = "[WARN]" if warn_level == "warn" else "[ERROR]"
+                                lines.append(f"    {prefix} {warning_msg}")
                 
                 # Orphaned warnings are now synthesized into step_groups above so step ordering remains correct.
                 
                 # Add warnings with no step context at end of album
                 for warn_album_label, warn_list in self.album_warnings.items():
-                    if _album_key(warn_album_label) == normalized_key:
-                        for warn_header_key, warn_level, warning_msg in warn_list:
-                            if warn_header_key is None:
-                                prefix = "[WARN]" if warn_level == "warn" else "[ERROR]"
-                                lines.append(f"    {prefix} {warning_msg}")
-                        break
+                    if _album_key(warn_album_label) != normalized_key:
+                        continue
+                    for warn_header_key, warn_level, warning_msg in warn_list:
+                        if warn_header_key is None:
+                            prefix = "[WARN]" if warn_level == "warn" else "[ERROR]"
+                            lines.append(f"    {prefix} {warning_msg}")
         else:
             lines.append("Albums processed: (none)")
         
