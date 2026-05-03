@@ -117,6 +117,13 @@ if exist "%SOURCE_DIR%SIDECAR_RULES.md" (
     call :deploy_copy_one "%SOURCE_DIR%SIDECAR_RULES.md" "%DEPLOY_FOLDER%\SIDECAR_RULES.md"
 )
 
+if exist "%SOURCE_DIR%test_log_paths.py" (
+    call :deploy_copy_one "%SOURCE_DIR%test_log_paths.py" "%DEPLOY_FOLDER%\test_log_paths.py"
+)
+if exist "%SOURCE_DIR%test_log_paths.bat" (
+    call :deploy_copy_one "%SOURCE_DIR%test_log_paths.bat" "%DEPLOY_FOLDER%\test_log_paths.bat"
+)
+
 python "%SOURCE_DIR%stamp_build_info.py" "%DEPLOY_FOLDER%"
 
 echo.

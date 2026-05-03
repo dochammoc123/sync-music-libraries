@@ -47,9 +47,10 @@ Logs/
 _EmbeddedArtOriginal/
 _UpdateOverlay/
 
-# Test files (but keep test_quick.py as it's a deployment utility)
+# Test files (but keep small repo utilities)
 test_*.py
 *_test.py
 !test_quick.py
+!test_log_paths.py
 
 

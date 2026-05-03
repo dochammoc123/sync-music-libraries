@@ -78,6 +78,11 @@ for f in README.md USER_GUIDE.md SIDECAR_RULES.md; do
     fi
 done
 
+# Log path probe (run: python3 test_log_paths.py)
+if [ -f "$SOURCE_DIR/test_log_paths.py" ]; then
+    cp -f "$SOURCE_DIR/test_log_paths.py" "$DEPLOY_FOLDER/test_log_paths.py"
+fi
+
 echo ""
 echo "========================================"
 echo "Deployment Complete!"
