@@ -1278,20 +1278,23 @@ def move_album_from_downloads(
                 # If we saw image candidates but couldn't classify any (unexpected), force ambiguity.
                 if candidates and not logical_groups:
                     logical_groups.add("unknown")
-                # Multi-disc binary rule:
+                # Multi-disc binary rule (only when there is at least one image in Downloads):
                 # - exactly one logical image group => allow and stamp sidecars everywhere
-                # - otherwise => preserve downloads images and do not copy
-                if len(logical_groups) == 1:
+                # - multiple groups => preserve downloads images and do not copy
+                # - no images: len(logical_groups)==0 — do not set preserve; "ambiguous" is wrong.
+                if not candidates:
+                    pass
+                elif len(logical_groups) == 1:
                     stamp_all_multidisc_from_downloads = True
                 else:
                     preserve_download_images = True
                     if subset_leaf_target:
-                        logmsg.warn(
+                        logmsg.verbose(
                             "Downloads artwork: subset leaf target (e.g. VOL2/CD2) and not a single image group (groups={g}); not auto-assigning/copying images. Images will be preserved for manual review.",
                             g=len(logical_groups),
                         )
                     else:
-                        logmsg.warn(
+                        logmsg.verbose(
                             "Downloads artwork: multi-disc target did not resolve to a single image group (groups={g}); not auto-assigning/copying images. Images will be preserved for manual review.",
                             g=len(logical_groups),
                         )
@@ -1536,7 +1539,9 @@ def move_album_from_downloads(
             # Event tracked automatically by structured logging
         elif preserve_download_images:
             art_check_key = logmsg.begin_item("artwork check")
-            logmsg.info("Downloads artwork preserved (ambiguous for multi-disc); Step 4 will use embedded/web rules.")
+            logmsg.warn(
+                "Downloads artwork preserved (ambiguous for multi-disc); Step 4 will use embedded/web rules."
+            )
             logmsg.end_item(art_check_key)
         else:
             # Log that we checked for artwork (so header shows something)
@@ -1662,7 +1667,7 @@ def move_album_from_downloads(
                         leaves_without_images += 1
                 if leaves_without_images:
                     preserve_all_images = True
-                    logmsg.warn(
+                    logmsg.verbose(
                         "Downloads cleanup: multi-disc/volume artwork appears incomplete ({missing}/{total} leaf folders have no images). Preserving all images in downloads for manual review.",
                         missing=leaves_without_images,
                         total=len(leaves),
@@ -1845,6 +1850,8 @@ def process_downloads(dry_run: bool = False) -> List[Path]:
         try:
             album_dir = move_album_from_downloads(album_key, items, MUSIC_ROOT, dry_run, extracted_archives)
             processed_album_dirs.append(album_dir)
+            # Match summary grouping to on-disk folder (tags often still say per-disc titles).
+            logmsg.retarget_current_album_to_folder(album_dir)
         finally:
             logmsg.end_album(album_key_val)
     

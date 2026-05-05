@@ -63,6 +63,7 @@ from datetime import datetime
 from typing import Dict, List, Optional, Tuple
 
 from logging_utils import (
+    album_label_from_dir,
     album_label_from_tags,
     Colors,
     ColoredFormatter,
@@ -238,6 +239,8 @@ class HeaderInstance:
     detail_messages: List[str] = field(default_factory=list)  # Accumulated detail messages
     always_show: bool = False  # If True, header appears in summary even if count is 0
     creation_order: int = 0  # Order in which instance was created (for chronological sorting)
+    # Nested push_header rows (no "Step N" in template) sort under this pipeline step (from outermost parent)
+    summary_anchor_step: Optional[float] = None
     
     def should_log(self) -> bool:
         """
@@ -328,6 +331,19 @@ class StructuredLogger:
         """Set the canonical run start timestamp (should match the detail log's first timestamp)."""
         self.run_start = when
     
+    def _outermost_pipeline_step_num(self) -> Optional[float]:
+        """Step number from the outermost active header whose template contains 'Step N' (e.g. Step 1)."""
+        import re
+
+        for hk in self.active_definition_stack:
+            d = self.header_definitions.get(hk)
+            if not d:
+                continue
+            m = re.search(r"\bStep\s*(\d+(?:\.\d+)?)\b", d.message_template, re.IGNORECASE)
+            if m:
+                return float(m.group(1))
+        return None
+    
     def _get_or_create_instance(self, header_key: str, album_label: Optional[str]) -> HeaderInstance:
         """Get or create a header instance for the given header_key and album_label."""
         instance_key = (header_key, album_label)
@@ -335,6 +351,15 @@ class StructuredLogger:
             # Get always_show from definition
             definition = self.header_definitions.get(header_key)
             always_show = definition.always_show if definition else False
+            anchor: Optional[float] = None
+            if definition:
+                import re
+
+                m = re.search(r"\bStep\s*(\d+(?:\.\d+)?)\b", definition.message_template, re.IGNORECASE)
+                if m:
+                    anchor = float(m.group(1))
+                else:
+                    anchor = self._outermost_pipeline_step_num()
             # Create new instance with creation order
             self._instance_creation_counter += 1
             instance = HeaderInstance(
@@ -342,7 +367,8 @@ class StructuredLogger:
                 album_label=album_label,
                 instance_key=str(uuid.uuid4()),
                 always_show=always_show,
-                creation_order=self._instance_creation_counter
+                creation_order=self._instance_creation_counter,
+                summary_anchor_step=anchor,
             )
             self.header_instances[instance_key] = instance
         return self.header_instances[instance_key]
@@ -496,6 +522,71 @@ class StructuredLogger:
         self._current_album_key = None
         
         # Refresh active instances (creates/reuses global instances for all active definitions)
+        self._refresh_active_instances()
+    
+    def retarget_current_album_to_folder(self, album_dir: "Path") -> None:
+        """
+        After moving files from Downloads, align the active album label with the library folder
+        (same as begin_album(Path)) so the summary does not list one album under tag-based name
+        (e.g. per-disc titles) and again under path-based name after consolidation.
+        Migrates header_instances and album_warnings from the old label to the new one.
+        """
+        from pathlib import Path
+
+        if not isinstance(album_dir, Path) or self.current_album_label is None:
+            return
+
+        try:
+            label = album_label_from_dir(album_dir)
+            if " - " in label:
+                parts = label.split(" - ", 1)
+                artist = parts[0]
+                album_part = parts[1]
+                if " (" in album_part:
+                    album_name, year_part = album_part.rsplit(" (", 1)
+                    year = year_part.rstrip(")")
+                else:
+                    album_name = album_part
+                    year = None
+            else:
+                artist = "Unknown Artist"
+                album_name = "Unknown Album"
+                year = None
+        except Exception:
+            return
+
+        new_label = album_label_from_tags(artist, album_name, year or "")
+        old_label = self.current_album_label
+        if old_label == new_label:
+            self.current_album_info = (artist, album_name, year)
+            self._refresh_active_instances()
+            return
+
+        if old_label in self.album_warnings:
+            self.album_warnings.setdefault(new_label, []).extend(self.album_warnings.pop(old_label))
+
+        to_migrate = [k for k in list(self.header_instances.keys()) if k[1] == old_label]
+        for hk, _al in to_migrate:
+            old_inst = self.header_instances.pop((hk, old_label))
+            old_inst.album_label = new_label
+            new_key = (hk, new_label)
+            if new_key in self.header_instances:
+                ex = self.header_instances[new_key]
+                ex.count += old_inst.count
+                ex.counted_items |= old_inst.counted_items
+                ex.detail_messages.extend(old_inst.detail_messages)
+                ex.creation_order = min(ex.creation_order, old_inst.creation_order)
+                if ex.summary_anchor_step is None:
+                    ex.summary_anchor_step = old_inst.summary_anchor_step
+                elif old_inst.summary_anchor_step is not None:
+                    ex.summary_anchor_step = min(
+                        ex.summary_anchor_step, old_inst.summary_anchor_step
+                    )
+            else:
+                self.header_instances[new_key] = old_inst
+
+        self.current_album_label = new_label
+        self.current_album_info = (artist, album_name, year)
         self._refresh_active_instances()
     
     def begin_item(self, item: str) -> str:
@@ -1275,6 +1366,16 @@ class StructuredLogger:
                         definition = self.header_definitions.get(warn_header_key)
                         if not definition:
                             continue
+                        # Synthetic rows used creation_order=10**9 so min(first_order) sorted them after
+                        # every real step (e.g. Step 5 embed-only warnings after Step 9). Anchor by Step N
+                        # so warning-only steps keep pipeline order when no counted items logged that step.
+                        import re as _re_syn
+
+                        _m_syn = _re_syn.search(
+                            r"\bStep\s*(\d+(?:\.\d+)?)", definition.message_template, _re_syn.IGNORECASE
+                        )
+                        _n_syn = float(_m_syn.group(1)) if _m_syn else 50.0
+                        _synth_creation_order = 600_000 + int(_n_syn * 2_000)
                         step_groups[warn_header_key] = [
                             (
                                 definition,
@@ -1284,7 +1385,7 @@ class StructuredLogger:
                                     instance_key="__orphaned_warning__",
                                     count=0,
                                     always_show=True,
-                                    creation_order=10**9,
+                                    creation_order=_synth_creation_order,
                                 ),
                             )
                         ]
@@ -1295,13 +1396,24 @@ class StructuredLogger:
                 def _step_sort_key(entry):
                     header_key, step_instances = entry
                     definition = step_instances[0][0]
-                    import re
-                    m = re.search(r"\bStep\s*(\d+)\b", definition.message_template, re.IGNORECASE)
-                    step_num = int(m.group(1)) if m else 9999
+                    inst0 = step_instances[0][1]
                     first_order = min(inst[1].creation_order for inst in step_instances)
-                    return (step_num, first_order)
+                    import re
 
-                # Sort steps by Step N first, then creation order
+                    m = re.search(
+                        r"\bStep\s*(\d+(?:\.\d+)?)\b", definition.message_template, re.IGNORECASE
+                    )
+                    if m:
+                        step_seq = float(m.group(1))
+                    else:
+                        # Nested push_header (e.g. "Organizing tracks") inherits outer Step N from stack
+                        a = getattr(inst0, "summary_anchor_step", None)
+                        step_seq = float(a) if a is not None else 9999.0
+                    # Pipeline step first so summary matches real run order (Step 4 before Step 9).
+                    # Nested headers inherit anchor so they sort with Step 1, not after Step 9.
+                    return (step_seq, first_order, definition.level)
+
+                # Sort by pipeline step number, then chronological creation order, then depth
                 sorted_steps = sorted(step_groups.items(), key=_step_sort_key)
                 
                 # Write instances grouped by step (warnings appear under the step they occurred in)

@@ -43,7 +43,7 @@ Paths and behavior live in `**config.py`**, including:
 
 ## Usage (canonical entry point)
 
-Use `**main.py`** (not the legacy `**library_sync_and_upgrade*.py**` copies unless you maintain them yourself):
+Use `**main.py`** (not the legacy `**library_sync_and_upgrade*.py`** copies unless you maintain them yourself):
 
 ```bash
 # Typical full run from repository root / sync-music-libraries folder
@@ -69,12 +69,12 @@ python library_tray_launcher.py
 
 ## Artwork overview
 
-**Sidecars** (`cover.jpg` / `folder.jpg`) live **next to the audio** — album root for flat albums, or under `**CD*`** / `**VOL***` leaf folders when the library is laid out that way. **Embedded** pictures are handled in separate steps (`main.py` Steps 5+).
+**Sidecars** (`cover.jpg` / `folder.jpg`) live **next to the audio** — album root for flat albums, or under `**CD*`** / `**VOL*`** leaf folders when the library is laid out that way. **Embedded** pictures are handled in separate steps (`main.py` Steps 5+).
 
 Rough rules (full detail → **SIDECAR_RULES.md**):
 
 - **Flat album** → sidecars + embed use **album root** `cover.jpg`.
-- **Folders like `VOL1/CD1**` → put art **inside the folder that holds the FLACs**.
+- **Folders like `VOL1/CD1`** → put art **inside the folder that holds the FLACs**.
 - Album-root “box” CAA/embed attempt for multi-disc layouts is focused on albums **fresh from Downloads on that same run**; later runs leave an intentionally empty album root alone if neither root sidecar exists — see **SIDECAR_RULES** / **ensure_cover_and_folder** behavior.
 
 Ambiguous Downloads artwork stays under Downloads until leaf sidecars complete; Step 10 uses paths registered during that import.
@@ -91,7 +91,7 @@ Ambiguous Downloads artwork stays under Downloads until leaf sidecars complete; 
 | **restore** | Restore backed-up originals; embedding off                                                                  |
 
 
-Hidden `**--embed-all**`: brute-force embed from `**cover.jpg` per walked folder — avoid unless you know you need it.
+Hidden `**--embed-all`**: brute-force embed from `**cover.jpg` per walked folder — avoid unless you know you need it.
 
 ---
 
@@ -101,14 +101,16 @@ Everything goes under `**config.LOGS_DIR**` (never under iCloud `scripts\`). Det
 
 **Windows**
 
-| Python | Default log directory |
-| ------ | ---------------------- |
-| Normal install / typical venv (`python.org`) | `%LOCALAPPDATA%\sync-music-libraries\logs` |
+
+| Python                                                                                                    | Default log directory                      |
+| --------------------------------------------------------------------------------------------------------- | ------------------------------------------ |
+| Normal install / typical venv (`python.org`)                                                              | `%LOCALAPPDATA%\sync-music-libraries\logs` |
 | **Microsoft Store** Python (including many venvs whose `sys.base_executable` points at the Store runtime) | `%USERPROFILE%\.sync-music-libraries\logs` |
+
 
 Store builds redirect writes under `%LOCALAPPDATA%` into an app-package `LocalCache`, so **Explorer and `cmd` could not see** logs at the “logical” path while Python could — using the dot-folder avoids that.
 
-Override anytime: set **`SYNC_MUSIC_LOGS_DIR`** to an absolute folder (User env, Task Scheduler, or shell).
+Override anytime: set `**SYNC_MUSIC_LOGS_DIR`** to an absolute folder (User env, Task Scheduler, or shell).
 
 **Smoke test:** from a checkout of this repo, `python test_log_paths.py` prints the resolved paths and writes a line to the detail log (not copied by deploy).
 
@@ -118,7 +120,7 @@ Override anytime: set **`SYNC_MUSIC_LOGS_DIR`** to an absolute folder (User env,
 
 ## Deploy to iCloud (Windows)
 
-- **Source:** run **`deploy_to_icloud.bat` from the full repository root** (same folder as `sync_operations.py`, `artwork.py`, etc.). That directory is the copy **source** (`%~dp0`); nothing is pulled from `git` by path.
+- **Source:** run `**deploy_to_icloud.bat` from the full repository root** (same folder as `sync_operations.py`, `artwork.py`, etc.). That directory is the copy **source** (`%~dp0`); nothing is pulled from `git` by path.
 - **Target:** the iCloud `…\scripts\sync-music-libraries` folder may be **empty** — the script creates it and copies all listed files in. “Empty target” is not the problem.
 - **What goes wrong:** if the **.bat is started from a folder that is not the full repo** (e.g. only `main.py` was copied there), the source files are missing and the deploy is incomplete. Always start the batch from your **complete** `C:\src\sync-music-libraries` (or equivalent) tree.
 

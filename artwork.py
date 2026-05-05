@@ -40,6 +40,7 @@ _DISC_CAA_COMMENT_RE = re.compile(
     re.IGNORECASE,
 )
 _WARNED_SUBSET_RELEASES: set = set()  # (album_dir_str, mbid, need_leaves, media_count)
+_WARNED_WEB_TITLE_MISMATCH: set = set()  # (album_dir_str, mbid) — root + subfolders_only both call fetch_art_from_web
 # Reuse MusicBrainz release id within one ensure_cover run (root + subfolders_only pass) to
 # avoid duplicate CAA "candidate" HTTP storms.
 _CAA_MUSICBRAINZ_MBIT_CACHE: Dict[str, Tuple[str, str, str]] = {}
@@ -362,21 +363,29 @@ def fetch_art_from_web(
         _reset_last_per_disc_caa()
         init_musicbrainz()
 
-        def _title_token_overlap(a: str, b: str) -> float:
-            """0..1 token overlap between album search string and MB release title (guardrail helper)."""
+        def _title_word_tokens(s: str) -> set:
             try:
                 from tag_operations import normalize_album_name
 
-                aa = normalize_album_name(a or "").lower()
-                bb = normalize_album_name(b or "").lower()
+                ss = normalize_album_name(s or "").lower()
             except Exception:
-                aa = (a or "").lower()
-                bb = (b or "").lower()
-            ta = {t for t in re.split(r"[^a-z0-9]+", aa) if len(t) >= 3}
-            tb = {t for t in re.split(r"[^a-z0-9]+", bb) if len(t) >= 3}
+                ss = (s or "").lower()
+            return {t for t in re.split(r"[^a-z0-9]+", ss) if len(t) >= 3}
+
+        def _title_token_overlap(a: str, b: str) -> float:
+            """Asymmetric score: favors when the shorter album string's tokens all appear in MB title."""
+            ta, tb = _title_word_tokens(a), _title_word_tokens(b)
             if not ta or not tb:
                 return 0.0
             return len(ta & tb) / float(min(len(ta), len(tb)))
+
+        def _title_token_jaccard(a: str, b: str) -> float:
+            """Symmetric token similarity — blocks short names like 'Solo' matching only part of 'The Solo Collection'."""
+            ta, tb = _title_word_tokens(a), _title_word_tokens(b)
+            u = ta | tb
+            if not u:
+                return 0.0
+            return len(ta & tb) / float(len(u))
 
         # When we have CD subdirs, fetch more candidates and prefer a release with matching disc count
         num_discs_wanted: Optional[int] = None
@@ -491,8 +500,6 @@ def fetch_art_from_web(
             # Normalize to "Vol. N" (short form tends to work well)
             search_album = f"{(vol_base or search_album).strip()} Vol. {vol_n}"
 
-        limit = 25 if num_discs_wanted else 5
-
         # Build CD subdir map before MusicBrainz (same for full search and cached mbid pass).
         # IMPORTANT: Only treat leaf folders as "discs" when they are actually CD* leaves.
         # Volume leaves (VOL1/VOL2/…) are separate releases/parts in many libraries and should NOT
@@ -532,6 +539,18 @@ def fetch_art_from_web(
                     used.add(next_i)
                     next_i += 1
 
+        # MB search limit: CD multi-leaf layouts need more candidates (MB order is not stable).
+        if cd_subdirs and num_discs_wanted and num_discs_wanted > 1:
+            limit = 50
+        elif num_discs_wanted:
+            limit = 25
+        else:
+            limit = 5
+
+        # Track CD-layout CAA disc-comment scan for cache policy (see cache write below).
+        caa_disc_scan_ran = False
+        caa_disc_best_score = 0
+
         use_mb_cache = False
         if subfolders_only and album_dir:
             try:
@@ -546,6 +565,7 @@ def fetch_art_from_web(
         releases: List[Dict[str, Any]] = []
         mbid: str = ""
         selected_release_title: Optional[str] = None
+        release_media_count: int = -1
 
         if not use_mb_cache:
             if not subfolders_only and album_dir:
@@ -668,6 +688,7 @@ def fetch_art_from_web(
                 try:
                     rel = musicbrainzngs.get_release_by_id(mbid, includes=["media"])
                     nmed_v = len(rel.get("release", {}).get("medium-list", []))
+                    release_media_count = nmed_v
                     if selected_release_title is None:
                         selected_release_title = rel.get("release", {}).get("title")
                     logmsg.verbose(
@@ -683,6 +704,7 @@ def fetch_art_from_web(
                 # Prefer the release whose CAA has the best "Disc 1..N cover" comment coverage.
                 # Do NOT require MB "medium-list" lookups here (they're slower and can rate-limit);
                 # use CAA as the primary signal for per-disc art availability.
+                caa_disc_scan_ran = True
                 best_score = -1
                 best_idx = 9999
                 best_mbid: Optional[str] = None
@@ -718,6 +740,7 @@ def fetch_art_from_web(
                     try:
                         rel = musicbrainzngs.get_release_by_id(mbid, includes=["media"])
                         nmed = len(rel.get("release", {}).get("medium-list", []))
+                        release_media_count = nmed
                         selected_release_title = rel.get("release", {}).get("title")
                     except Exception:
                         nmed = -1
@@ -727,27 +750,9 @@ def fetch_art_from_web(
                         nmed=nmed,
                         need=num_discs_wanted,
                     )
-                    # If we have fewer local discs than the selected release, we are applying a subset of
-                    # that release's per-disc art. This can be correct (you own part of a box set) or wrong
-                    # (different compilation where Disc 3 isn't the same). Warn once per album so it appears
-                    # in the summary and prompts a manual overlay when needed.
-                    # Only warn when the local layout is itself multi-disc (2+ leaves). For 1-disc layouts,
-                    # selecting a multi-disc release just to get a front cover isn't inherently suspicious.
-                    if album_dir and num_discs_wanted > 1 and nmed > num_discs_wanted:
-                        key = (str(album_dir), mbid, int(num_discs_wanted), int(nmed))
-                        if key not in _WARNED_SUBSET_RELEASES:
-                            _WARNED_SUBSET_RELEASES.add(key)
-                            logmsg.warn(
-                                "Using disc art from a larger MusicBrainz release (media={nmed}) for this {need}-disc folder layout. If disc titles differ, use overlay/manual artwork.",
-                                nmed=nmed,
-                                need=num_discs_wanted,
-                            )
 
-            if album_dir:
-                try:
-                    _CAA_MUSICBRAINZ_MBIT_CACHE[str(album_dir.resolve())] = (artist, search_album, mbid)
-                except OSError:
-                    _CAA_MUSICBRAINZ_MBIT_CACHE[str(album_dir)] = (artist, search_album, mbid)
+                caa_disc_best_score = best_score
+
         else:
             logmsg.verbose(
                 "MusicBrainz: reusing release id from prior web pass in this run (no repeat CAA candidate scan)"
@@ -758,6 +763,7 @@ def fetch_art_from_web(
                 try:
                     rel = musicbrainzngs.get_release_by_id(mbid, includes=["media"])
                     nmed = len(rel.get("release", {}).get("medium-list", []))
+                    release_media_count = nmed
                     selected_release_title = rel.get("release", {}).get("title")
                 except Exception:
                     nmed = -1
@@ -768,9 +774,8 @@ def fetch_art_from_web(
                     need=num_discs_wanted,
                 )
 
-        # Guardrail: MusicBrainz search can return a different compilation with a "valid" CAA cover.
-        # If the selected MB release title barely overlaps our (normalized) album string, skip web art
-        # rather than downloading/embedding an obviously wrong cover.
+        # Guardrail: MB search/CAA can return a box set (e.g. "The Solo Collection") when tags say "Solo".
+        # Asymmetric overlap alone scores 1.0 when all album tokens appear in the MB title; require Jaccard too.
         try:
             if selected_release_title is None:
                 for r in releases:
@@ -779,17 +784,64 @@ def fetch_art_from_web(
                         break
             if selected_release_title:
                 overlap = _title_token_overlap(search_album, selected_release_title)
-                # Very permissive threshold: only block results that are clearly different.
-                if overlap < 0.35:
-                    logmsg.warn(
-                        "Web art skipped: MusicBrainz release title mismatch (album={album!r} mb_title={mb_title!r} overlap={overlap:.2f}). Use overlay/manual artwork if needed.",
-                        album=search_album,
-                        mb_title=selected_release_title,
-                        overlap=overlap,
-                    )
+                jacc = _title_token_jaccard(search_album, selected_release_title)
+                if overlap < 0.35 or jacc < 0.35:
+                    try:
+                        _adir_key = str(album_dir.resolve()) if album_dir else ""
+                    except OSError:
+                        _adir_key = str(album_dir) if album_dir else ""
+                    _tm_key = (_adir_key, mbid)
+                    if _tm_key not in _WARNED_WEB_TITLE_MISMATCH:
+                        _WARNED_WEB_TITLE_MISMATCH.add(_tm_key)
+                        logmsg.warn(
+                            "Web art skipped: MusicBrainz top match is not the same release as your album title "
+                            "(your album string used for search: {searched_album!r}; MB release title: {mb_title!r}; token overlap {overlap:.2f}, Jaccard {jacc:.2f}). "
+                            "Short or generic titles often match a different edition (for example a box set vs. a single-disc album). "
+                            "Use overlay or manual artwork if you want covers here.",
+                            searched_album=search_album,
+                            mb_title=selected_release_title,
+                            overlap=overlap,
+                            jacc=jacc,
+                        )
                     return (False, f"MusicBrainz title mismatch (mbid={mbid})")
         except Exception:
             pass
+
+        # Box-set subset warning only after the title guard passes (no misleading media=10 when web art is skipped).
+        if (
+            album_dir
+            and num_discs_wanted
+            and num_discs_wanted > 1
+            and cd_subdirs
+            and release_media_count > num_discs_wanted
+        ):
+            key = (str(album_dir), mbid, int(num_discs_wanted), int(release_media_count))
+            if key not in _WARNED_SUBSET_RELEASES:
+                _WARNED_SUBSET_RELEASES.add(key)
+                logmsg.warn(
+                    "Using disc art from a larger MusicBrainz release (media={nmed}) for this {need}-disc folder layout. If disc titles differ, use overlay/manual artwork.",
+                    nmed=release_media_count,
+                    need=num_discs_wanted,
+                )
+
+        if not use_mb_cache and album_dir:
+            omit_leaf_mbid_cache = (
+                bool(cd_subdirs)
+                and num_discs_wanted
+                and num_discs_wanted > 1
+                and caa_disc_scan_ran
+                and caa_disc_best_score <= 0
+            )
+            if omit_leaf_mbid_cache:
+                logmsg.verbose(
+                    "CAA: not caching MusicBrainz release id for per-disc reuse "
+                    "(no disc-specific CAA comments in scored candidates); subfolder pass will rescan."
+                )
+            else:
+                try:
+                    _CAA_MUSICBRAINZ_MBIT_CACHE[str(album_dir.resolve())] = (artist, search_album, mbid)
+                except OSError:
+                    _CAA_MUSICBRAINZ_MBIT_CACHE[str(album_dir)] = (artist, search_album, mbid)
 
         def _image_url(img: dict) -> Optional[str]:
             """Prefer 1200px, then full image, then 500px."""
@@ -866,8 +918,10 @@ def fetch_art_from_web(
                 )
 
             # Heuristic: if disc folders are "generic" (CD1/CD2 only) with no disc title text,
-            # it's often safer to keep the album front/box art on all discs rather than applying
-            # disc-specific booklet scans from CAA (which may be inconsistent across releases).
+            # order-based CAA fallback (multiple fronts without comments) is ambiguous — skip it.
+            # If CAA images carry Disc/CD comment markers that map to our CDn folders, those are
+            # NOT ambiguous; continue so a subfolder-only pass can fill CD1/CD2 after the root
+            # already has a front (otherwise we would return here and never write leaf sidecars).
             #
             # Named discs look like: "CD1 - Mr. Bad Guy", "CD2 - Barcelona", etc.
             disc_dir_has_titles = False
@@ -877,7 +931,18 @@ def fetch_art_from_web(
                 if remainder and remainder.lower() != p.name.lower():
                     disc_dir_has_titles = True
                     break
-            if n_wanted_leaves > 1 and not disc_dir_has_titles and subfolders_only:
+            comment_maps_to_leaves = False
+            for img in images:
+                di = _caa_first_disc_index_from_comment((img.get("comment") or "").strip())
+                if di is not None and int(di) in cd_subdirs:
+                    comment_maps_to_leaves = True
+                    break
+            if (
+                n_wanted_leaves > 1
+                and not disc_dir_has_titles
+                and subfolders_only
+                and not comment_maps_to_leaves
+            ):
                 logmsg.warn(
                     "Disc folders are generic (CD1/CD2/...); skipping disc-specific CAA assignment because mapping is ambiguous. Use overlay/manual artwork if you want per-disc art."
                 )
@@ -2132,7 +2197,8 @@ def ensure_cover_and_folder_global(
 def warn_missing_sidecars_for_album_dirs(album_dirs: List[Path]) -> None:
     """
     After Step 4, warn for albums processed from downloads that still have missing
-    cover.jpg/folder.jpg next to audio files (root or leaf dirs).
+    cover.jpg/folder.jpg next to audio files (root or leaf dirs), including when
+    no art was available to copy (not only when download images were left in place).
     """
     from config import AUDIO_EXT, MUSIC_ROOT
     from structured_logging import logmsg
@@ -2190,7 +2256,9 @@ def warn_missing_sidecars_for_album_dirs(album_dirs: List[Path]) -> None:
                 label = rel
             shown = ", ".join(missing[:10]) + ("..." if len(missing) > 10 else "")
             logmsg.warn(
-                "Missing sidecar artwork files ({n}): {files}. Downloads images were preserved for manual review.",
+                "Missing sidecar artwork files ({n}): {files}. "
+                "Nothing was written at these paths (no usable download art, embedded art, or web match). "
+                "Add files manually or use the UPDATE overlay if you need sidecars here.",
                 album=label,
                 n=len(missing),
                 files=shown,
@@ -2698,7 +2766,9 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True, 
             else:
                 write_tags_to_file(audio_file, tags, dry_run, backup_enabled, album_artist=aa)
             logmsg.end_item(item_key)
-        
+
+        # Align summary with on-disk album folder (tags often still use per-disc album titles).
+        logmsg.retarget_current_album_to_folder(parent_album_dir)
         logmsg.end_album(album_key)
 
     if albums_updated == 0:

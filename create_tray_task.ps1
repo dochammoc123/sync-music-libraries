@@ -15,7 +15,8 @@ if ($existingTask) {
 }
 
 # Task action - run the start script
-$action = New-ScheduledTaskAction -Execute "C:\Users\docha\iCloudDrive\scripts\start_tray_windows.bat"
+# Prefer nested bat (single copy maintained by deploy); parent scripts\start_tray_windows.bat is also deployed for legacy tasks.
+$action = New-ScheduledTaskAction -Execute "C:\Users\docha\iCloudDrive\scripts\sync-music-libraries\start_tray_windows.bat"
 
 # Task trigger - at logon
 $trigger = New-ScheduledTaskTrigger -AtLogOn

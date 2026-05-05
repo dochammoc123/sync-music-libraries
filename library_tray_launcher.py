@@ -252,12 +252,12 @@ def setup_tray():
     global tray_icon
 
     menu = pystray.Menu(
-        item("Run (normal)", on_run_normal),
+        #item("Run (normal)", on_run_normal),
         #item("Run (normal-checksums)", on_run_normal_checksums),
-        item("Run (embed)", on_run_embed),
+        item("Run", on_run_embed),
         # item("Run (restore)", on_run_restore),
-        item("DRY Run (normal)", on_run_normal_dry),
-        item("DRY Run (embed)", on_run_embed_dry),
+        #item("DRY Run (normal)", on_run_normal_dry),
+        item("DRY Run", on_run_embed_dry),
         # item("DRY Run (restore)", on_run_restore_dry),
         item("Quit", on_quit),
     )

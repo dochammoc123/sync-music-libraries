@@ -78,9 +78,17 @@ if exist "%SOURCE_DIR%embed_art.bat" (
     call :deploy_copy_one "%SOURCE_DIR%embed_art.bat" "%DEPLOY_FOLDER%\embed_art.bat"
 )
 
-REM Copy tray launcher
+REM Copy tray launcher (nested deploy folder)
 if exist "%SOURCE_DIR%library_tray_launcher.py" (
     call :deploy_copy_one "%SOURCE_DIR%library_tray_launcher.py" "%DEPLOY_FOLDER%\library_tray_launcher.py"
+)
+REM Legacy entry points under iCloud scripts\ (Task Scheduler / docs often use these paths;
+REM without this copy, restarting the tray runs stale code next to scripts\, not sync-music-libraries\).
+if exist "%SOURCE_DIR%library_tray_launcher.py" (
+    call :deploy_copy_one "%SOURCE_DIR%library_tray_launcher.py" "%ICLOUD_SCRIPTS%\library_tray_launcher.py"
+)
+if exist "%SOURCE_DIR%start_tray_windows.bat" (
+    call :deploy_copy_one "%SOURCE_DIR%start_tray_windows.bat" "%ICLOUD_SCRIPTS%\start_tray_windows.bat"
 )
 
 REM Copy icons directory
