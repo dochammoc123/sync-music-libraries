@@ -2407,6 +2407,7 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True, 
         normalize_album_artist,
         parse_album_disc,
         is_unknown_or_bucket_artist,
+        warn_if_compilation_needs_manual_tracklist_check,
     )
     from pathlib import Path
     from structured_logging import logmsg
@@ -2769,6 +2770,7 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True, 
 
         # Align summary with on-disk album folder (tags often still use per-disc album titles).
         logmsg.retarget_current_album_to_folder(parent_album_dir)
+        warn_if_compilation_needs_manual_tracklist_check()
         logmsg.end_album(album_key)
 
     if albums_updated == 0:

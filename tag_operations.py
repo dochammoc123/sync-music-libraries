@@ -592,6 +592,47 @@ def normalize_album_artist(artist: str) -> str:
     return normalize_unicode_canonical(a)
 
 
+def is_various_artists_compilation_folder_artist(artist: str) -> bool:
+    """True when album-level artist maps to the Various Artists bucket (compilations, VA, generic buckets)."""
+    a = (artist or "").strip()
+    if not a:
+        return False
+    return normalize_album_artist(a) == "Various Artists"
+
+
+def warn_if_compilation_needs_manual_tracklist_check() -> None:
+    """
+    Log a summary-visible reminder for compilations: many similar MusicBrainz releases exist;
+    confirm track titles/edition manually when unsure.
+    Call after begin_album and retarget_current_album_to_folder so the warning attaches to the right album.
+    Emits at most once per album label per run (see run_state.consume_manual_tracklist_warning_once).
+    """
+    try:
+        from structured_logging import logmsg
+    except ImportError:
+        return
+    info = logmsg.current_album_info
+    if not info:
+        return
+    artist, _, _ = info
+    if not is_various_artists_compilation_folder_artist(artist):
+        return
+    label = logmsg.current_album_label
+    if not label:
+        return
+    try:
+        from run_state import consume_manual_tracklist_warning_once
+    except ImportError:
+        return
+    if not consume_manual_tracklist_warning_once(label):
+        return
+    logmsg.warn(
+        "Various-artist / compilation album: confirm track titles and edition manually when unsure "
+        "(MusicBrainz often lists many similar releases).",
+        count=False,
+    )
+
+
 # For two-artist albums: only file under the majority artist if they have at least this share
 # of tracks (e.g. 2/3). Otherwise treat as Various Artists (e.g. 50/50 or 5/3).
 MAJORITY_ARTIST_MIN_RATIO = 2 / 3

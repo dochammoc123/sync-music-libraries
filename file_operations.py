@@ -17,7 +17,7 @@ from config import (
     MUSIC_ROOT,
 )
 from logging_utils import album_label_from_tags
-from tag_operations import choose_album_year, format_track_filename, sanitize_filename_component, write_tags_to_file, normalize_album_name, parse_album_disc
+from tag_operations import choose_album_year, format_track_filename, sanitize_filename_component, write_tags_to_file, normalize_album_name, parse_album_disc, warn_if_compilation_needs_manual_tracklist_check
 
 # Download folder paths (norm-cased) that must keep image assets through Step 10 when multi-disc
 # assignment was ambiguous (register from move_album_from_downloads; read in _process_cleanup_folder).
@@ -1852,6 +1852,7 @@ def process_downloads(dry_run: bool = False) -> List[Path]:
             processed_album_dirs.append(album_dir)
             # Match summary grouping to on-disk folder (tags often still say per-disc titles).
             logmsg.retarget_current_album_to_folder(album_dir)
+            warn_if_compilation_needs_manual_tracklist_check()
         finally:
             logmsg.end_album(album_key_val)
     
