@@ -96,6 +96,15 @@ Rule of thumb:
 
 Restore / recovery: `**--mode restore`** (uses backup originals; skips embedding)—see `**main.py`** help if you rely on backups.
 
+### Backup mirror (`BACKUP_ROOT`) — what gets removed
+
+Step 8 (**sync backups**) walks `**BACKUP_ROOT**` and deletes a backup file **only** when:
+
+- The **live file** exists at the **same relative path** under `**MUSIC_ROOT**` and compares **identical** to the backup (so the backup adds no value), or  
+- The live file is **missing** — the backup is treated as **orphaned** and removed so dead paths do not linger.
+
+**Rename / move caveat:** Backups are keyed by **relative path**, not identity metadata. If you **rename or move** a track in `**MUSIC_ROOT**` but leave the backup at the **old** path, the next backup sync sees **no** live file there and **deletes** that backup as orphan. If you need to keep pre-move snapshots, **move or copy the backup file to the new relative path** under `BACKUP_ROOT` yourself, or archive copies outside the mirror.
+
 ---
 
 ## Tray launcher

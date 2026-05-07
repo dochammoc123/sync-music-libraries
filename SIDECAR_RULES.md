@@ -101,7 +101,7 @@ Implemented in `artwork.embed_missing_art_global()` — converts **sidecars → 
 - **Which files:** Supported audio extensions (`AUDIO_EXT`); only those that **already have no** embedded picture (FLAC pictures, MP3 `APIC`, MP4 `covr`, plus Mutagen fallbacks).
 - **Which folder’s image:** **Strictly the directory that contains the audio file.** Tracks under `CD2/` never use album-root sidecars automatically — use `**cover.jpg`** there if present, else `**folder.jpg**`. Tracks sitting **directly under the album folder** use `**album_root/cover.jpg` only** (if there is only `folder.jpg` at root, Step 5 does not embed from it).
 - **Subfolder-layout embed gate:** When **any** leaf folder exists (including **exactly one** leaf), embedding runs only after **every such leaf on disk** has **at least one** of `**cover.jpg` / `folder.jpg`**. If a leaf still has **neither**, the whole album is skipped for embedding. **Flat album** (**zero** leaves) never hits this gate.
-- **Backups:** Optional backup of each audio file before writing tags (`BACKUP_ORIGINAL_FLAC_BEFORE_EMBED` in normal/embed modes).
+- **Backups:** Optional backup of each audio file before writing tags (`BACKUP_ORIGINAL_FLAC_BEFORE_EMBED` in normal/embed modes). **Step 8 backup sync** removes a backup only when the live file at the same relative path is identical or missing (orphan)—see **Backup mirror** in [USER_GUIDE.md](USER_GUIDE.md) for the **rename/move** caveat (orphan removal if you do not update `BACKUP_ROOT` paths).
 
 ### Forced embed (overlay / advanced)
 

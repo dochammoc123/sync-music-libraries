@@ -112,10 +112,12 @@ def _warn_and_optional_mirror_caa_front_to_vol1_cd(
             "CAA album-root image is the release front; for multi-disc sets it may be one volume/disc scan, not a separate box cover — override with overlay if needed."
         )
         return
+    from tag_operations import _MEDIA_LEAF_DIR_RE
+
     cd_under: List[Path] = []
     try:
         for p in vol1.iterdir():
-            if p.is_dir() and re.match(r"^CD\d+", p.name, re.IGNORECASE):
+            if p.is_dir() and _MEDIA_LEAF_DIR_RE.match(p.name):
                 cd_under.append(p)
     except OSError:
         return
@@ -2057,7 +2059,8 @@ def ensure_cover_and_folder(
             # Nested VOLn/CDm: do not stamp album-root art onto VOLn automatically.
             # If VOLn needs art, it should come from its own tracks (embedded/web) or manual overlay.
             # Skip VOL* container dirs that already have CD* children (leaves are VOLn/CDm; avoid duplicate warnings).
-            _cd_dir_re = re.compile(r"^CD\d+", re.IGNORECASE)
+            from tag_operations import _MEDIA_LEAF_DIR_RE as _nested_media_under_vol_re
+
             for subdir in album_dir.iterdir():
                 if not subdir.is_dir() or not re.match(
                     r"^VOL\d+", subdir.name, re.IGNORECASE
@@ -2067,7 +2070,8 @@ def ensure_cover_and_folder(
                     continue
                 try:
                     if any(
-                        c.is_dir() and _cd_dir_re.match(c.name) for c in subdir.iterdir()
+                        c.is_dir() and _nested_media_under_vol_re.match(c.name)
+                        for c in subdir.iterdir()
                     ):
                         continue
                 except OSError:

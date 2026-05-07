@@ -65,6 +65,7 @@ from typing import Dict, List, Optional, Tuple
 from logging_utils import (
     album_label_from_dir,
     album_label_from_tags,
+    normalize_album_label_for_summary_display,
     Colors,
     ColoredFormatter,
     PlainFormatter,
@@ -1264,20 +1265,15 @@ class StructuredLogger:
 
         def _album_key(label: str) -> str:
             import re
-            from tag_operations import normalize_unicode_canonical, normalize_album_artist
-            # Normalize the leading artist bucket so "Unknown - …" and "Various Artists - …"
-            # don't appear as two separate albums in the summary.
-            try:
-                if " - " in label:
-                    lead, rest = label.split(" - ", 1)
-                    lead_norm = normalize_album_artist(lead)
-                    label = f"{lead_norm} - {rest}"
-            except Exception:
-                pass
-            # Strip trailing " (YYYY)", " (YYYY - YYYY)", or " (YYYY, YYYY, YYYY)" so same album merges
-            stripped = re.sub(r"\s*\(\d{4}(?:\s*[,\-]\s*\d{4})*\)\s*$", "", label).strip()
-            # Normalize underscore to colon so path-derived labels (sanitized : -> _) match tag-derived labels
-            stripped = (stripped or label).replace("_", ":")
+            from tag_operations import normalize_unicode_canonical
+
+            # Align with display normalization: literal 'None' / placeholders -> 'Unknown Album',
+            # artist bucket -> normalize_album_artist, then strip year for grouping.
+            norm = normalize_album_label_for_summary_display(label)
+            stripped = re.sub(
+                r"\s*\(\d{4}(?:\s*[,\-]\s*\d{4})*\)\s*$", "", norm
+            ).strip()
+            stripped = (stripped or norm).replace("_", ":")
             return normalize_unicode_canonical(stripped).lower()
         
         for (header_key, album_label), instance in self.header_instances.items():
@@ -1286,17 +1282,8 @@ class StructuredLogger:
             
             definition = self.header_definitions[header_key]
             if album_label:
-                # Also normalize the display label's artist bucket so "Unknown" doesn't show up.
-                display_album_label = album_label
-                try:
-                    from tag_operations import normalize_album_artist
-                    if " - " in display_album_label:
-                        lead, rest = display_album_label.split(" - ", 1)
-                        lead_norm = normalize_album_artist(lead)
-                        display_album_label = f"{lead_norm} - {rest}"
-                except Exception:
-                    pass
-                key = _album_key(display_album_label)
+                display_album_label = normalize_album_label_for_summary_display(album_label)
+                key = _album_key(album_label)
                 if key not in album_groups:
                     album_groups[key] = (display_album_label, [])  # Keep first-seen label for display
                 album_groups[key][1].append((definition, instance))
@@ -1312,7 +1299,7 @@ class StructuredLogger:
         for warn_album_label in self.album_warnings.keys():
             key = _album_key(warn_album_label)
             if key not in album_groups:
-                album_groups[key] = (warn_album_label, [])
+                album_groups[key] = (normalize_album_label_for_summary_display(warn_album_label), [])
         
         # Build summary lines
         lines: List[str] = []

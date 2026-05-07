@@ -154,12 +154,57 @@ class PlainFormatter(logging.Formatter):
     pass
 
 
+def canonical_album_name_for_label(album: Optional[str]) -> str:
+    """
+    Normalize placeholder / missing album titles so tag-path-tag drift does not split one album into
+    two summary rows (e.g. literal 'None' from bad tags vs 'Unknown Album').
+    """
+    if album is None:
+        return "Unknown Album"
+    s = str(album).strip()
+    if not s:
+        return "Unknown Album"
+    low = s.lower()
+    if low in (
+        "none",
+        "null",
+        "nil",
+        "n/a",
+        "na",
+        "unknown",
+        "unknown album",
+        "(unknown)",
+        "[unknown]",
+        "<unknown>",
+    ):
+        return "Unknown Album"
+    return s
+
+
+def normalize_album_label_for_summary_display(label: str) -> str:
+    """
+    One-line album label for stdout/summary: normalize artist bucket + canonical album title
+    so placeholders like 'None' become 'Unknown Album' while preserving a trailing ' (year)'.
+    """
+    if not label or " - " not in label:
+        return label
+    from tag_operations import normalize_album_artist
+
+    lead, rest = label.split(" - ", 1)
+    lead_norm = normalize_album_artist(lead)
+    m = re.search(r"(\s*\(\d{4}(?:\s*[,\-]\s*\d{4})*\)\s*)$", rest)
+    if m:
+        album_part = rest[: m.start()].strip()
+        year_suffix = m.group(1)
+        return f"{lead_norm} - {canonical_album_name_for_label(album_part)}{year_suffix}"
+    return f"{lead_norm} - {canonical_album_name_for_label(rest)}"
+
+
 def album_label_from_tags(artist: str, album: str, year: str) -> str:
     """Create an album label from tags. Uses 'Unknown Album' when album is missing or None."""
     artist = (artist or "Unknown Artist").strip() or "Unknown Artist"
     album = (album or "Unknown Album").strip() or "Unknown Album"
-    if album == "None":
-        album = "Unknown Album"
+    album = canonical_album_name_for_label(album)
     album = _strip_leading_artist(album, artist)
     year = (year or "").strip()
     return f"{artist} - {album} ({year})" if year else f"{artist} - {album}"
@@ -177,23 +222,19 @@ def _strip_leading_artist(album: str, artist: str) -> str:
 
 def strip_library_album_vol_cd_suffix_parts(parts: List[str]) -> List[str]:
     """
-    Drop trailing VOLn / CDn segments so Artist/(Year) Album remains.
+    Drop trailing VOLn / CD* / DVD* segments so Artist/(Year) Album remains.
     """
+    from tag_operations import is_library_path_medium_tail_part
+
     out = list(parts)
-    while len(out) >= 3:
-        tail = out[-1]
-        if re.match(r"^CD\d+", tail, re.IGNORECASE) or re.match(
-            r"^VOL\d+", tail, re.IGNORECASE
-        ):
-            out = out[:-1]
-        else:
-            break
+    while len(out) >= 3 and is_library_path_medium_tail_part(out[-1]):
+        out = out[:-1]
     return out
 
 
 def library_album_dir_from_abs(path: Path) -> Path:
     """
-    Resolve a path under MUSIC_ROOT to the album folder, stripping VOLn/CDn
+    Resolve a path under MUSIC_ROOT to the album folder, stripping VOLn/CD*/DVD*
     when ``path`` points inside a multi-volume or multi-disc layout.
     """
     try:
@@ -238,11 +279,13 @@ def album_label_from_dir(album_dir: Path) -> str:
             year = re.sub(r'\s*,\s*', ', ', year)   # normalize comma list
             album = normalize_album_name(year_match.group(2).strip())
             album = _strip_leading_artist(album, artist)
+            album = canonical_album_name_for_label(album)
             return f"{artist} - {album} ({year})"
         else:
             # No year prefix, use as-is (after stripping disc patterns and leading artist)
             album = normalize_album_name(album_folder)
             album = _strip_leading_artist(album, artist)
+            album = canonical_album_name_for_label(album)
             return f"{artist} - {album}"
     else:
         return rel.as_posix()

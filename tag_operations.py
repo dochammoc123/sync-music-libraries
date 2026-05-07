@@ -731,7 +731,22 @@ def parse_album_layout_from_title(
 
 
 _VOL_DIR_RE = re.compile(r"^VOL\d+", re.IGNORECASE)
-_CD_DIR_RE = re.compile(r"^CD\d+", re.IGNORECASE)
+# CD / CD1 / DVD / DVD1 … under an album folder (layout leaves). Plain "CD" / "DVD" included.
+_MEDIA_LEAF_DIR_RE = re.compile(r"^(?:CD\d*|DVD\d*)$", re.IGNORECASE)
+# Kept for call sites that only need the historical CD1-style name; prefer _MEDIA_LEAF_DIR_RE.
+_CD_DIR_RE = _MEDIA_LEAF_DIR_RE
+
+
+def is_library_path_medium_tail_part(name: str) -> bool:
+    """
+    True if ``name`` is a final path segment under Artist/Album/ that should collapse to the album
+    root (e.g. ``CD``, ``CD1``, ``DVD``, ``VOL2``).
+    """
+    if not name:
+        return False
+    if _VOL_DIR_RE.match(name):
+        return True
+    return bool(_MEDIA_LEAF_DIR_RE.match(name))
 
 
 def _natural_sort_key(name: str) -> List:
@@ -741,8 +756,8 @@ def _natural_sort_key(name: str) -> List:
 def album_layout_leaf_directories(album_dir: Path) -> List[Path]:
     """
     Leaf storage directories under an album folder in display order: each top-level
-    ``CD*`` dir, or each ``VOL*/CD*`` nested dir, or a bare ``VOL*`` dir when it has
-    no ``CD*`` children (one medium per volume).
+    ``CD`` / ``CD1`` / ``DVD`` / ``DVD1`` dir, or each ``VOL*/CD*`` (or same media names)
+    nested dir, or a bare ``VOL*`` dir when it has no media children (one medium per volume).
 
     Used for web art (medium count, per-folder covers) and similar.
     """
@@ -768,9 +783,9 @@ def album_layout_leaf_directories(album_dir: Path) -> List[Path]:
                 )
             except OSError:
                 inner = []
-            nested_cds = [p for p in inner if _CD_DIR_RE.match(p.name)]
-            if nested_cds:
-                out.extend(nested_cds)
+            nested_media = [p for p in inner if _MEDIA_LEAF_DIR_RE.match(p.name)]
+            if nested_media:
+                out.extend(nested_media)
             else:
                 out.append(sub)
     return out
