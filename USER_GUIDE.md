@@ -15,7 +15,7 @@ Paths live in `**config.py`**: downloads folder, main library (`**MUSIC_ROOT`**)
 1. **Drop** ripped or purchased files under your **downloads music** folder (`DOWNLOADS_DIR`—often `Downloads\Music\…`).
 2. **Run** `**python main.py --mode normal`** (or **Run (normal)** from the tray launcher).
 3. When it finishes, check the **summary** line (“warnings / errors”). If nothing scary, you’re fine.
-4. The script **moves** audio into `**Artist → Album`** on the main library volume, lays out `**CD*`** / `**VOL***` folders when tags call for them, pulls in **overlay** patches, tries to align **covers** (`cover.jpg` / `folder.jpg`) and **embed** missing artwork, drops MP3/AAC copies when FLAC exists, then **syncs** to portable if configured.
+4. The script **moves** audio into `**Artist → Album`** on the main library volume, lays out `**CD*`** / `**VOL*`** folders when tags call for them, pulls in **overlay** patches, tries to align **covers** (`cover.jpg` / `folder.jpg`) and **embed** missing artwork, drops MP3/AAC copies when FLAC exists, then **syncs** to portable if configured.
 
 Dry run (no writes): `**python main.py --mode normal --dry`**.
 
@@ -98,18 +98,18 @@ Restore / recovery: `**--mode restore`** (uses backup originals; skips embedding
 
 ### Backup mirror (`BACKUP_ROOT`) — what gets removed
 
-Step 8 (**sync backups**) walks `**BACKUP_ROOT**` and deletes a backup file **only** when:
+Step 8 (**sync backups**) walks `**BACKUP_ROOT`** and deletes a backup file **only** when:
 
-- The **live file** exists at the **same relative path** under `**MUSIC_ROOT**` and compares **identical** to the backup (so the backup adds no value), or  
+- The **live file** exists at the **same relative path** under `**MUSIC_ROOT`** and compares **identical** to the backup (so the backup adds no value), or  
 - The live file is **missing** — the backup is treated as **orphaned** and removed so dead paths do not linger.
 
-**Rename / move caveat:** Backups are keyed by **relative path**, not identity metadata. If you **rename or move** a track in `**MUSIC_ROOT**` but leave the backup at the **old** path, the next backup sync sees **no** live file there and **deletes** that backup as orphan. If you need to keep pre-move snapshots, **move or copy the backup file to the new relative path** under `BACKUP_ROOT` yourself, or archive copies outside the mirror.
+**Rename / move caveat:** Backups are keyed by **relative path**, not identity metadata. If you **rename or move** a track in `**MUSIC_ROOT`** but leave the backup at the **old** path, the next backup sync sees **no** live file there and **deletes** that backup as orphan. If you need to keep pre-move snapshots, **move or copy the backup file to the new relative path** under `BACKUP_ROOT` yourself, or archive copies outside the mirror.
 
 ---
 
 ## Tray launcher
 
-Prefer running `**library_tray_launcher.py**` from inside the `**sync-music-libraries**` folder **or** from your **scripts** parent if `**sync-music-libraries`** lives beneath it—that way `**main.py`**, icons, and venv resolve consistently. Tray uses the same `**main.py**` as the CLI.
+Prefer running `**library_tray_launcher.py`** from inside the `**sync-music-libraries**` folder **or** from your **scripts** parent if `**sync-music-libraries`** lives beneath it—that way `**main.py`**, icons, and venv resolve consistently. Tray uses the same `**main.py`** as the CLI.
 
 ---
 
