@@ -676,8 +676,47 @@ def parse_trailing_volume_num(album: str) -> Optional[int]:
     return n
 
 
+def _strip_one_trailing_benign_parenthetical(s: str) -> Optional[str]:
+    """
+    If ``s`` ends with ``( … )`` where the inner text is edition fluff (not disc/volume
+    metadata), return ``s`` without that suffix. Otherwise return None.
+
+    Lets titles like ``…, Vol. 1 (Deluxe Version)`` match trailing ``Vol.`` patterns that
+    require end-of-string. Does not strip ``(Disc 1)``, ``(Vol. 2)``, etc.
+    """
+    m = re.search(r"\s*\(([^)]*)\)\s*$", s)
+    if not m:
+        return None
+    inner = m.group(1).strip()
+    if re.search(r"\bdisc\s*\d", inner, re.IGNORECASE):
+        return None
+    if re.search(r"\bcd\s*\d", inner, re.IGNORECASE):
+        return None
+    if re.search(r"\bvol\.?\s*\d", inner, re.IGNORECASE):
+        return None
+    if re.search(r"\bvolume\s+\d", inner, re.IGNORECASE):
+        return None
+    return s[: m.start()].rstrip()
+
+
+def _strip_trailing_benign_parentheticals(s: str) -> str:
+    """Remove stacked trailing ``(Edition…)`` segments; see `_strip_one_trailing_benign_parenthetical`."""
+    out = s.strip()
+    for _ in range(8):
+        nxt = _strip_one_trailing_benign_parenthetical(out)
+        if not nxt or nxt == out:
+            break
+        out = nxt
+    return out
+
+
 def parse_trailing_volume_base_and_num(album: str) -> Tuple[Optional[str], Optional[int]]:
-    """If title has trailing Volume/Vol., return (base_album, n); else (None, None)."""
+    """
+    If title has trailing Volume/Vol., return (base_album, n); else (None, None).
+
+    Trailing edition markers such as ``(Deluxe Version)`` after ``, Vol. 1`` are stripped
+    first (when they are not disc/volume metadata) so the volume tail patterns can match.
+    """
     if not album or not isinstance(album, str):
         return (None, None)
     s0 = album.strip()
@@ -686,6 +725,12 @@ def parse_trailing_volume_base_and_num(album: str) -> Tuple[Optional[str], Optio
     s_live = re.sub(r"\s*[(\[]\s*Live\s*[)\]]\s*$", "", s0, flags=re.IGNORECASE).strip()
     if s_live and s_live != s0:
         variants.append(s_live)
+    s_no_paren = _strip_trailing_benign_parentheticals(s0)
+    if s_no_paren and s_no_paren not in variants:
+        variants.append(s_no_paren)
+    s_live_noparen = _strip_trailing_benign_parentheticals(s_live) if s_live else ""
+    if s_live_noparen and s_live_noparen not in variants:
+        variants.append(s_live_noparen)
     for s in variants:
         for pat, comma_base in _VOLUME_TAIL_PATTERNS:
             m = pat.match(s)
@@ -827,6 +872,9 @@ def normalize_album_name(album: str) -> str:
     if not album or not isinstance(album, str):
         return album or ""
     s = album.strip()
+    # Edition suffixes like "(Deluxe Version)" after ", Vol. 1" — strip first so volume/disc
+    # patterns and grouping match the base release title.
+    s = _strip_trailing_benign_parentheticals(s)
     # Strip disc patterns from anywhere (not just trailing)
     # [Disc N], (Disc N), [disc N], (disc N)
     s = re.sub(r'\s*[(\[]\s*disc\s*\d+\s*[)\]]\s*', ' ', s, flags=re.IGNORECASE)
