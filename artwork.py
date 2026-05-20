@@ -46,6 +46,9 @@ _WARNED_WEB_TITLE_MISMATCH: set = set()  # (album_dir_str, mbid) — root + subf
 _CAA_MUSICBRAINZ_MBIT_CACHE: Dict[str, Tuple[str, str, str]] = {}
 # key: resolved album_dir str -> (artist, search_album, mbid)
 
+# Read/tag in library, but no embed path (ASF/WMA has no add_picture in this pipeline).
+_EMBED_SKIP_EXTENSIONS = frozenset({".wma"})
+
 
 def _reset_last_per_disc_caa() -> None:
     global _LAST_PER_DISC_CAA
@@ -2389,7 +2392,13 @@ def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_en
             p = Path(dirpath) / name
             if p.suffix.lower() not in AUDIO_EXT:
                 continue
-            
+            if p.suffix.lower() in _EMBED_SKIP_EXTENSIONS:
+                logmsg.verbose(
+                    "Skipping embed for %item% ({ext} does not support embedded art in this pipeline)",
+                    ext=p.suffix.lower(),
+                )
+                continue
+
             # Prefer cover/folder.jpg from the file's directory when in a CD subfolder (disc-specific art)
             file_dir = p.parent
             if file_dir != album_dir:
@@ -3012,6 +3021,12 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
             p = current_dir / name
             if p.suffix.lower() not in AUDIO_EXT:
                 continue
+            if p.suffix.lower() in _EMBED_SKIP_EXTENSIONS:
+                logmsg.verbose(
+                    "Skipping embed for %item% ({ext} does not support embedded art in this pipeline)",
+                    ext=p.suffix.lower(),
+                )
+                continue
 
             total_checked += 1
             item_key = logmsg.begin_item(p.name)
@@ -3243,7 +3258,16 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                                 total_embedded += 1
                                 embedded = True
                             else:
-                                logmsg.warn("Format {ext} does not support embedded art", ext=p.suffix)
+                                if p.suffix.lower() in _EMBED_SKIP_EXTENSIONS:
+                                    logmsg.verbose(
+                                        "Format {ext} does not support embedded art in this pipeline",
+                                        ext=p.suffix,
+                                    )
+                                else:
+                                    logmsg.warn(
+                                        "Format {ext} does not support embedded art",
+                                        ext=p.suffix,
+                                    )
                     except Exception as e:
                         error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
                         if len(error_msg) > 200:
@@ -3252,7 +3276,12 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                         logmsg.verbose("Could not embed art using generic method: {error}", error=error_msg)
                 
                 if not embedded:
-                    if last_embed_error:
+                    if p.suffix.lower() in _EMBED_SKIP_EXTENSIONS:
+                        logmsg.verbose(
+                            "Skipping embed for %item% ({ext} does not support embedded art in this pipeline)",
+                            ext=p.suffix.lower(),
+                        )
+                    elif last_embed_error:
                         logmsg.warn("Could not embed art into %item%: {error}", error=last_embed_error)
                     else:
                         logmsg.warn("Could not determine format or embed art into %item%")
