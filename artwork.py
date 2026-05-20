@@ -4,6 +4,7 @@ Artwork handling: embedding, fetching, and managing album artwork.
 import os
 import re
 import shutil
+import struct
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -46,8 +47,95 @@ _WARNED_WEB_TITLE_MISMATCH: set = set()  # (album_dir_str, mbid) — root + subf
 _CAA_MUSICBRAINZ_MBIT_CACHE: Dict[str, Tuple[str, str, str]] = {}
 # key: resolved album_dir str -> (artist, search_album, mbid)
 
-# Read/tag in library, but no embed path (ASF/WMA has no add_picture in this pipeline).
-_EMBED_SKIP_EXTENSIONS = frozenset({".wma"})
+def _unpack_asf_wmpicture_blob(data: bytes) -> Optional[bytes]:
+    """
+    Raw image bytes from a ``WM/Picture`` attribute value.
+
+    Mp3tag/Mutagen store a binary ASF envelope (type, size, UTF-16 MIME, description)
+    before the JPEG/PNG payload — not a bare image file.
+    """
+    if not data or len(data) < 8:
+        return None
+    if data[:3] == b"\xff\xd8\xff" or data[:4] == b"\x89PNG":
+        return data
+    try:
+        _ptype, size = struct.unpack_from("<bi", data)
+        pos = 5
+        while pos + 2 <= len(data) and data[pos : pos + 2] != b"\x00\x00":
+            pos += 2
+        pos += 2
+        while pos + 2 <= len(data) and data[pos : pos + 2] != b"\x00\x00":
+            pos += 2
+        pos += 2
+        if size > 0 and pos + size <= len(data):
+            image = data[pos : pos + size]
+            if image[:3] == b"\xff\xd8\xff" or image[:4] == b"\x89PNG":
+                return image
+    except (struct.error, IndexError, ValueError):
+        pass
+    for sig in (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n", b"\x89PNG"):
+        idx = data.find(sig)
+        if idx >= 0:
+            return data[idx:]
+    return None
+
+
+def _pack_asf_wmpicture_blob(
+    image_data: bytes,
+    mime: str = "image/jpeg",
+    picture_type: int = 3,
+    description: str = "",
+) -> bytes:
+    """Pack raw image bytes into ASF ``WM/Picture`` attribute form (front cover = 3)."""
+    if image_data[:3] == b"\xff\xd8\xff":
+        mime = "image/jpeg"
+    elif image_data[:4] == b"\x89PNG":
+        mime = "image/png"
+    tag_data = struct.pack("<bi", picture_type, len(image_data))
+    tag_data += mime.encode("utf-16-le") + b"\x00\x00"
+    tag_data += description.encode("utf-16-le") + b"\x00\x00"
+    tag_data += image_data
+    return tag_data
+
+
+def _asf_wmpicture_bytes(mf: Any) -> Optional[bytes]:
+    """Embedded cover from WMA/ASF ``WM/Picture`` (Mp3tag-compatible), if present."""
+    try:
+        from mutagen.asf import ASF
+    except ImportError:
+        return None
+    if not isinstance(mf, ASF) or mf.tags is None:
+        return None
+    try:
+        pics = mf.tags.get("WM/Picture")
+        if not pics:
+            return None
+        raw = pics[0]
+        data = getattr(raw, "value", raw)
+        if isinstance(data, bytes) and len(data) > 0:
+            return _unpack_asf_wmpicture_blob(data)
+    except Exception:
+        return None
+    return None
+
+
+def _embed_asf_wmpicture(path: Path, cover_data: bytes, dry_run: bool = False) -> bool:
+    """Write image bytes to ASF ``WM/Picture`` (packed envelope, not raw JPEG only)."""
+    from mutagen.asf import ASF
+
+    if dry_run:
+        return True
+    payload = cover_data
+    if cover_data[:3] != b"\xff\xd8\xff" and cover_data[:4] != b"\x89PNG":
+        unpacked = _unpack_asf_wmpicture_blob(cover_data)
+        if unpacked:
+            payload = unpacked
+    audio = ASF(str(path))
+    if audio.tags is None:
+        audio.add_tags()
+    audio.tags["WM/Picture"] = _pack_asf_wmpicture_blob(payload)
+    audio.save()
+    return True
 
 
 def _reset_last_per_disc_caa() -> None:
@@ -229,12 +317,18 @@ def _export_embedded_art_from_file(
 ) -> bool:
     """
     Read embedded art from a single on-disk file and write to cover_path.
-    Supports FLAC, MP3, and MP4/M4A.
+    Supports FLAC, MP3, MP4/M4A, and WMA/ASF (WM/Picture).
     """
     sp = str(read_path)
     mf = MutagenFile(sp)
     if mf is None:
         return False
+
+    asf_pic = _asf_wmpicture_bytes(mf)
+    if asf_pic is not None:
+        if not dry_run:
+            cover_path.write_bytes(asf_pic)
+        return True
 
     # FLAC files
     if isinstance(mf, FLAC):
@@ -273,12 +367,16 @@ def _export_embedded_art_from_file(
 def _read_embedded_art_bytes(read_path: Path) -> Optional[bytes]:
     """
     Read embedded artwork bytes from a single on-disk file (no writing).
-    Supports FLAC, MP3, and MP4/M4A.
+    Supports FLAC, MP3, MP4/M4A, and WMA/ASF (WM/Picture).
     """
     sp = str(read_path)
     mf = MutagenFile(sp)
     if mf is None:
         return None
+
+    asf_pic = _asf_wmpicture_bytes(mf)
+    if asf_pic is not None:
+        return asf_pic
 
     if isinstance(mf, FLAC):
         if mf.pictures:
@@ -2392,12 +2490,6 @@ def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_en
             p = Path(dirpath) / name
             if p.suffix.lower() not in AUDIO_EXT:
                 continue
-            if p.suffix.lower() in _EMBED_SKIP_EXTENSIONS:
-                logmsg.verbose(
-                    "Skipping embed for %item% ({ext} does not support embedded art in this pipeline)",
-                    ext=p.suffix.lower(),
-                )
-                continue
 
             # Prefer cover/folder.jpg from the file's directory when in a CD subfolder (disc-specific art)
             file_dir = p.parent
@@ -2468,6 +2560,14 @@ def embed_art_into_audio_files(album_dir: Path, dry_run: bool = False, backup_en
                         embedded = True
                     except Exception as e:
                         last_error = e
+
+                # WMA/ASF (WM/Picture)
+                if not embedded and p.suffix.lower() == ".wma":
+                    try:
+                        if _embed_asf_wmpicture(p, img_data, dry_run):
+                            embedded = True
+                    except Exception as e:
+                        last_error = e
                 
                 # Try generic MutagenFile for other formats
                 if not embedded:
@@ -2514,7 +2614,7 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True, 
         normalize_album_name,
         normalize_album_artist,
         parse_album_disc,
-        is_unknown_or_bucket_artist,
+        albumartist_needs_fixup,
         warn_if_compilation_needs_manual_tracklist_check,
     )
     from pathlib import Path
@@ -2597,8 +2697,7 @@ def add_missing_tags_global(dry_run: bool = False, backup_enabled: bool = True, 
         if album_level_artist and files_with_tags:
             for audio_file, tags in files_with_tags:
                 aa = (tags.get("albumartist") or "").strip()
-                # Treat placeholder albumartist like missing (e.g. "Unknown", "Unkown", "Various", etc.)
-                if (not aa) or is_unknown_or_bucket_artist(aa):
+                if albumartist_needs_fixup(aa, album_level_artist):
                     to_write_by_file[audio_file] = ("albumartist", tags)
 
         # Normalize disc totals within each VOLn (or album root) when tags are inconsistent.
@@ -2910,395 +3009,442 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
     processed_albums = set()
     blocked_albums = set()
     missing_leaf_art_dirs: Dict[str, set] = {}  # album_label -> { "CD2", "VOL1", "VOL1/CD1", ... }
-    
-    for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
-        current_dir = Path(dirpath)
-        
-        # Album root: strip VOLn/CDn (same as logging_utils.album_label_from_dir)
-        try:
-            from logging_utils import library_album_dir_from_abs
+    embed_open_album_key: Optional[str] = None
+    embed_open_album_label: Optional[str] = None
 
-            parent_album_dir = library_album_dir_from_abs(current_dir)
-        except ValueError:
-            parent_album_dir = current_dir
-
-        # Blocked albums: once per album, skip all subdirs.
-        try:
-            album_label_for_block = album_label_from_dir(parent_album_dir)
-        except Exception:
-            album_label_for_block = str(parent_album_dir)
-        if album_label_for_block in blocked_albums:
-            continue
-        
-        # Determine whether we're in a leaf (VOL/CD) folder.
-        is_subdirectory = (current_dir != parent_album_dir)
-
-        # SAFETY: Only embed artwork when it exists in the SAME directory as the audio file(s).
-        # This prevents embedding the album "front/box" art into a disc folder by mistake.
-        if is_subdirectory:
-            local_cover = current_dir / "cover.jpg"
-            local_folder = current_dir / "folder.jpg"
-            if local_cover.exists():
-                cover_path = local_cover
-            elif local_folder.exists():
-                cover_path = local_folder
-            else:
-                # Track missing-leaf-art directories so we can warn once per album.
-                try:
-                    album_label_for_warn = album_label_from_dir(parent_album_dir)
-                except Exception:
-                    album_label_for_warn = str(parent_album_dir)
-                try:
-                    rel_leaf = current_dir.relative_to(parent_album_dir).as_posix()
-                except Exception:
-                    rel_leaf = current_dir.name
-                missing_leaf_art_dirs.setdefault(album_label_for_warn, set()).add(rel_leaf)
-                continue
-        else:
-            cover_path = parent_album_dir / "cover.jpg"
-            if not cover_path.exists():
-                # No album-root art; nothing to embed at the album root.
-                continue
-
-        # Subfolder leaf layout (any detected CD/VOL leaves, including a single leaf): require each
-        # leaf to have local artwork before embedding. Log once per album at album-root walk.
-        try:
-            from tag_operations import album_layout_leaf_directories
-
-            leaves = album_layout_leaf_directories(parent_album_dir) if parent_album_dir.exists() else []
-        except Exception:
-            leaves = []
-        if len(leaves) >= 1 and not is_subdirectory:
-            missing_leaf_art = [
-                L
-                for L in leaves
-                if not (L / "cover.jpg").exists() and not (L / "folder.jpg").exists()
-            ]
-            if missing_leaf_art:
-                album_key = logmsg.begin_album(parent_album_dir)
-                logmsg.warn(
-                    "Skipping embed: multi-disc album is missing disc cover files in {n} subfolders (need cover.jpg or folder.jpg in each CD/VOL leaf)",
-                    n=len(missing_leaf_art),
-                )
-                logmsg.verbose(
-                    "Missing disc art in: {paths}",
-                    paths=", ".join(
-                        p.relative_to(parent_album_dir).as_posix() for p in missing_leaf_art[:8]
-                    )
-                    + (" ..." if len(missing_leaf_art) > 8 else ""),
-                )
-                logmsg.end_album(album_key)
-                blocked_albums.add(album_label_for_block)
-                continue
-        
-        # Use parent album directory for album context
-        album_key = logmsg.begin_album(parent_album_dir)
-        album_label = album_label_from_dir(parent_album_dir)
-
-        # Warn once per album about leaf dirs that were skipped due to missing local art.
-        if not is_subdirectory:
-            skipped = missing_leaf_art_dirs.pop(album_label, None)
-            if skipped:
-                logmsg.warn(
-                    "Skipping embed for leaf folders with no local artwork (need cover.jpg or folder.jpg in the same folder): {paths}",
-                    paths=", ".join(sorted(skipped)),
-                )
-        
-        # Only skip if we've already processed the parent album directory itself
-        # (not subdirectories - we want to process files in both parent and subdirectories)
-        if not is_subdirectory and album_label in processed_albums:
-            logmsg.end_album(album_key)
-            continue
-        
-        # Mark parent album directory as processed (only once, when we first encounter it)
-        if not is_subdirectory:
-            processed_albums.add(album_label)
-        
-        cover_data = None
-        embedded_any = False
-
-        for name in filenames:
-            p = current_dir / name
-            if p.suffix.lower() not in AUDIO_EXT:
-                continue
-            if p.suffix.lower() in _EMBED_SKIP_EXTENSIONS:
-                logmsg.verbose(
-                    "Skipping embed for %item% ({ext} does not support embedded art in this pipeline)",
-                    ext=p.suffix.lower(),
-                )
-                continue
-
-            total_checked += 1
-            item_key = logmsg.begin_item(p.name)
-
-            # Check if file already has embedded art
-            # Try to detect actual format (not just extension) to handle misnamed files
-            has_embedded_art = False
-            detected_format = None
-            
+    def _close_embed_album_context() -> None:
+        nonlocal embed_open_album_key, embed_open_album_label
+        if embed_open_album_key is not None:
             try:
-                # First, try to detect actual format
-                audio_test = MutagenFile(str(p))
-                if audio_test is not None:
-                    # Detect format from MutagenFile type
-                    class_name = type(audio_test).__name__.lower()
-                    if 'flac' in class_name:
-                        detected_format = 'flac'
-                    elif 'mp3' in class_name or 'id3' in class_name:
-                        detected_format = 'mp3'
-                    elif 'mp4' in class_name or 'm4a' in class_name:
-                        detected_format = 'mp4'
+                logmsg.end_album(embed_open_album_key)
             except Exception:
-                pass  # Will try format-specific handlers below
-            
-            # Use detected format if available, otherwise fall back to extension
-            use_format = detected_format or p.suffix.lower().lstrip('.')
-            
+                pass
+            embed_open_album_key = None
+            embed_open_album_label = None
+
+    def _ensure_embed_album_context(parent_dir: Path, label: str) -> str:
+        nonlocal embed_open_album_key, embed_open_album_label
+        if embed_open_album_label != label:
+            _close_embed_album_context()
+            embed_open_album_key = logmsg.begin_album(parent_dir)
+            embed_open_album_label = label
+        return embed_open_album_key  # type: ignore[return-value]
+
+    try:
+        for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
+            current_dir = Path(dirpath)
+        
+            # Album root: strip VOLn/CDn (same as logging_utils.album_label_from_dir)
             try:
-                # Try FLAC first
-                if use_format == 'flac' or p.suffix.lower() == ".flac":
+                from logging_utils import library_album_dir_from_abs
+
+                parent_album_dir = library_album_dir_from_abs(current_dir)
+            except ValueError:
+                parent_album_dir = current_dir
+
+            # Blocked albums: once per album, skip all subdirs.
+            try:
+                album_label_for_block = album_label_from_dir(parent_album_dir)
+            except Exception:
+                album_label_for_block = str(parent_album_dir)
+            if album_label_for_block in blocked_albums:
+                continue
+        
+            # Determine whether we're in a leaf (VOL/CD) folder.
+            is_subdirectory = (current_dir != parent_album_dir)
+
+            # SAFETY: Only embed artwork when it exists in the SAME directory as the audio file(s).
+            # This prevents embedding the album "front/box" art into a disc folder by mistake.
+            if is_subdirectory:
+                local_cover = current_dir / "cover.jpg"
+                local_folder = current_dir / "folder.jpg"
+                if local_cover.exists():
+                    cover_path = local_cover
+                elif local_folder.exists():
+                    cover_path = local_folder
+                else:
+                    # Track missing-leaf-art directories so we can warn once per album.
                     try:
-                        audio = FLAC(str(p))
-                        if len(audio.pictures) > 0:
-                            has_embedded_art = True
-                            logmsg.verbose("%item% already has embedded art, skipping")
+                        album_label_for_warn = album_label_from_dir(parent_album_dir)
                     except Exception:
-                        # Not actually FLAC, try other formats
-                        pass
-                
-                # Try MP3
-                if not has_embedded_art and (use_format == 'mp3' or p.suffix.lower() == ".mp3"):
+                        album_label_for_warn = str(parent_album_dir)
                     try:
-                        from mutagen.mp3 import MP3
-                        audio = MP3(str(p))
-                        if audio.tags:
-                            # Check for APIC frames (cover art)
-                            for key in audio.tags.keys():
-                                if key.startswith("APIC"):
+                        rel_leaf = current_dir.relative_to(parent_album_dir).as_posix()
+                    except Exception:
+                        rel_leaf = current_dir.name
+                    missing_leaf_art_dirs.setdefault(album_label_for_warn, set()).add(rel_leaf)
+                    continue
+            else:
+                cover_path = parent_album_dir / "cover.jpg"
+                if not cover_path.exists():
+                    # No album-root art; nothing to embed at the album root.
+                    continue
+
+            # Subfolder leaf layout (any detected CD/VOL leaves, including a single leaf): require each
+            # leaf to have local artwork before embedding. Log once per album at album-root walk.
+            try:
+                from tag_operations import album_layout_leaf_directories
+
+                leaves = album_layout_leaf_directories(parent_album_dir) if parent_album_dir.exists() else []
+            except Exception:
+                leaves = []
+            if len(leaves) >= 1 and not is_subdirectory:
+                missing_leaf_art = [
+                    L
+                    for L in leaves
+                    if not (L / "cover.jpg").exists() and not (L / "folder.jpg").exists()
+                ]
+                if missing_leaf_art:
+                    album_key = logmsg.begin_album(parent_album_dir)
+                    logmsg.warn(
+                        "Skipping embed: multi-disc album is missing disc cover files in {n} subfolders (need cover.jpg or folder.jpg in each CD/VOL leaf)",
+                        n=len(missing_leaf_art),
+                    )
+                    logmsg.verbose(
+                        "Missing disc art in: {paths}",
+                        paths=", ".join(
+                            p.relative_to(parent_album_dir).as_posix() for p in missing_leaf_art[:8]
+                        )
+                        + (" ..." if len(missing_leaf_art) > 8 else ""),
+                    )
+                    logmsg.end_album(album_key)
+                    blocked_albums.add(album_label_for_block)
+                    continue
+        
+            try:
+                album_label = album_label_from_dir(parent_album_dir)
+            except Exception:
+                album_label = str(parent_album_dir)
+
+            if not is_subdirectory and album_label in processed_albums:
+                continue
+            if not is_subdirectory:
+                processed_albums.add(album_label)
+
+            _ensure_embed_album_context(parent_album_dir, album_label)
+
+            # Warn once per album about leaf dirs that were skipped due to missing local art.
+            if not is_subdirectory:
+                skipped = missing_leaf_art_dirs.pop(album_label, None)
+                if skipped:
+                    logmsg.warn(
+                        "Skipping embed for leaf folders with no local artwork (need cover.jpg or folder.jpg in the same folder): {paths}",
+                        paths=", ".join(sorted(skipped)),
+                    )
+        
+            cover_data = None
+            embedded_any = False
+
+            for name in filenames:
+                p = current_dir / name
+                if p.suffix.lower() not in AUDIO_EXT:
+                    continue
+
+                total_checked += 1
+                item_key = logmsg.begin_item(p.name)
+
+                # Check if file already has embedded art
+                # Try to detect actual format (not just extension) to handle misnamed files
+                has_embedded_art = False
+                detected_format = None
+            
+                try:
+                    # First, try to detect actual format
+                    audio_test = MutagenFile(str(p))
+                    if audio_test is not None:
+                        # Detect format from MutagenFile type
+                        class_name = type(audio_test).__name__.lower()
+                        if 'flac' in class_name:
+                            detected_format = 'flac'
+                        elif 'mp3' in class_name or 'id3' in class_name:
+                            detected_format = 'mp3'
+                        elif 'mp4' in class_name or 'm4a' in class_name:
+                            detected_format = 'mp4'
+                        elif 'asf' in class_name:
+                            detected_format = 'asf'
+                except Exception:
+                    pass  # Will try format-specific handlers below
+            
+                # Use detected format if available, otherwise fall back to extension
+                use_format = detected_format or p.suffix.lower().lstrip('.')
+            
+                try:
+                    # Try FLAC first
+                    if use_format == 'flac' or p.suffix.lower() == ".flac":
+                        try:
+                            audio = FLAC(str(p))
+                            if len(audio.pictures) > 0:
+                                has_embedded_art = True
+                                logmsg.verbose("%item% already has embedded art, skipping")
+                        except Exception:
+                            # Not actually FLAC, try other formats
+                            pass
+                
+                    # Try MP3
+                    if not has_embedded_art and (use_format == 'mp3' or p.suffix.lower() == ".mp3"):
+                        try:
+                            from mutagen.mp3 import MP3
+                            audio = MP3(str(p))
+                            if audio.tags:
+                                # Check for APIC frames (cover art)
+                                for key in audio.tags.keys():
+                                    if key.startswith("APIC"):
+                                        has_embedded_art = True
+                                        logmsg.verbose("%item% already has embedded art, skipping")
+                                        break
+                        except Exception:
+                            pass
+                
+                    # Check MP4/M4A for embedded art
+                    if not has_embedded_art and (use_format == 'mp4' or p.suffix.lower() in {".m4a", ".mp4", ".m4v"}):
+                        try:
+                            audio = MP4(str(p))
+                            if 'covr' in audio:
+                                has_embedded_art = True
+                                logmsg.verbose("%item% already has embedded art, skipping")
+                        except Exception:
+                            pass
+
+                    # WMA/ASF (WM/Picture)
+                    if not has_embedded_art and (
+                        use_format == "asf" or p.suffix.lower() == ".wma"
+                    ):
+                        try:
+                            from mutagen.asf import ASF
+
+                            audio = ASF(str(p))
+                            if _asf_wmpicture_bytes(audio):
+                                has_embedded_art = True
+                                logmsg.verbose("%item% already has embedded art, skipping")
+                        except Exception:
+                            pass
+                
+                    # Generic check for other formats
+                    if not has_embedded_art:
+                        try:
+                            audio = MutagenFile(str(p))
+                            if audio is not None:
+                                if _asf_wmpicture_bytes(audio):
                                     has_embedded_art = True
                                     logmsg.verbose("%item% already has embedded art, skipping")
-                                    break
-                    except Exception:
-                        pass
-                
-                # Check MP4/M4A for embedded art
-                if not has_embedded_art and (use_format == 'mp4' or p.suffix.lower() in {".m4a", ".mp4", ".m4v"}):
+                                elif hasattr(audio, "pictures") and len(audio.pictures) > 0:
+                                    has_embedded_art = True
+                                    logmsg.verbose("%item% already has embedded art, skipping")
+                        except Exception:
+                            pass
+                        
+                except Exception as e:
+                    logmsg.warn("Could not check embedded art for %item%: {error}", error=str(e))
+                    # Don't skip - try to embed anyway if we can determine format later
+
+                if has_embedded_art:
+                    logmsg.end_item(item_key)
+                    continue
+
+                # Check if MP4/M4A already has embedded art
+                if p.suffix.lower() in {".m4a", ".mp4", ".m4v"}:
                     try:
                         audio = MP4(str(p))
                         if 'covr' in audio:
                             has_embedded_art = True
                             logmsg.verbose("%item% already has embedded art, skipping")
                     except Exception:
-                        pass
+                        pass  # Will try to embed below
                 
-                # Generic check for other formats
-                if not has_embedded_art:
+                    if has_embedded_art:
+                        logmsg.end_item(item_key)
+                        continue
+
+                if cover_data is None:
                     try:
-                        audio = MutagenFile(str(p))
-                        if audio is not None:
-                            if hasattr(audio, "pictures") and len(audio.pictures) > 0:
-                                has_embedded_art = True
-                                logmsg.verbose("%item% already has embedded art, skipping")
-                    except Exception:
-                        pass
-                        
-            except Exception as e:
-                logmsg.warn("Could not check embedded art for %item%: {error}", error=str(e))
-                # Don't skip - try to embed anyway if we can determine format later
+                        cover_data = cover_path.read_bytes()
+                    except Exception as e:
+                        logmsg.warn("Could not read cover.jpg: {error}", error=str(e))
+                        logmsg.end_item(item_key)
+                        break
 
-            if has_embedded_art:
-                logmsg.end_item(item_key)
-                continue
+                embedded_any = True
 
-            # Check if MP4/M4A already has embedded art
-            if p.suffix.lower() in {".m4a", ".mp4", ".m4v"}:
-                try:
-                    audio = MP4(str(p))
-                    if 'covr' in audio:
-                        has_embedded_art = True
-                        logmsg.verbose("%item% already has embedded art, skipping")
-                except Exception:
-                    pass  # Will try to embed below
-                
-                if has_embedded_art:
+                if dry_run:
+                    logmsg.info("[DRY RUN] Would embed art into %item% (missing embedded art)")
+                    total_embedded += 1
                     logmsg.end_item(item_key)
                     continue
 
-            if cover_data is None:
+                # Keep console output concise: one info line per file when embedding succeeds.
+                logmsg.verbose("Embedding art into %item% (missing embedded art)")
+
                 try:
-                    cover_data = cover_path.read_bytes()
+                    backup_audio_file_if_needed(p, dry_run, backup_enabled)
                 except Exception as e:
-                    logmsg.warn("Could not read cover.jpg: {error}", error=str(e))
+                    error_msg = str(e).split("\n")[0] if str(e) else "unknown error"
+                    if len(error_msg) > 200:
+                        error_msg = error_msg[:197] + "..."
+                    logmsg.warn("Backup before embed failed for %item%: {error}", error=error_msg)
                     logmsg.end_item(item_key)
-                    break
+                    continue
 
-            embedded_any = True
-
-            if dry_run:
-                logmsg.info("[DRY RUN] Would embed art into %item% (missing embedded art)")
-                total_embedded += 1
-                logmsg.end_item(item_key)
-                continue
-
-            # Keep console output concise: one info line per file when embedding succeeds.
-            logmsg.verbose("Embedding art into %item% (missing embedded art)")
-
-            backup_audio_file_if_needed(p, dry_run, backup_enabled)
-
-            # Embed art based on detected or actual file type
-            # Try to detect actual format first (handles misnamed files)
-            embedded = False
-            last_embed_error = None  # Accumulate for single warning at end
-            try:
-                # Try FLAC first (if extension or detected format suggests it)
-                if use_format == 'flac' or p.suffix.lower() == ".flac":
-                    try:
-                        audio = FLAC(str(p))
-                        pic = Picture()
-                        pic.data = cover_data
-                        pic.type = 3
-                        pic.mime = "image/jpeg"
-                        pic.desc = "Cover"
-                        audio.clear_pictures()
-                        audio.add_picture(pic)
-                        audio.save()
-                        logmsg.info("Embedded art into %item% (FLAC)")
-                        total_embedded += 1
-                        embedded = True
-                    except Exception as e:
-                        if p.suffix.lower() == ".flac":
-                            error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
-                            if len(error_msg) > 200:
-                                error_msg = error_msg[:197] + "..."
-                            last_embed_error = error_msg
-                            logmsg.verbose("File has .flac extension but is not valid FLAC, trying other formats: {error}", error=error_msg)
-                        else:
-                            raise
+                # Embed art based on detected or actual file type
+                # Try to detect actual format first (handles misnamed files)
+                embedded = False
+                last_embed_error = None  # Accumulate for single warning at end
+                try:
+                    # Try FLAC first (if extension or detected format suggests it)
+                    if use_format == 'flac' or p.suffix.lower() == ".flac":
+                        try:
+                            audio = FLAC(str(p))
+                            pic = Picture()
+                            pic.data = cover_data
+                            pic.type = 3
+                            pic.mime = "image/jpeg"
+                            pic.desc = "Cover"
+                            audio.clear_pictures()
+                            audio.add_picture(pic)
+                            audio.save()
+                            logmsg.info("Embedded art into %item% (FLAC)")
+                            total_embedded += 1
+                            embedded = True
+                        except Exception as e:
+                            if p.suffix.lower() == ".flac":
+                                error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
+                                if len(error_msg) > 200:
+                                    error_msg = error_msg[:197] + "..."
+                                last_embed_error = error_msg
+                                logmsg.verbose("File has .flac extension but is not valid FLAC, trying other formats: {error}", error=error_msg)
+                            else:
+                                raise
                 
-                # Try MP3 if FLAC didn't work
-                if not embedded and (use_format == 'mp3' or p.suffix.lower() == ".mp3"):
-                    try:
-                        from mutagen.mp3 import MP3
-                        audio = MP3(str(p))
-                        if audio.tags is None:
+                    # Try MP3 if FLAC didn't work
+                    if not embedded and (use_format == 'mp3' or p.suffix.lower() == ".mp3"):
+                        try:
+                            from mutagen.mp3 import MP3
+                            audio = MP3(str(p))
+                            if audio.tags is None:
+                                audio.add_tags()
+                            audio.tags.add(APIC(
+                                encoding=3,  # UTF-8
+                                mime="image/jpeg",
+                                type=3,  # Cover (front)
+                                desc="Cover",
+                                data=cover_data
+                            ))
+                            audio.save()
+                            logmsg.info("Embedded art into %item% (MP3)")
+                            total_embedded += 1
+                            embedded = True
+                        except ID3NoHeaderError:
+                            # File has no ID3 tags, add them
+                            audio = MP3(str(p))
                             audio.add_tags()
-                        audio.tags.add(APIC(
-                            encoding=3,  # UTF-8
-                            mime="image/jpeg",
-                            type=3,  # Cover (front)
-                            desc="Cover",
-                            data=cover_data
-                        ))
-                        audio.save()
-                        logmsg.info("Embedded art into %item% (MP3)")
-                        total_embedded += 1
-                        embedded = True
-                    except ID3NoHeaderError:
-                        # File has no ID3 tags, add them
-                        audio = MP3(str(p))
-                        audio.add_tags()
-                        audio.tags.add(APIC(
-                            encoding=3,
-                            mime="image/jpeg",
-                            type=3,
-                            desc="Cover",
-                            data=cover_data
-                        ))
-                        audio.save()
-                        logmsg.info("Embedded art into %item% (MP3)")
-                        total_embedded += 1
-                        embedded = True
-                    except Exception as e:
-                        if p.suffix.lower() == ".mp3":
-                            error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
-                            if len(error_msg) > 200:
-                                error_msg = error_msg[:197] + "..."
-                            last_embed_error = error_msg
-                            logmsg.verbose("File has .mp3 extension but is not valid MP3, trying other formats: {error}", error=error_msg)
-                        else:
-                            raise
+                            audio.tags.add(APIC(
+                                encoding=3,
+                                mime="image/jpeg",
+                                type=3,
+                                desc="Cover",
+                                data=cover_data
+                            ))
+                            audio.save()
+                            logmsg.info("Embedded art into %item% (MP3)")
+                            total_embedded += 1
+                            embedded = True
+                        except Exception as e:
+                            if p.suffix.lower() == ".mp3":
+                                error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
+                                if len(error_msg) > 200:
+                                    error_msg = error_msg[:197] + "..."
+                                last_embed_error = error_msg
+                                logmsg.verbose("File has .mp3 extension but is not valid MP3, trying other formats: {error}", error=error_msg)
+                            else:
+                                raise
                 
-                # Try MP4/M4A if not already embedded
-                if not embedded and (use_format == 'mp4' or p.suffix.lower() in {".m4a", ".mp4", ".m4v"}):
-                    try:
-                        audio = MP4(str(p))
-                        # MP4 files store artwork in the 'covr' atom
-                        # Create MP4Cover object with JPEG data
-                        cover = MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)
-                        audio['covr'] = [cover]
-                        audio.save()
-                        logmsg.info("Embedded art into %item% (MP4/M4A)")
-                        total_embedded += 1
-                        embedded = True
-                    except Exception as e:
-                        if p.suffix.lower() in {".m4a", ".mp4", ".m4v"}:
-                            error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
-                            if len(error_msg) > 200:
-                                error_msg = error_msg[:197] + "..."
-                            last_embed_error = error_msg
-                            logmsg.verbose("Could not embed art into MP4/M4A file %item%: {error}", error=error_msg)
-                        else:
-                            raise
-                
-                # Try generic MutagenFile for other formats
-                if not embedded:
-                    try:
-                        audio = MutagenFile(str(p))
-                        if audio is not None:
-                            # Try to add art (format-specific)
-                            if hasattr(audio, "add_picture"):
-                                pic = Picture()
-                                pic.data = cover_data
-                                pic.type = 3
-                                pic.mime = "image/jpeg"
-                                pic.desc = "Cover"
-                                audio.add_picture(pic)
-                                audio.save()
-                                logmsg.info("Embedded art into %item% (generic)")
+                    # Try MP4/M4A if not already embedded
+                    if not embedded and (use_format == 'mp4' or p.suffix.lower() in {".m4a", ".mp4", ".m4v"}):
+                        try:
+                            audio = MP4(str(p))
+                            # MP4 files store artwork in the 'covr' atom
+                            # Create MP4Cover object with JPEG data
+                            cover = MP4Cover(cover_data, imageformat=MP4Cover.FORMAT_JPEG)
+                            audio['covr'] = [cover]
+                            audio.save()
+                            logmsg.info("Embedded art into %item% (MP4/M4A)")
+                            total_embedded += 1
+                            embedded = True
+                        except Exception as e:
+                            if p.suffix.lower() in {".m4a", ".mp4", ".m4v"}:
+                                error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
+                                if len(error_msg) > 200:
+                                    error_msg = error_msg[:197] + "..."
+                                last_embed_error = error_msg
+                                logmsg.verbose("Could not embed art into MP4/M4A file %item%: {error}", error=error_msg)
+                            else:
+                                raise
+
+                    # WMA/ASF (WM/Picture)
+                    if not embedded and (
+                        use_format == "asf" or p.suffix.lower() == ".wma"
+                    ):
+                        try:
+                            if _embed_asf_wmpicture(p, cover_data, dry_run):
+                                logmsg.info("Embedded art into %item% (WMA/ASF)")
                                 total_embedded += 1
                                 embedded = True
-                            else:
-                                if p.suffix.lower() in _EMBED_SKIP_EXTENSIONS:
-                                    logmsg.verbose(
-                                        "Format {ext} does not support embedded art in this pipeline",
-                                        ext=p.suffix,
-                                    )
+                        except Exception as e:
+                            error_msg = str(e).split("\n")[0] if str(e) else "unknown error"
+                            if len(error_msg) > 200:
+                                error_msg = error_msg[:197] + "..."
+                            last_embed_error = error_msg
+                            logmsg.verbose(
+                                "Could not embed art into WMA/ASF file %item%: {error}",
+                                error=error_msg,
+                            )
+                
+                    # Try generic MutagenFile for other formats
+                    if not embedded:
+                        try:
+                            audio = MutagenFile(str(p))
+                            if audio is not None:
+                                # Try to add art (format-specific)
+                                if hasattr(audio, "add_picture"):
+                                    pic = Picture()
+                                    pic.data = cover_data
+                                    pic.type = 3
+                                    pic.mime = "image/jpeg"
+                                    pic.desc = "Cover"
+                                    audio.add_picture(pic)
+                                    audio.save()
+                                    logmsg.info("Embedded art into %item% (generic)")
+                                    total_embedded += 1
+                                    embedded = True
                                 else:
                                     logmsg.warn(
                                         "Format {ext} does not support embedded art",
                                         ext=p.suffix,
                                     )
-                    except Exception as e:
-                        error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
-                        if len(error_msg) > 200:
-                            error_msg = error_msg[:197] + "..."
-                        last_embed_error = error_msg
-                        logmsg.verbose("Could not embed art using generic method: {error}", error=error_msg)
+                        except Exception as e:
+                            error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
+                            if len(error_msg) > 200:
+                                error_msg = error_msg[:197] + "..."
+                            last_embed_error = error_msg
+                            logmsg.verbose("Could not embed art using generic method: {error}", error=error_msg)
                 
-                if not embedded:
-                    if p.suffix.lower() in _EMBED_SKIP_EXTENSIONS:
-                        logmsg.verbose(
-                            "Skipping embed for %item% ({ext} does not support embedded art in this pipeline)",
-                            ext=p.suffix.lower(),
-                        )
-                    elif last_embed_error:
-                        logmsg.warn("Could not embed art into %item%: {error}", error=last_embed_error)
+                    if not embedded:
+                        if last_embed_error:
+                            logmsg.warn("Could not embed art into %item%: {error}", error=last_embed_error)
+                        else:
+                            logmsg.warn("Could not determine format or embed art into %item%")
                     else:
-                        logmsg.warn("Could not determine format or embed art into %item%")
-                else:
-                    import run_state
-                    run_state.mark_embedded(p)
-            except Exception as e:
-                # Don't log the exception object directly (may contain binary data)
-                error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
-                # Truncate very long error messages
-                if len(error_msg) > 200:
-                    error_msg = error_msg[:197] + "..."
-                logmsg.warn("Failed to embed art into %item%: {error}", error=error_msg)
+                        import run_state
+                        run_state.mark_embedded(p)
+                except Exception as e:
+                    # Don't log the exception object directly (may contain binary data)
+                    error_msg = str(e).split('\n')[0] if str(e) else "unknown error"
+                    # Truncate very long error messages
+                    if len(error_msg) > 200:
+                        error_msg = error_msg[:197] + "..."
+                    logmsg.warn("Failed to embed art into %item%: {error}", error=error_msg)
             
-            logmsg.end_item(item_key)
+                logmsg.end_item(item_key)
 
-        # Events tracked automatically by structured logging
-        
-        logmsg.end_album(album_key)
-    
+    finally:
+        _close_embed_album_context()
+

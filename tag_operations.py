@@ -612,7 +612,29 @@ def is_unknown_or_bucket_artist(s: str) -> bool:
         return True
     if v in GENERIC_COMPILATION_ARTISTS:
         return True
+    # Mp3tag-style placeholders: "Unknown\Various Artists", "Unknown/Various Artists"
+    if "unknown" in v and re.search(r"\bvarious\b|\bva\b", v):
+        return True
     return False
+
+
+def albumartist_needs_fixup(file_albumartist: str, canonical_albumartist: str) -> bool:
+    """
+    True when on-disk albumartist should be rewritten to ``canonical_albumartist``
+    (Step 1.5), e.g. missing, placeholder, or mismatched after normalization.
+    """
+    aa = (file_albumartist or "").strip()
+    canon = (canonical_albumartist or "").strip()
+    if not canon:
+        return False
+    if not aa:
+        return True
+    if is_unknown_or_bucket_artist(aa):
+        return True
+    return (
+        normalize_album_artist(aa).casefold()
+        != normalize_album_artist(canon).casefold()
+    )
 
 
 def normalize_album_artist(artist: str) -> str:
@@ -1382,6 +1404,8 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
                     detected_format = 'mp3'
                 elif 'mp4' in class_name or 'm4a' in class_name:
                     detected_format = 'mp4'
+                elif 'asf' in class_name:
+                    detected_format = 'asf'
         except Exception:
             pass  # Will try format-specific handlers below
         
@@ -1390,7 +1414,15 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
         
         # Album artist for grouping: normalized, never overwrite track artist
         if NORMALIZE_ARTIST_IN_TAGS:
-            effective_album_artist = normalize_album_artist((album_artist or tags.get("artist") or "").strip() or "")
+            raw_aa = (
+                album_artist
+                or tags.get("albumartist")
+                or tags.get("artist")
+                or ""
+            ).strip()
+            effective_album_artist = (
+                normalize_album_artist(raw_aa) if raw_aa else None
+            )
         else:
             effective_album_artist = None
         
@@ -1499,6 +1531,37 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
                     pass  # Try generic next
                 else:
                     raise
+
+        # WMA/ASF
+        if use_format == "asf" or ext == ".wma":
+            try:
+                from mutagen.asf import ASF
+
+                audio = ASF(str(path))
+                if audio.tags is None:
+                    audio.add_tags()
+                audio.tags["Title"] = tags["title"]
+                audio.tags["Author"] = tags["artist"]
+                audio.tags["WM/AlbumTitle"] = tags["album"]
+                if effective_album_artist:
+                    audio.tags["WM/AlbumArtist"] = effective_album_artist
+                if tags.get("year"):
+                    audio.tags["WM/Year"] = tags["year"]
+                audio.tags["WM/TrackNumber"] = str(tags["tracknum"])
+                if discnumber_str or discnum > 1:
+                    audio.tags["WM/PartOfSet"] = discnumber_str or (
+                        f"{discnum}/{disctotal}" if disctotal > 1 else str(discnum)
+                    )
+                elif discnumber_clear and "WM/PartOfSet" in audio.tags:
+                    del audio.tags["WM/PartOfSet"]
+                if not dry_run:
+                    audio.save()
+                return True
+            except Exception:
+                if ext == ".wma":
+                    pass
+                else:
+                    raise
         
         # Try generic MutagenFile for other formats
         try:
@@ -1507,6 +1570,8 @@ def write_tags_to_file(path: Path, tags: Dict[str, Any], dry_run: bool = False, 
                 audio["title"] = tags["title"]
                 audio["artist"] = tags["artist"]
                 audio["album"] = tags["album"]
+                if effective_album_artist:
+                    audio["albumartist"] = effective_album_artist
                 if tags.get("year"):
                     audio["date"] = tags["year"]
                 audio["tracknumber"] = str(tags["tracknum"])
@@ -1647,9 +1712,25 @@ def update_albumartist_only(path: Path, album_artist: str, dry_run: bool = False
                     detected_format = "mp4"
                 elif "mp3" in class_name or "id3" in class_name:
                     detected_format = "mp3"
+                elif "asf" in class_name:
+                    detected_format = "asf"
         except Exception:
             pass
         use_format = detected_format or ext.lstrip(".")
+
+        if use_format == "asf" or ext == ".wma":
+            try:
+                from mutagen.asf import ASF
+
+                audio = ASF(str(path))
+                if audio.tags is None:
+                    audio.add_tags()
+                audio.tags["WM/AlbumArtist"] = aa
+                if not dry_run:
+                    audio.save()
+                return True
+            except Exception:
+                pass
 
         if use_format == "flac" or ext == ".flac":
             try:
