@@ -19,6 +19,17 @@ Paths live in `**config.py`**: downloads folder, main library (`**MUSIC_ROOT`**)
 
 Dry run (no writes): `**python main.py --mode normal --dry`**.
 
+### Multi-volume series (e.g. “Greatest Hits”, “Greatest Hits Vol 2”) — by design
+
+When separate downloads normalize to **one album folder**, layout follows **each file’s album tag**:
+
+- Tags like **“… Vol 2”** / **“… Vol 3”** → tracks go under **`VOL2/`**, **`VOL3/`**, etc.
+- The **first volume** is often tagged **without** “Vol. 1” (plain **“Greatest Hits”**) → those tracks stay at the **album root**, not **`VOL1/`**.
+
+That asymmetry is **intentional**: a run that only sees “Greatest Hits” cannot know a “Vol 2” import will arrive later, and the script does **not** move older root tracks into **`VOL1/`** when a sibling volume shows up (too easy to mis-guess).
+
+**Your choice:** leave it (shorter path for volume 1) or **manually** move root tracks into **`VOL1/`** and add leaf sidecars there if you want every volume under **`VOLn/`**. No automatic “repair” pass — only a one-time tidy if you care about symmetry or leaf-only sidecar rules.
+
 ---
 
 ## Mp3tag (manual checks — usually read-only)

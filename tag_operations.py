@@ -320,6 +320,33 @@ def check_file_size_warning(audio_path: Path) -> Optional[Tuple[str, str]]:
         return None
 
 
+def _mutagen_tag_values(tags: Any, key: str) -> List[Any]:
+    """Raw values for a tag key (EasyID3 list-of-str or ASF list-of-attribute objects)."""
+    if tags is None:
+        return []
+    try:
+        v = tags.get(key)
+    except (KeyError, AttributeError):
+        return []
+    if v is None:
+        return []
+    if isinstance(v, list):
+        return v
+    return [v]
+
+
+def _mutagen_first_string(tags: Any, *keys: str, default: str = "") -> str:
+    for key in keys:
+        for item in _mutagen_tag_values(tags, key):
+            raw = getattr(item, "value", item)
+            if raw is None:
+                continue
+            s = str(raw).strip()
+            if s:
+                return s
+    return default
+
+
 def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict[str, Any]]:
     """
     Return tags dict from a file: artist, album, year, tracknum, discnum, title.
@@ -385,21 +412,36 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
         return None
 
     try:
-        def _get(tag: str, default: str = "") -> str:
-            v = audio.tags.get(tag)
-            return v[0] if v else default
+        tags = audio.tags
+        is_asf = path.suffix.lower() == ".wma" or type(audio).__name__ == "ASF"
 
-        artist = _get("albumartist") or _get("artist") or "Unknown Artist"
-        album = _get("album") or "Unknown Album"
+        if is_asf:
+            # WMA/ASF: Mutagen does not support easy=True mapping; tags use WM/* and Author/Title.
+            albumartist = _mutagen_first_string(tags, "WM/AlbumArtist", "albumartist", "ALBUMARTIST")
+            performer = _mutagen_first_string(tags, "Author", "artist", "ARTIST")
+            artist = albumartist or performer or "Unknown Artist"
+            album = _mutagen_first_string(tags, "WM/AlbumTitle", "album", "ALBUM") or "Unknown Album"
+            title = _mutagen_first_string(tags, "Title", "title") or path.stem
+            date = _mutagen_first_string(tags, "WM/Year", "WM/ReleaseDate", "date", "year")
+            trackno = _mutagen_first_string(tags, "WM/TrackNumber", "tracknumber", "TRACKNUMBER") or "0"
+            discno_raw = _mutagen_first_string(
+                tags, "WM/PartOfSet", "discnumber", "DISCNUMBER"
+            )
+            raw_albumartist = albumartist
+        else:
+            def _get(tag: str, default: str = "") -> str:
+                v = tags.get(tag)
+                return v[0] if v else default
 
-        date = _get("date") or _get("year") or ""
+            artist = _get("albumartist") or _get("artist") or "Unknown Artist"
+            album = _get("album") or "Unknown Album"
+            title = _get("title") or path.stem
+            date = _get("date") or _get("year") or ""
+            trackno = _get("tracknumber") or _get("TRACKNUMBER") or "0"
+            discno_raw = _get("discnumber") or _get("DISCNUMBER") or ""
+            raw_albumartist = (_get("albumartist") or _get("ALBUMARTIST") or "").strip()
+
         year = date[:4] if len(date) >= 4 and date[:4].isdigit() else ""
-
-        trackno = _get("tracknumber") or _get("TRACKNUMBER") or "0"
-        # IMPORTANT: keep raw disc tag separate from computed discnum default.
-        # Missing disc tag should remain "" so normalization can reason about blanks vs "1" vs "1/1".
-        discno_raw = _get("discnumber") or _get("DISCNUMBER") or ""
-        title = _get("title") or path.stem
 
         try:
             tracknum = int(trackno.split("/")[0])
@@ -433,9 +475,6 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
                     track_from_name = 0
                 if disc_from_name > 1 and track_from_name > 0 and tracknum == track_from_name:
                     discnum = disc_from_name
-
-        # Raw albumartist from file (may be missing); FLAC uses ALBUMARTIST, ID3 uses albumartist
-        raw_albumartist = (_get("albumartist") or _get("ALBUMARTIST") or "").strip()
 
         return {
             "artist": artist.strip(),
