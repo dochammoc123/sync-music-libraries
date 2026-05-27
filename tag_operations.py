@@ -419,7 +419,9 @@ def get_tags(path: Path, downloads_root: Optional[Path] = None) -> Optional[Dict
             # WMA/ASF: Mutagen does not support easy=True mapping; tags use WM/* and Author/Title.
             albumartist = _mutagen_first_string(tags, "WM/AlbumArtist", "albumartist", "ALBUMARTIST")
             performer = _mutagen_first_string(tags, "Author", "artist", "ARTIST")
-            artist = albumartist or performer or "Unknown Artist"
+            # Track-level artist should come from performer/Author; albumartist may be a placeholder
+            # like "Various" or even "Unknown\\Various Artists" and should not override the performer.
+            artist = performer or "Unknown Artist"
             album = _mutagen_first_string(tags, "WM/AlbumTitle", "album", "ALBUM") or "Unknown Album"
             title = _mutagen_first_string(tags, "Title", "title") or path.stem
             date = _mutagen_first_string(tags, "WM/Year", "WM/ReleaseDate", "date", "year")
