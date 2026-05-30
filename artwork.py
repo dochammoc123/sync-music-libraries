@@ -3095,7 +3095,7 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                     if not (L / "cover.jpg").exists() and not (L / "folder.jpg").exists()
                 ]
                 if missing_leaf_art:
-                    album_key = logmsg.begin_album(parent_album_dir)
+                    _ensure_embed_album_context(parent_album_dir, album_label_for_block)
                     logmsg.warn(
                         "Skipping embed: multi-disc album is missing disc cover files in {n} subfolders (need cover.jpg or folder.jpg in each CD/VOL leaf)",
                         n=len(missing_leaf_art),
@@ -3107,7 +3107,7 @@ def embed_missing_art_global(dry_run: bool = False, backup_enabled: bool = True,
                         )
                         + (" ..." if len(missing_leaf_art) > 8 else ""),
                     )
-                    logmsg.end_album(album_key)
+                    _close_embed_album_context()
                     blocked_albums.add(album_label_for_block)
                     continue
         

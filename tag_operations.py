@@ -729,6 +729,25 @@ _VOLUME_TAIL_PATTERNS: List[Tuple[re.Pattern[str], bool]] = [
     (re.compile(r"^(.+?)\s+Volume\s+(\d+|[IVX]+)\s*$", re.IGNORECASE), False),
 ]
 
+# Mid-string ``Vol. N: subtitle`` (common on box sets / series volumes).
+_EMBEDDED_VOLUME_COLON_PATTERNS: List[Tuple[re.Pattern[str], bool]] = [
+    (re.compile(r"^(.+?)\s*,\s*Vol\.?\s*(\d+|[IVX]+)\s*:\s*(.*)$", re.IGNORECASE), True),
+    (re.compile(r"^(.+?)\s*,\s*Volume\s+(\d+|[IVX]+)\s*:\s*(.*)$", re.IGNORECASE), True),
+    (re.compile(r"^(.+?)\s+Vol\.?\s*(\d+|[IVX]+)\s*:\s*(.*)$", re.IGNORECASE), False),
+    (re.compile(r"^(.+?)\s+Volume\s+(\d+|[IVX]+)\s*:\s*(.*)$", re.IGNORECASE), False),
+]
+
+
+def _album_base_after_embedded_volume(base: str, subtitle: str, comma_before_vol: bool) -> str:
+    """Series folder title after removing ``Vol. N:`` (keep subtitle when present)."""
+    b = base.strip().rstrip(",").strip()
+    sub = (subtitle or "").strip()
+    if not sub:
+        return b
+    if comma_before_vol or b.endswith(","):
+        return f"{b}, {sub}" if b else sub
+    return f"{b} {sub}".strip()
+
 
 def parse_trailing_volume_num(album: str) -> Optional[int]:
     """
@@ -775,8 +794,9 @@ def _strip_trailing_benign_parentheticals(s: str) -> str:
 
 def parse_trailing_volume_base_and_num(album: str) -> Tuple[Optional[str], Optional[int]]:
     """
-    If title has trailing Volume/Vol., return (base_album, n); else (None, None).
+    If title has embedded or trailing Volume/Vol., return (base_album, n); else (None, None).
 
+    Embedded: ``Album, Vol. 1: Volume subtitle`` (colon required). Trailing: ``, Vol. 1`` etc.
     Trailing edition markers such as ``(Deluxe Version)`` after ``, Vol. 1`` are stripped
     first (when they are not disc/volume metadata) so the volume tail patterns can match.
     """
@@ -795,6 +815,14 @@ def parse_trailing_volume_base_and_num(album: str) -> Tuple[Optional[str], Optio
     if s_live_noparen and s_live_noparen not in variants:
         variants.append(s_live_noparen)
     for s in variants:
+        for pat, comma_base in _EMBEDDED_VOLUME_COLON_PATTERNS:
+            m = pat.match(s)
+            if not m:
+                continue
+            base = _album_base_after_embedded_volume(m.group(1), m.group(3), comma_base)
+            n = _volume_num_to_int(m.group(2))
+            if n is not None:
+                return (base, n)
         for pat, comma_base in _VOLUME_TAIL_PATTERNS:
             m = pat.match(s)
             if not m:
@@ -834,8 +862,19 @@ def parse_album_layout_from_title(
         dt = m.group(3).strip() or None
         _b, vol_n = parse_trailing_volume_base_and_num(base)
         return (vol_n, disc_n, dt)
-    _b, vol_n = parse_trailing_volume_base_and_num(s)
-    return (vol_n, None, None)
+    disc_n: Optional[int] = None
+    s_for_vol = s
+    m_disc = re.match(r"^(.*?)\s+disc\s+(\d+)\s*$", s, re.IGNORECASE)
+    if m_disc:
+        s_for_vol = m_disc.group(1).strip()
+        disc_n = int(m_disc.group(2))
+    else:
+        m_cd = re.match(r"^(.*?)\s+cd\s+(\d+)\s*$", s, re.IGNORECASE)
+        if m_cd:
+            s_for_vol = m_cd.group(1).strip()
+            disc_n = int(m_cd.group(2))
+    _b, vol_n = parse_trailing_volume_base_and_num(s_for_vol)
+    return (vol_n, disc_n, None)
 
 
 _VOL_DIR_RE = re.compile(r"^VOL\d+", re.IGNORECASE)
@@ -917,6 +956,13 @@ def parse_album_disc(album: str) -> Tuple[str, Optional[int], Optional[str]]:
         rest = m.group(3).strip()
         disc_title = rest if rest else None
         return (normalize_album_name(base), disc_num, disc_title)
+    # Trailing "Disc N" / "CD N" without brackets (common in older rips)
+    m = re.match(r"^(.*?)\s+disc\s+(\d+)\s*$", s, re.IGNORECASE)
+    if m:
+        return (normalize_album_name(m.group(1).strip()), int(m.group(2)), None)
+    m = re.match(r"^(.*?)\s+cd\s+(\d+)\s*$", s, re.IGNORECASE)
+    if m:
+        return (normalize_album_name(m.group(1).strip()), int(m.group(2)), None)
     base_vol, n_vol = parse_trailing_volume_base_and_num(s)
     if n_vol is not None and base_vol is not None:
         return (normalize_album_name(base_vol), n_vol, None)
@@ -927,8 +973,8 @@ def normalize_album_name(album: str) -> str:
     """
     Normalize album name for grouping and folder naming so multi-disc sets with
     inconsistent tags merge into one album (e.g. one folder with CD1/CD2 subdirs).
-    Strips disc patterns from anywhere in the name: "(Disc 1)", "[Disc 2]", "Volume 2", "Vol. 1",
-    "(CD 1)", "[CD2]", " (1/2)", " - Disc 1", etc.
+    Strips disc patterns from anywhere in the name: "(Disc 1)", "[Disc 2]", "Disc 1", "CD 2",
+    "Volume 2", "Vol. 1", "(CD 1)", "[CD2]", " (1/2)", " - Disc 1", etc.
     Normalizes colon variants so "Greenpeace: Rainbow Warriors" and "Greenpeace Rainbow Warriors" match.
     Strips trailing comma so ", Vol. 1" is removed cleanly.
     """
@@ -947,6 +993,14 @@ def normalize_album_name(album: str) -> str:
     s = re.sub(r'\s*[(\[]\s*\d+\s*/\s*\d+\s*[)\]]\s*', ' ', s)
     # - Disc N, – Disc N (dash + Disc N)
     s = re.sub(r'\s*[-–—]\s*disc\s*\d+\s*', ' ', s, flags=re.IGNORECASE)
+    # Trailing Disc N / CD N without parens or dash (e.g. "... Love Songs Disc 1")
+    s = re.sub(r'\s+disc\s+\d+\s*$', '', s, flags=re.IGNORECASE)
+    s = re.sub(r'\s+cd\s+\d+\s*$', '', s, flags=re.IGNORECASE)
+    # Mid-string Vol. N: / Volume N: (drop volume marker; keep series + subtitle)
+    s = re.sub(r'\s*,\s*Vol\.?\s*(\d+|[IVX]+)\s*:\s*', ', ', s, flags=re.IGNORECASE)
+    s = re.sub(r'\s*,\s*Volume\s+(\d+|[IVX]+)\s*:\s*', ', ', s, flags=re.IGNORECASE)
+    s = re.sub(r'\s+Vol\.?\s*(\d+|[IVX]+)\s*:\s*', ' ', s, flags=re.IGNORECASE)
+    s = re.sub(r'\s+Volume\s+(\d+|[IVX]+)\s*:\s*', ' ', s, flags=re.IGNORECASE)
     # [Live], (Live) - strip so "Album [Live]" and "Album" group
     s = re.sub(r'\s*[(\[]\s*Live\s*[)\]]\s*', ' ', s, flags=re.IGNORECASE)
     # Volume N, Vol. N: comma, dash, or space before (digits or roman I-X)
@@ -963,6 +1017,55 @@ def normalize_album_name(album: str) -> str:
     # Collapse multiple spaces and strip
     s = re.sub(r'\s+', ' ', s).strip()
     return s
+
+
+def _majority_artist_from_track_strings(
+    items: List[Tuple[Path, Dict[str, Any]]],
+    min_ratio: float = MAJORITY_ARTIST_MIN_RATIO,
+) -> Optional[str]:
+    """
+    When one performer name appears inside most track ``artist`` strings (including
+    collaboration tags like ``Willie Nelson/Roger Miller/Faron Young``), return that
+    artist for album folder grouping.
+    """
+    raw_artist_strings = [t["artist"] for (_p, t) in items if t.get("artist")]
+    total = len(raw_artist_strings)
+    if total == 0:
+        return None
+    candidates = sorted({normalize_album_artist(a) for a in raw_artist_strings if a})
+    best: Optional[str] = None
+    best_hits = 0
+    threshold = max(3, int(total * min_ratio))
+    for cand in candidates:
+        cl = cand.lower()
+        if not cl or cl == "various artists":
+            continue
+        hits = sum(1 for ra in raw_artist_strings if cl in (ra or "").lower())
+        if hits > best_hits:
+            best_hits = hits
+            best = cand
+    if best and best_hits >= threshold:
+        return best
+    return None
+
+
+def _majority_meaningful_albumartist(
+    items: List[Tuple[Path, Dict[str, Any]]],
+    min_ratio: float = MAJORITY_ARTIST_MIN_RATIO,
+) -> Optional[str]:
+    """Most common non-placeholder ``albumartist`` when it dominates tagged files."""
+    counts: Dict[str, int] = defaultdict(int)
+    for _p, t in items:
+        aa = (t.get("albumartist") or "").strip()
+        if aa and not is_unknown_or_bucket_artist(aa):
+            counts[normalize_album_artist(aa)] += 1
+    if not counts:
+        return None
+    best, best_n = max(counts.items(), key=lambda x: x[1])
+    tagged_aa = sum(counts.values())
+    if best_n >= max(1, int(tagged_aa * min_ratio)):
+        return best
+    return None
 
 
 def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_via_mb: bool = True) -> Tuple[str, str]:
@@ -1012,36 +1115,33 @@ def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_v
         
         candidate_artist_norm, _album_cf = top_keys[0]
         candidate_album = bucket_rep[top_keys[0]]
-        
+        total_tracks = len(rows)
+        majority_track = _majority_artist_from_track_strings(items)
+        majority_aa = _majority_meaningful_albumartist(items)
+        pair_below_majority = max_count < total_tracks * MAJORITY_ARTIST_MIN_RATIO
+
         distinct_artists = len(
             {normalize_album_artist(t["artist"]) for (_p, t) in items if t.get("artist")}
         )
         if distinct_artists >= 3:
-            # Heuristic: some albums use many collaboration-style artist strings but still
-            # belong under one main artist (e.g. "Paul McCartney", "Paul McCartney & Wings",
-            # "Michael Jackson & Paul McCartney"). If one normalized artist name appears
-            # inside many raw artist strings, group under that artist instead of "Various Artists".
-            raw_artist_strings = [t["artist"] for (_p, t) in items if t.get("artist")]
-            total = len(raw_artist_strings)
-            if total > 0:
-                # Candidate pool: the distinct normalized artists we already saw.
-                candidates = sorted({normalize_album_artist(a) for a in raw_artist_strings if a})
-                best = None
-                best_hits = 0
-                for cand in candidates:
-                    cl = cand.lower()
-                    hits = sum(1 for ra in raw_artist_strings if cl and cl in (ra or "").lower())
-                    if hits > best_hits:
-                        best_hits = hits
-                        best = cand
-                # Require a strong majority to avoid true compilations.
-                if best and best_hits >= max(3, int(total * 0.60)):
-                    return (best, candidate_album)
+            if majority_track:
+                return (majority_track, candidate_album)
             return ("Various Artists", candidate_album)
-        total_tracks = len(rows)
-        if distinct_artists == 2 and max_count < total_tracks * MAJORITY_ARTIST_MIN_RATIO:
+
+        # Two track-level artist strings (e.g. "Roger Miller" + "A/Roger Miller/B") or a box
+        # set with many source album titles: (artist, album) pair counts can be < 2/3 even
+        # when one performer clearly owns the folder.
+        if distinct_artists == 2 and pair_below_majority:
+            pick = majority_aa or majority_track
+            if pick:
+                return (pick, candidate_album)
             return ("Various Artists", candidate_album)
-        
+
+        if pair_below_majority:
+            pick = majority_aa or majority_track
+            if pick:
+                return (pick, candidate_album)
+
         return (candidate_artist_norm, candidate_album)
     
     # Can't determine albumDir from most used tag (all tags are missing)
@@ -1280,13 +1380,16 @@ def group_by_album(files: List[Path], downloads_root: Optional[Path] = None) -> 
 
     merged: Dict[Tuple[str, str], List[Tuple[Path, Dict]]] = {}
     for (artist, album), items in albums.items():
+        # ``album`` is the directory-level winner from step 2/3 (e.g. box set with mixed
+        # source album strings). Use it for grouping unless the tag has an explicit disc.
+        canonical_album = album
         for (f, tags) in items:
             raw_album = (tags.get("album") or "").strip()
             base_album, disc_num, _ = parse_album_disc(raw_album)
             if disc_num is not None:
                 base = base_album
             else:
-                base = normalize_album_name(raw_album)
+                base = canonical_album
             key = _merged_album_key(merged, artist, base)
             merged.setdefault(key, []).append((f, tags))
 

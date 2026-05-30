@@ -979,20 +979,27 @@ def move_album_from_downloads(
                 return f"CD{dn}"
 
             dest_parent = album_dir
-            if vol_title is not None and tag_says_multi:
+            if vol_title is not None:
+                _, dn_title, disc_title = parse_album_disc(album_raw)
                 try:
-                    disc_num = int(tags_to_use.get("discnum", 1))
+                    disc_num = int(
+                        dn_title if dn_title is not None else tags_to_use.get("discnum", 1) or 1
+                    )
                 except (TypeError, ValueError):
                     disc_num = 1
-                _, _pdn, disc_title = parse_album_disc(album_raw)
                 disc_label = _disc_label(disc_num, disc_title)
-                if max_discnum_by_vol.get(vol_title, 1) > 1:
+                use_cd_under_vol = (
+                    dn_title is not None
+                    or (
+                        tag_says_multi
+                        and max_discnum_by_vol.get(vol_title, 1) > 1
+                    )
+                    or multi_from_title
+                )
+                if use_cd_under_vol:
                     dest_parent = album_dir / f"VOL{vol_title}" / disc_label
                 else:
-                    # Single disc in this volume: keep it flat under VOLn
                     dest_parent = album_dir / f"VOL{vol_title}"
-            elif vol_title is not None:
-                dest_parent = album_dir / f"VOL{vol_title}"
             elif tag_says_multi:
                 _, _pdn, disc_title = parse_album_disc(album_raw)
                 try:
