@@ -30,9 +30,24 @@ When separate imports normalize to **one album folder**, layout follows **album 
 | `Vol. N: Subtitle` + optional `Disc M` | **`VOLn/CDm`** when both apply | Doo Wop box, Lilith-style sets |
 | Multi-disc, no Vol. in title | **`CD1`, `CD2`…** at album root | Kenny Rogers “Disc 1” / “Disc 2” |
 
-**Asymmetry:** the **first volume** often has **no** “Vol. 1” in the tag → tracks stay at the **album root**, not `VOL1/`. Later volumes in **separate imports** do **not** move older root tracks into `VOL1/` (too easy to mis-guess).
+#### Volume 1 at album root (library precedent)
 
-**Your choice:** leave that asymmetry, or **manually** move root tracks into `VOL1/` (or `CD1/`) once for symmetry. No automatic library-wide repair pass.
+**By design**, volume **1** often lives at the **album root** and only **later volumes** get **`VOL2/`**, **`VOL3/`**, … subfolders. That is not a bug and not something the script “fixes” on later runs.
+
+**Why:** the first import is usually tagged **without** “Vol. 1” (plain *Greatest Hits*). A later import says *Greatest Hits Vol. 2* → **`VOL2/`**. The script will **not** move tracks already at the root into **`VOL1/`** when a sibling volume appears (too easy to mis-guess).
+
+**On-disk example** (existing library):
+
+```
+Elton John\(1970 - 1986) Greatest Hits\
+  *.flac, cover.jpg, folder.jpg     ← vol. 1 (no “Vol. 1” in tags)
+  VOL2\
+    *.flac, cover.jpg, folder.jpg   ← tagged “… Vol. 2”
+```
+
+Same pattern elsewhere: Segovia Collection (root + **`VOL2`** + **`VOL4`**), Earl Klugh (*Best of…* at root, *…, Vol. 2* under **`VOL2/`**).
+
+**Your choice:** keep that asymmetry (shorter path for vol. 1), or **once** move root tracks into **`VOL1/`** (and sidecars) if you want every volume under **`VOLn/`**. No automatic library-wide repair pass.
 
 **Already processed albums** keep their on-disk layout until you re-import or move by hand.
 

@@ -8,7 +8,7 @@ Python tooling to turn **downloads → organized FLAC library**, keep **covers**
 
 ## Features
 
-- **Downloads → library**: organizes into Artist/Album (and VOL/CD layouts from tags).
+- **Downloads → library**: organizes into Artist/Album (and VOL/CD layouts from tags). Multi-volume asymmetry (vol. 1 at album root, `VOL2+` in subfolders) is **by design** — see [USER_GUIDE.md](USER_GUIDE.md#multi-volume-series--layout-rules-by-design).
 - **Artwork**: sidecars (`cover.jpg` / `folder.jpg`), web (CAA) where enabled, embedding.
 - **Update overlay**: drop patches mirrored under `_UpdateOverlay`, applied into the library early in each run.
 - **FLAC-only**: drops lossy cousins when FLAC is present for the same track.
