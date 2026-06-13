@@ -875,7 +875,12 @@ def move_album_from_downloads(
         # (e.g. VOL2/CD1) which is a normal subfolder, not a name conflict with the folder VOL2.
         # Multiple [Disc n] without tag multi → CD{n}.
         # "[Disc 1]" alone + 1/1 stays flat unless multi_from_title.
-        from tag_operations import parse_album_disc, parse_album_layout_from_title
+        from tag_operations import (
+            parse_album_disc,
+            parse_album_layout_from_title,
+            parse_disc_marker_from_album_title,
+            parse_embedded_volume_base_and_num,
+        )
 
         # Batch-level: do tags claim this is a multi-disc set (disctotal >= 2) for any file?
         batch_tag_says_multi = False
@@ -980,7 +985,10 @@ def move_album_from_downloads(
 
             dest_parent = album_dir
             if vol_title is not None:
-                _, dn_title, disc_title = parse_album_disc(album_raw)
+                dn_title, disc_title = parse_disc_marker_from_album_title(album_raw)
+                # VOL{n}/CD{m} only for embedded ``Vol. N:`` box sets with a disc marker,
+                # not for flat series volumes (Segovia / Earl Klugh ``Vol. 2`` style).
+                embedded_vol = parse_embedded_volume_base_and_num(album_raw)[1]
                 try:
                     disc_num = int(
                         dn_title if dn_title is not None else tags_to_use.get("discnum", 1) or 1
@@ -988,7 +996,7 @@ def move_album_from_downloads(
                 except (TypeError, ValueError):
                     disc_num = 1
                 disc_label = _disc_label(disc_num, disc_title)
-                use_cd_under_vol = (
+                use_cd_under_vol = embedded_vol is not None and (
                     dn_title is not None
                     or (
                         tag_says_multi
@@ -1027,7 +1035,11 @@ def move_album_from_downloads(
                 else:
                     dest_parent = album_dir
             else:
-                dest_parent = album_dir
+                dn_title, disc_title = parse_disc_marker_from_album_title(album_raw)
+                if dn_title is not None:
+                    dest_parent = album_dir / _disc_label(dn_title, disc_title)
+                else:
+                    dest_parent = album_dir
 
             dest = dest_parent / filename
 

@@ -19,16 +19,22 @@ Paths live in `**config.py`**: downloads folder, main library (`**MUSIC_ROOT`**)
 
 Dry run (no writes): `**python main.py --mode normal --dry`**.
 
-### Multi-volume series (e.g. “Greatest Hits”, “Greatest Hits Vol 2”) — by design
+### Multi-volume series — layout rules (by design)
 
-When separate downloads normalize to **one album folder**, layout follows **each file’s album tag**:
+When separate imports normalize to **one album folder**, layout follows **album tag text** (disc tags optional):
 
-- Tags like **“… Vol 2”** / **“… Vol 3”** → tracks go under **`VOL2/`**, **`VOL3/`**, etc.
-- The **first volume** is often tagged **without** “Vol. 1” (plain **“Greatest Hits”**) → those tracks stay at the **album root**, not **`VOL1/`**.
+| Tag pattern | Folders | Examples |
+|-------------|---------|----------|
+| Plain album title (no Vol.) | **Album root** | Segovia vol. 1; “Greatest Hits” without “Vol. 1” |
+| `, Vol. N` or `, Vol. N - Subtitle` | **`VOLn/`** flat (no `CDm` inside) | Segovia Collection, Earl Klugh “Vol. 2” |
+| `Vol. N: Subtitle` + optional `Disc M` | **`VOLn/CDm`** when both apply | Doo Wop box, Lilith-style sets |
+| Multi-disc, no Vol. in title | **`CD1`, `CD2`…** at album root | Kenny Rogers “Disc 1” / “Disc 2” |
 
-That asymmetry is **intentional**: a run that only sees “Greatest Hits” cannot know a “Vol 2” import will arrive later, and the script does **not** move older root tracks into **`VOL1/`** when a sibling volume shows up (too easy to mis-guess).
+**Asymmetry:** the **first volume** often has **no** “Vol. 1” in the tag → tracks stay at the **album root**, not `VOL1/`. Later volumes in **separate imports** do **not** move older root tracks into `VOL1/` (too easy to mis-guess).
 
-**Your choice:** leave it (shorter path for volume 1) or **manually** move root tracks into **`VOL1/`** and add leaf sidecars there if you want every volume under **`VOLn/`**. No automatic “repair” pass — only a one-time tidy if you care about symmetry or leaf-only sidecar rules.
+**Your choice:** leave that asymmetry, or **manually** move root tracks into `VOL1/` (or `CD1/`) once for symmetry. No automatic library-wide repair pass.
+
+**Already processed albums** keep their on-disk layout until you re-import or move by hand.
 
 ---
 

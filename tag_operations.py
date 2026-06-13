@@ -836,6 +836,86 @@ def parse_trailing_volume_base_and_num(album: str) -> Tuple[Optional[str], Optio
     return (None, None)
 
 
+def parse_embedded_volume_base_and_num(album: str) -> Tuple[Optional[str], Optional[int]]:
+    """
+    Volume from mid-string ``Vol. N: subtitle`` only (Lilith / multi-disc box style).
+
+    Trailing ``, Vol. N`` or ``, Vol. N - subtitle`` use ``parse_layout_volume_from_title``.
+    """
+    if not album or not isinstance(album, str):
+        return (None, None)
+    s0 = album.strip()
+    variants = [s0]
+    s_no_paren = _strip_trailing_benign_parentheticals(s0)
+    if s_no_paren and s_no_paren not in variants:
+        variants.append(s_no_paren)
+    for s in variants:
+        for pat, comma_base in _EMBEDDED_VOLUME_COLON_PATTERNS:
+            m = pat.match(s)
+            if not m:
+                continue
+            base = _album_base_after_embedded_volume(m.group(1), m.group(3), comma_base)
+            n = _volume_num_to_int(m.group(2))
+            if n is not None:
+                return (base, n)
+    return (None, None)
+
+
+# ``Album, Vol. 2 - Subtitle`` (Segovia-style; dash not colon).
+_SERIES_VOLUME_DASH_RE = re.compile(
+    r"^(.+?)\s*,\s*Vol\.?\s*(\d+|[IVX]+)\s*[-–]\s*(.+)$",
+    re.IGNORECASE,
+)
+
+
+def parse_layout_volume_from_title(album: str) -> Optional[int]:
+    """
+    Volume number for **flat** ``VOL{n}/`` layout (no ``CDm`` unless a separate disc marker exists).
+
+    Matches, in order:
+    - embedded ``Vol. N: subtitle`` (colon)
+    - ``Album, Vol. N - subtitle`` (dash; Segovia collection style)
+    - trailing ``, Vol. N`` / `` Volume N`` at end of title
+    """
+    if not album or not isinstance(album, str):
+        return None
+    s = album.strip()
+    _b, n = parse_embedded_volume_base_and_num(s)
+    if n is not None:
+        return n
+    m = _SERIES_VOLUME_DASH_RE.match(s)
+    if m:
+        n = _volume_num_to_int(m.group(2))
+        if n is not None:
+            return n
+    _b, n = parse_trailing_volume_base_and_num(s)
+    return n
+
+
+def parse_disc_marker_from_album_title(album: str) -> Tuple[Optional[int], Optional[str]]:
+    """
+    Disc index from ``[Disc N]`` / trailing ``Disc N`` / ``CD N`` in the album title.
+
+    Does not treat trailing ``Vol. N`` / ``Volume N`` as a disc number (see ``parse_album_disc``).
+    """
+    if not album or not isinstance(album, str):
+        return (None, None)
+    s = album.strip()
+    m = re.match(
+        r"^(.*?)\s*[(\[]\s*disc\s*(\d+)\s*[)\]]\s*(.*)$", s, re.IGNORECASE
+    )
+    if m:
+        rest = m.group(3).strip()
+        return (int(m.group(2)), rest if rest else None)
+    m = re.match(r"^(.*?)\s+disc\s+(\d+)\s*$", s, re.IGNORECASE)
+    if m:
+        return (int(m.group(2)), None)
+    m = re.match(r"^(.*?)\s+cd\s+(\d+)\s*$", s, re.IGNORECASE)
+    if m:
+        return (int(m.group(2)), None)
+    return (None, None)
+
+
 def parse_album_layout_from_title(
     album: str,
 ) -> Tuple[Optional[int], Optional[int], Optional[str]]:
@@ -843,12 +923,13 @@ def parse_album_layout_from_title(
     Parse folder-layout hints from the album *title* (before relying only on tags).
 
     Returns (volume_n, disc_n_from_brackets, disc_title_after_brackets).
-    - volume_n: trailing/embedded Vol./Volume on the part before [Disc N] (or whole title).
-    - disc_n_from_brackets: N from ``[Disc N]`` / ``(Disc N)`` when present.
+    - volume_n: ``Vol. N:`` (colon), ``, Vol. N - subtitle`` (dash), or trailing ``, Vol. N``
+      → flat ``VOL{n}/`` when there is no separate disc marker in the title.
+    - disc_n_from_brackets: N from ``[Disc N]`` / ``(Disc N)`` or trailing ``Disc N`` / ``CD N``.
     - disc_title_after_brackets: text after ``[Disc N]`` if any (e.g. subtitle).
 
-    Used with DISCNUMBER/DISCTOTAL to choose:
-    ``CD{n}``, ``VOL{n}``, or ``VOL{n}/CD{m}`` under one library album folder.
+    ``VOL{n}/CD{m}`` only when **both** embedded ``Vol. N:`` **and** a disc marker apply (box sets).
+    Plain multi-disc without volume in the title → ``CDm`` at album root.
     """
     if not album or not isinstance(album, str):
         return (None, None, None)
@@ -860,20 +941,19 @@ def parse_album_layout_from_title(
         base = m.group(1).strip()
         disc_n = int(m.group(2))
         dt = m.group(3).strip() or None
-        _b, vol_n = parse_trailing_volume_base_and_num(base)
+        _b, vol_n = parse_embedded_volume_base_and_num(base)
         return (vol_n, disc_n, dt)
-    disc_n: Optional[int] = None
+    disc_n, _dt = parse_disc_marker_from_album_title(s)
     s_for_vol = s
-    m_disc = re.match(r"^(.*?)\s+disc\s+(\d+)\s*$", s, re.IGNORECASE)
-    if m_disc:
-        s_for_vol = m_disc.group(1).strip()
-        disc_n = int(m_disc.group(2))
-    else:
-        m_cd = re.match(r"^(.*?)\s+cd\s+(\d+)\s*$", s, re.IGNORECASE)
-        if m_cd:
-            s_for_vol = m_cd.group(1).strip()
-            disc_n = int(m_cd.group(2))
-    _b, vol_n = parse_trailing_volume_base_and_num(s_for_vol)
+    if disc_n is not None:
+        m_disc = re.match(r"^(.*?)\s+disc\s+(\d+)\s*$", s, re.IGNORECASE)
+        if m_disc:
+            s_for_vol = m_disc.group(1).strip()
+        else:
+            m_cd = re.match(r"^(.*?)\s+cd\s+(\d+)\s*$", s, re.IGNORECASE)
+            if m_cd:
+                s_for_vol = m_cd.group(1).strip()
+    vol_n = parse_layout_volume_from_title(s_for_vol)
     return (vol_n, disc_n, None)
 
 
@@ -963,9 +1043,7 @@ def parse_album_disc(album: str) -> Tuple[str, Optional[int], Optional[str]]:
     m = re.match(r"^(.*?)\s+cd\s+(\d+)\s*$", s, re.IGNORECASE)
     if m:
         return (normalize_album_name(m.group(1).strip()), int(m.group(2)), None)
-    base_vol, n_vol = parse_trailing_volume_base_and_num(s)
-    if n_vol is not None and base_vol is not None:
-        return (normalize_album_name(base_vol), n_vol, None)
+    # Trailing Vol./Volume is layout (VOLn), not a disc index — see parse_layout_volume_from_title.
     return (normalize_album_name(s), None, None)
 
 
