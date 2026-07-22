@@ -117,6 +117,9 @@ def apply_updates_from_overlay(dry_run: bool = False) -> Tuple[Set[Path], Set[Pa
                 if src.suffix.lower() in AUDIO_EXT:
                     # Overlay is "dumb" - just copy files as-is, no smart comparisons
                     # User manually placed the file, so trust their judgment
+                    if not dest.exists():
+                        import run_state
+                        run_state.record_track_added()
                     logmsg.info("COPY: %item% -> {dest}", dest=str(dest))
                     if not dry_run:
                         shutil.copy2(src, dest)

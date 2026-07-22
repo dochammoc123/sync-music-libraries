@@ -1202,6 +1202,10 @@ def choose_album_artist_album(items: List[Tuple[Path, Dict[str, Any]]], verify_v
             {normalize_album_artist(t["artist"]) for (_p, t) in items if t.get("artist")}
         )
         if distinct_artists >= 3:
+            # Agreed albumartist wins over track-artist scatter (e.g. disc 1 of a Neville
+            # Brothers anthology: many historical performers, AA = The Neville Brothers).
+            if majority_aa:
+                return (majority_aa, candidate_album)
             if majority_track:
                 return (majority_track, candidate_album)
             return ("Various Artists", candidate_album)

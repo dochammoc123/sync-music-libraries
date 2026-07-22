@@ -1512,6 +1512,18 @@ class StructuredLogger:
             # No global steps and no warnings - show "(none)"
             lines.append("Global steps:")
             lines.append("  (none)")
+
+        lines.append("")
+        try:
+            from run_state import count_library_tracks, tracks_added_this_run
+
+            total_tracks = count_library_tracks()
+            added_tracks = tracks_added_this_run()
+            lines.append(
+                f"Library tracks: {total_tracks:,} total ({added_tracks:,} added this run)"
+            )
+        except Exception:
+            pass
         
         # Write to file
         try:

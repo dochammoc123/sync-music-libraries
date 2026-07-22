@@ -37,6 +37,152 @@ def clear_preserved_downloads_image_roots() -> None:
     AMBIGUOUS_MULTI_DISC_IMPORT_LIB_KEYS.clear()
 
 
+def _sidecar_upgrade_warranted(source: Path, dest: Path) -> bool:
+    """
+    True when ``source`` should replace or create ``dest`` (missing dest or more pixels).
+    If dest exists and dimensions are not clearly worse, do not overwrite.
+    """
+    if not dest.exists():
+        return True
+    from artwork import get_image_size
+
+    src_px = get_image_size(source)
+    dst_px = get_image_size(dest)
+    if src_px and dst_px:
+        return src_px[0] * src_px[1] > dst_px[0] * dst_px[1]
+    return False
+
+
+def _audio_format_rank(path: Path) -> int:
+    """Higher is preferred. Lossless beats all lossy formats."""
+    ext = path.suffix.lower()
+    if ext == ".flac":
+        return 100
+    if ext in {".wav", ".aiff", ".aif"}:
+        return 90
+    return 1
+
+
+def _find_same_track_files(dest_parent: Path, dest_filename: str) -> List[Path]:
+    """
+    Audio files in ``dest_parent`` that are the same track as ``dest_filename``
+    (same stem, any extension). Used so MP3/WMA/FLAC do not stack side-by-side.
+    """
+    if not dest_parent.exists():
+        return []
+    stem = Path(dest_filename).stem.casefold()
+    found: List[Path] = []
+    try:
+        for p in dest_parent.iterdir():
+            if not p.is_file():
+                continue
+            if p.suffix.lower() not in AUDIO_EXT:
+                continue
+            if p.stem.casefold() == stem:
+                found.append(p)
+    except OSError:
+        return []
+    return found
+
+
+def _incoming_beats_existing(
+    src: Path,
+    existing: Path,
+    *,
+    src_size: int,
+    src_freq: Optional[int],
+    src_duration: Optional[float],
+    src_is_truncated: bool,
+) -> Tuple[bool, List[str], Optional[str]]:
+    """
+    Decide whether ``src`` should replace ``existing`` (same track, any extension).
+
+    Returns (should_replace, upgrade_reasons, skip_verbose_message).
+    Preference: non-corrupt/non-truncated → format (FLAC) → sample rate → file size.
+    """
+    from tag_operations import (
+        check_file_size_warning,
+        get_audio_duration,
+        get_sample_rate,
+        get_tags,
+    )
+
+    try:
+        dest_tags = get_tags(existing)
+        dest_is_corrupt = dest_tags is None
+        dest_size_warning = check_file_size_warning(existing)
+        dest_is_truncated = dest_size_warning is not None
+        dest_size = existing.stat().st_size
+        dest_freq = get_sample_rate(existing)
+        dest_duration = get_audio_duration(existing)
+    except (OSError, FileNotFoundError):
+        return (True, ["existing file inaccessible"], None)
+
+    if dest_is_corrupt:
+        return (True, ["existing file is corrupt (cannot read tags)"], None)
+
+    if dest_is_truncated:
+        if not src_is_truncated:
+            return (True, ["existing file is truncated, incoming file is complete"], None)
+        if src_size > dest_size:
+            return (
+                True,
+                [f"existing file is truncated, incoming is larger (size: {src_size} > {dest_size} bytes)"],
+                None,
+            )
+        return (
+            False,
+            [],
+            "SKIP: %item% (existing file is truncated, but incoming is also truncated and not larger)",
+        )
+
+    src_rank = _audio_format_rank(src)
+    dest_rank = _audio_format_rank(existing)
+    if src_rank > dest_rank:
+        return (
+            True,
+            [f"format: {src.suffix.lower()} preferred over {existing.suffix.lower()}"],
+            None,
+        )
+    if src_rank < dest_rank:
+        return (
+            False,
+            [],
+            f"SKIP: %item% (existing {existing.suffix.lower()} preferred over incoming {src.suffix.lower()})",
+        )
+
+    if src_freq and dest_freq:
+        if src_freq > dest_freq:
+            return (True, [f"frequency: {src_freq}Hz > {dest_freq}Hz"], None)
+        if src_freq < dest_freq:
+            return (
+                False,
+                [],
+                f"SKIP: %item% (existing has higher frequency: {dest_freq}Hz > {src_freq}Hz)",
+            )
+        if src_size > dest_size:
+            reasons = [f"size: {src_size} > {dest_size} bytes"]
+            if src_duration and dest_duration and abs(src_duration - dest_duration) > 5:
+                reasons.append(f"duration: {src_duration:.1f}s vs {dest_duration:.1f}s")
+            return (True, reasons, None)
+        return (
+            False,
+            [],
+            f"SKIP: %item% (same frequency {src_freq}Hz, existing file is larger or equal: {dest_size} >= {src_size} bytes)",
+        )
+
+    if src_size > dest_size:
+        reasons = [f"size: {src_size} > {dest_size} bytes"]
+        if src_duration and dest_duration and abs(src_duration - dest_duration) > 5:
+            reasons.append(f"duration: {src_duration:.1f}s vs {dest_duration:.1f}s")
+        return (True, reasons, None)
+    return (
+        False,
+        [],
+        f"SKIP: %item% (existing file is larger or equal: {dest_size} >= {src_size} bytes)",
+    )
+
+
 def _norm_path_key(p: Path) -> str:
     try:
         return os.path.normcase(os.path.abspath(str(p.resolve())))
@@ -477,7 +623,7 @@ def cleanup_download_dirs_for_album(
                         if _os.path.normcase(_os.path.abspath(str(f))) in processed_audio_norm:
                             should_remove = True
                             removal_reason = "processed audio file"
-                            logmsg.info("Removing processed audio file in subdirectory: %item%")
+                            logmsg.verbose("Removing processed audio file in subdirectory: %item%")
                         else:
                             # Audio in a subdir we're cleaning that wasn't part of this album's move (e.g. nested CD/original)
                             logmsg.verbose("Keeping audio in subdirectory (not part of this album): %item%")
@@ -494,7 +640,7 @@ def cleanup_download_dirs_for_album(
                         if any(f.resolve() == art.resolve() for art in used_artwork):
                             should_remove = True
                             removal_reason = "used artwork file"
-                            logmsg.info("Removing used artwork file in subdirectory: %item%")
+                            logmsg.verbose("Removing used artwork file in subdirectory: %item%")
                         else:
                             # Preserve by default; user can manually copy/assign after review.
                             logmsg.warn(
@@ -512,7 +658,7 @@ def cleanup_download_dirs_for_album(
                     if should_remove:
                         if dry_run:
                             # In dry run, log what would be removed
-                            logmsg.info("Would remove %item% ({reason})", reason=removal_reason)
+                            logmsg.verbose("Would remove %item% ({reason})", reason=removal_reason)
                         else:
                             try:
                                 f.unlink()
@@ -530,7 +676,7 @@ def cleanup_download_dirs_for_album(
                     # Check if this artwork file was used/matched for this album
                     if any(f.resolve() == art.resolve() for art in used_artwork):
                         # This artwork was matched and used - remove it
-                        logmsg.info("Removing matched artwork from download root: %item%")
+                        logmsg.verbose("Removing matched artwork from download root: %item%")
                         if not dry_run:
                             try:
                                 f.unlink()
@@ -548,7 +694,7 @@ def cleanup_download_dirs_for_album(
                     # Check if this audio file was processed (moved, upgraded, or skipped)
                     if _os.path.normcase(_os.path.abspath(str(f))) in processed_audio_norm:
                         # This audio file was processed - remove it
-                        logmsg.info("Removing processed audio file: %item%")
+                        logmsg.verbose("Removing processed audio file: %item%")
                         if not dry_run:
                             try:
                                 f.unlink()
@@ -581,7 +727,7 @@ def cleanup_download_dirs_for_album(
 
                     # Remove cleanup extension files (ZIP, partial downloads, etc.)
                     # No special case needed - just remove them regardless of location
-                    logmsg.info("Removing file: %item%")
+                    logmsg.verbose("Removing file: %item%")
                     if not dry_run:
                         try:
                             f.unlink()
@@ -591,7 +737,7 @@ def cleanup_download_dirs_for_album(
 
                 # Remove files with cleanup filenames (system junk files)
                 if name in CLEANUP_FILENAMES:
-                    logmsg.info("Removing file: %item%")
+                    logmsg.verbose("Removing file: %item%")
                     if not dry_run:
                         try:
                             f.unlink()
@@ -651,7 +797,7 @@ def cleanup_download_dirs_for_album(
                         
                         folder_item_key = logmsg.begin_item(folder_item_id)
                         try:
-                            logmsg.info("Removing empty download folder: %item%")
+                            logmsg.verbose("Removing empty download folder: %item%")
                             if not dry_run:
                                 subdir.rmdir()
                         finally:
@@ -721,7 +867,7 @@ def cleanup_download_dirs_for_album(
                             # Check if this artwork file was used/matched for this album
                             if any(f.resolve() == art.resolve() for art in used_artwork):
                                 # This artwork was matched and used - remove it
-                                logmsg.info("Removing matched artwork from download root: %item%")
+                                logmsg.verbose("Removing matched artwork from download root: %item%")
                                 if not dry_run:
                                     try:
                                         f.unlink()
@@ -738,7 +884,7 @@ def cleanup_download_dirs_for_album(
                             processed_audio = processed_audio_files or []
                             if any(f.resolve() == audio.resolve() for audio in processed_audio):
                                 # This audio file was processed - remove it
-                                logmsg.info("Removing processed audio file from download root: %item%")
+                                logmsg.verbose("Removing processed audio file from download root: %item%")
                                 if not dry_run:
                                     try:
                                         f.unlink()
@@ -750,7 +896,7 @@ def cleanup_download_dirs_for_album(
                                 logmsg.end_item(item_key)
                                 remaining.append(f)
                         elif f.name in CLEANUP_FILENAMES:
-                            logmsg.info("Removing file: %item%")
+                            logmsg.verbose("Removing file: %item%")
                             try:
                                 if not dry_run:
                                     f.unlink()
@@ -761,7 +907,7 @@ def cleanup_download_dirs_for_album(
                             else:
                                 logmsg.end_item(item_key)
                         elif f.suffix.lower() in CLEANUP_EXTENSIONS:
-                            logmsg.info("Removing file: %item%")
+                            logmsg.verbose("Removing file: %item%")
                             try:
                                 if not dry_run:
                                     f.unlink()
@@ -789,7 +935,7 @@ def cleanup_download_dirs_for_album(
                 folder_item_id = current.name
             
             folder_item_key = logmsg.begin_item(folder_item_id)
-            logmsg.info("Removing empty download folder: %item%")
+            logmsg.verbose("Removing empty download folder: %item%")
             try:
                 if not dry_run:
                     current.rmdir()
@@ -1043,136 +1189,107 @@ def move_album_from_downloads(
 
             dest = dest_parent / filename
 
-            # Check if destination exists - compare frequency first, then file size
-            # Handles partial/corrupted files and frequency upgrades
-            # Note: We can't detect truncated files (missing last 10 seconds) without a reference file
-            # File size comparison helps when we have duplicates of the same song/quality
-            # We also check for suspiciously small file sizes (heuristic warning)
+            # One file per track in this leaf folder: compare against same stem, any extension
+            # (e.g. existing .mp3 vs incoming .wma). Prefer FLAC, then sample rate, then size.
             should_move = True
+            existing_same_track: List[Path] = []
+            upgrade_reason: List[str] = []
+            dest_exists = False
+            dest_freq: Optional[int] = None
+            src_freq: Optional[int] = None
             
             # Set item context for this track
             item_key = logmsg.begin_item(str(src))
             try:
                 # Check source file for size warnings (may indicate truncation)
-                from tag_operations import check_file_size_warning
+                from tag_operations import check_file_size_warning, get_sample_rate, get_audio_duration
                 size_warning = check_file_size_warning(src)
                 if size_warning:
                     level, message = size_warning
                     if level == "WARN":
                         logmsg.warn("{file}: {warning_msg}", file=src.name, warning_msg=message)
                     else:
-                        logmsg.info("{file}: {warning_msg}", file=src.name, warning_msg=message)
+                        logmsg.verbose("{file}: {warning_msg}", file=src.name, warning_msg=message)
                 
-                # Always check source file properties
-                from tag_operations import get_sample_rate, get_audio_duration, get_tags, check_file_size_warning
                 src_size = src.stat().st_size
                 src_freq = get_sample_rate(src)
                 src_duration = get_audio_duration(src)
                 src_size_warning = check_file_size_warning(src)
                 src_is_truncated = (src_size_warning is not None)
-                
-                # Check destination file properties only if it exists
-                # On network paths (UNC), dest.exists() might raise an exception instead of returning False
-                dest_exists = False
-                dest_size = 0
-                dest_freq = None
-                dest_duration = None
-                dest_tags = None
-                dest_is_corrupt = False
-                dest_is_truncated = False
-                upgrade_reason = []
-                
-                try:
-                    dest_exists = dest.exists()
-                except (OSError, FileNotFoundError):
-                    # Network path might not be accessible or file doesn't exist
-                    dest_exists = False
-                
-                if dest_exists:
-                    try:
-                        # First check if existing file is corrupt (can't read tags) or truncated
-                        # If corrupt, always upgrade (any working file is better than corrupt)
-                        # If truncated, upgrade if incoming is better (not truncated, or larger if both truncated)
-                        dest_tags = get_tags(dest)
-                        dest_is_corrupt = (dest_tags is None)
-                        dest_size_warning = check_file_size_warning(dest)
-                        dest_is_truncated = (dest_size_warning is not None)
-                        dest_size = dest.stat().st_size
-                        dest_freq = get_sample_rate(dest)
-                        dest_duration = get_audio_duration(dest)
-                        
-                        # If existing file is corrupt, always upgrade (any working file is better)
-                        if dest_is_corrupt:
-                            upgrade_reason = ["existing file is corrupt (cannot read tags)"]
-                            should_move = True
-                        elif dest_is_truncated:
-                            # Existing file is truncated - upgrade if incoming is better
-                            if not src_is_truncated:
-                                # Incoming is not truncated - upgrade
-                                upgrade_reason = ["existing file is truncated, incoming file is complete"]
-                                should_move = True
-                            elif src_size > dest_size:
-                                # Both truncated, but incoming is larger - upgrade
-                                upgrade_reason = [f"existing file is truncated, incoming is larger (size: {src_size} > {dest_size} bytes)"]
-                                should_move = True
-                            else:
-                                # Both truncated, incoming is not better - skip
-                                should_move = False
-                                logmsg.info("SKIP: %item% (existing file is truncated, but incoming is also truncated and not larger)")
-                        else:
-                            # Compare: frequency first, then file size
-                            # Duration can help detect truncation, but metadata duration may be wrong
-                            upgrade_reason = []
-                            if src_freq and dest_freq:
-                                if src_freq > dest_freq:
-                                    upgrade_reason.append(f"frequency: {src_freq}Hz > {dest_freq}Hz")
-                                    should_move = True
-                                elif src_freq < dest_freq:
-                                    should_move = False
-                                    logmsg.info("SKIP: %item% (existing has higher frequency: {dest_freq}Hz > {src_freq}Hz)", dest_freq=dest_freq, src_freq=src_freq)
-                                else:
-                                    # Same frequency, compare file size (more reliable than duration for detecting truncation)
-                                    if src_size > dest_size:
-                                        upgrade_reason.append(f"size: {src_size} > {dest_size} bytes")
-                                        # Also check duration if available (though metadata may be wrong for truncated files)
-                                        if src_duration and dest_duration:
-                                            duration_diff = src_duration - dest_duration
-                                            if abs(duration_diff) > 5:  # More than 5 seconds difference
-                                                upgrade_reason.append(f"duration: {src_duration:.1f}s vs {dest_duration:.1f}s")
-                                        should_move = True
-                                    else:
-                                        should_move = False
-                                        logmsg.info("SKIP: %item% (same frequency {freq}Hz, existing file is larger or equal: {dest_size} >= {src_size} bytes)", freq=src_freq, dest_size=dest_size, src_size=src_size)
-                            else:
-                                # Can't determine frequency, fall back to file size only
-                                if src_size > dest_size:
-                                    upgrade_reason.append(f"size: {src_size} > {dest_size} bytes")
-                                    if src_duration and dest_duration:
-                                        duration_diff = src_duration - dest_duration
-                                        if abs(duration_diff) > 5:
-                                            upgrade_reason.append(f"duration: {src_duration:.1f}s vs {dest_duration:.1f}s")
-                                    should_move = True
-                                else:
-                                    should_move = False
-                                    logmsg.info("SKIP: %item% (existing file is larger or equal: {dest_size} >= {src_size} bytes)", dest_size=dest_size, src_size=src_size)
-                    except (OSError, FileNotFoundError) as e:
-                        # File might have been deleted or become inaccessible between exists() check and stat()
-                        # Treat as if destination doesn't exist
-                        dest_exists = False
-                        logmsg.verbose("Destination file became inaccessible during check: %item% ({error})", error=str(e))
-                
-                if not dest_exists:
-                    # Destination doesn't exist - initialize upgrade_reason for new file
-                    upgrade_reason = []
+
+                existing_same_track = _find_same_track_files(dest_parent, filename)
+                # Prefer comparing against the strongest existing copy first.
+                existing_same_track.sort(
+                    key=lambda p: (
+                        _audio_format_rank(p),
+                        get_sample_rate(p) or 0,
+                        p.stat().st_size if p.exists() else 0,
+                    ),
+                    reverse=True,
+                )
+
+                if existing_same_track:
+                    dest_exists = True
+                    # Must beat every existing same-track file (usually one; rarely mp3+wma leftovers).
+                    for existing in existing_same_track:
+                        beats, reasons, skip_msg = _incoming_beats_existing(
+                            src,
+                            existing,
+                            src_size=src_size,
+                            src_freq=src_freq,
+                            src_duration=src_duration,
+                            src_is_truncated=src_is_truncated,
+                        )
+                        dest_freq = get_sample_rate(existing)
+                        if not beats:
+                            should_move = False
+                            if skip_msg:
+                                logmsg.verbose(skip_msg)
+                            break
+                        upgrade_reason.extend(reasons)
                 
                 if should_move and upgrade_reason:
-                    freq_str = f" ({src_freq}Hz vs {dest_freq}Hz)" if dest_exists and src_freq and dest_freq else ""
-                    logmsg.info("UPGRADE: %item%{freq_str} - {reasons}", freq_str=freq_str, reasons=', '.join(upgrade_reason))
+                    freq_str = (
+                        f" ({src_freq}Hz vs {dest_freq}Hz)"
+                        if dest_exists and src_freq and dest_freq
+                        else ""
+                    )
+                    logmsg.info(
+                        "UPGRADE: %item%{freq_str} - {reasons}",
+                        freq_str=freq_str,
+                        reasons=", ".join(upgrade_reason),
+                    )
 
                 if should_move:
+                    if not dest_exists:
+                        import run_state
+                        run_state.record_track_added()
                     logmsg.info("MOVE: %item% -> {dest}", dest=str(dest))
                     if not dry_run:
                         dest.parent.mkdir(parents=True, exist_ok=True)
+                        # Drop inferior same-track files (other extensions / old path) first.
+                        for existing in existing_same_track:
+                            try:
+                                if existing.resolve() == dest.resolve():
+                                    existing.unlink()
+                                elif existing.exists():
+                                    logmsg.info(
+                                        "DELETE inferior same track: {old} (keeping incoming)",
+                                        old=existing.name,
+                                    )
+                                    existing.unlink()
+                                    try:
+                                        rel_old = existing.relative_to(music_root)
+                                        from sync_operations import remove_backup_for
+                                        remove_backup_for(rel_old, dry_run)
+                                    except (ValueError, Exception):
+                                        pass
+                            except OSError as e:
+                                logmsg.warn(
+                                    "Could not remove inferior same-track file {old}: {error}",
+                                    old=str(existing),
+                                    error=str(e),
+                                )
                         shutil.move(str(src), str(dest))
                         # Remove any existing backup - this is a new original, backup is obsolete
                         try:
@@ -1180,16 +1297,15 @@ def move_album_from_downloads(
                             from sync_operations import remove_backup_for
                             remove_backup_for(rel, dry_run)
                         except (ValueError, Exception) as e:
-                            # If we can't determine relative path or remove backup, log but continue
                             logmsg.verbose("Could not remove backup for new original: {error}", error=str(e))
                     # Track destination file for use after moving (for artwork export, etc.)
                     dest_items.append((dest, tags_to_use))
-                    # Track that this file was processed (moved)
                     processed_audio_files.append(src)
                 else:
-                    # File was skipped (better version exists) - use existing destination
-                    dest_items.append((dest, tags_to_use))
-                    # File was skipped (better version exists) - still mark as processed for cleanup
+                    # Better (or equal) version already in library — keep that path for art context.
+                    keep_path = existing_same_track[0] if existing_same_track else dest
+                    dest_items.append((keep_path, tags_to_use))
+                    # Still mark download as processed so Downloads is cleaned.
                     processed_audio_files.append(src)
             finally:
                 logmsg.end_item(item_key)
@@ -1375,19 +1491,20 @@ def move_album_from_downloads(
                     
                     # Check if we should upgrade existing cover.jpg
                     # Only upgrade if new image has MORE pixels (larger dimensions)
-                    # Same pixel dimensions = same quality, regardless of file size (which is just encoding/compression)
-                    should_upgrade = True
+                    should_upgrade = _sidecar_upgrade_warranted(predownloaded_art, cover_dest)
                     existing_size = None
                     art_item_key = logmsg.begin_item(str(predownloaded_art))
                     try:
                         if cover_dest.exists():
                             existing_size = get_image_size(cover_dest)
-                            if art_size and existing_size:
+                            if art_size and existing_size and not should_upgrade:
                                 existing_pixels = existing_size[0] * existing_size[1]
                                 new_pixels = art_size[0] * art_size[1]
-                                if new_pixels <= existing_pixels:
-                                    should_upgrade = False
-                                    logmsg.info("Keeping existing cover.jpg (existing: {existing_px}px, new: {new_px}px - same or smaller dimensions) - %item%", existing_px=existing_pixels, new_px=new_pixels)
+                                logmsg.verbose(
+                                    "Keeping existing cover.jpg (existing: {existing_px}px, new: {new_px}px - same or smaller dimensions) - %item%",
+                                    existing_px=existing_pixels,
+                                    new_px=new_pixels,
+                                )
                         
                         if should_upgrade:
                             if existing_size:
@@ -1480,17 +1597,22 @@ def move_album_from_downloads(
                         pass
                     
                     if predownloaded_folder.exists() and not is_in_subfolder:
-                        # Only copy if it's in the root album directory, not in CD1/CD2
+                        # Only folder.jpg exists (no large_cover/cover/pattern-matched art), use it for cover.jpg
                         art_item_key = logmsg.begin_item(str(predownloaded_folder))
-                        logmsg.info("Using %item% for cover.jpg")
                         try:
-                            # Ensure parent directory exists (should already exist from line 577, but be safe)
-                            cover_dest.parent.mkdir(parents=True, exist_ok=True)
-                            shutil.copy2(predownloaded_folder, cover_dest)
+                            if _sidecar_upgrade_warranted(predownloaded_folder, cover_dest):
+                                logmsg.info("Using %item% for cover.jpg")
+                                cover_dest.parent.mkdir(parents=True, exist_ok=True)
+                                shutil.copy2(predownloaded_folder, cover_dest)
+                            else:
+                                logmsg.verbose(
+                                    "Keeping existing cover.jpg (downloads folder.jpg is same or smaller) - %item%"
+                                )
                         except (OSError, FileNotFoundError) as e:
                             logmsg.warn("Failed to copy folder.jpg to cover.jpg: {error}", error=str(e))
                             logmsg.verbose("Source: {src}, Destination: {dst}", src=str(predownloaded_folder), dst=str(cover_dest))
-                        logmsg.end_item(art_item_key)
+                        finally:
+                            logmsg.end_item(art_item_key)
                     elif is_in_subfolder:
                         # folder.jpg is in CD1/CD2 - leave it there, don't copy to album root
                         logmsg.verbose("Found folder.jpg in subfolder (CD1/CD2), leaving it there: {path}", path=str(predownloaded_folder))
@@ -1563,11 +1685,7 @@ def move_album_from_downloads(
             )
             logmsg.end_item(art_check_key)
         else:
-            # Log that we checked for artwork (so header shows something)
-            # Use a generic item context for "artwork check"
-            art_check_key = logmsg.begin_item("artwork check")
-            logmsg.info("No pre-downloaded art files found")
-            logmsg.end_item(art_check_key)
+            logmsg.verbose("No pre-downloaded art files found in downloads")
 
         # If a multi-disc target resolved to exactly one logical downloads image group, stamp sidecars
         # to all audio-bearing leaves for consistency.
@@ -1589,6 +1707,12 @@ def move_album_from_downloads(
                     continue
                 leaf_cover = leaf / "cover.jpg"
                 leaf_folder = leaf / "folder.jpg"
+                if not _sidecar_upgrade_warranted(cover_dest, leaf_cover):
+                    logmsg.verbose(
+                        "Sidecars already adequate in {leaf}; skipping stamp",
+                        leaf=str(leaf.relative_to(album_dir)),
+                    )
+                    continue
                 try:
                     leaf_cover.parent.mkdir(parents=True, exist_ok=True)
                     shutil.copy2(cover_dest, leaf_cover)
@@ -1936,7 +2060,7 @@ def cleanup_downloads_folder(dry_run: bool = False, header_key: str = None) -> N
                 is_artwork_file = suffix in {".jpg", ".jpeg", ".png", ".gif", ".webp"}
                 if not is_artwork_file:
                     # Remove cleanup extension files (ZIP, partial downloads, etc.)
-                    logmsg.info("Removing file: %item%")
+                    logmsg.verbose("Removing file: %item%")
                     if not dry_run:
                         try:
                             f.unlink()
@@ -2097,7 +2221,7 @@ def _process_cleanup_folder(folder_path: Path, downloads_dir: Path, music_root: 
                 )
                 return
             item_key = logmsg.begin_item(str(folder_path.relative_to(downloads_dir)))
-            logmsg.info("Removing empty folder: %item%")
+            logmsg.verbose("Removing empty folder: %item%")
             if not dry_run:
                 try:
                     folder_path.rmdir()
@@ -2139,7 +2263,7 @@ def _process_cleanup_folder(folder_path: Path, downloads_dir: Path, music_root: 
                             item.unlink()
                         except Exception as e:
                             logmsg.warn("Could not delete {file}: {error}", file=item.name, error=str(e))
-            logmsg.info("Removing folder with only cleanup files: %item%")
+            logmsg.verbose("Removing folder with only cleanup files: %item%")
             if not dry_run:
                 try:
                     folder_path.rmdir()
@@ -2302,9 +2426,9 @@ def match_root_artwork_to_existing_albums(dry_run: bool = False) -> None:
                             existing_pixels = existing_size[0] * existing_size[1]
                             if existing_pixels >= root_pixels:
                                 existing_better = True
-                                logmsg.info("Matched but existing artwork is same or better (existing: {existing_px}px, root: {root_px}px)", existing_px=existing_pixels, root_px=root_pixels)
+                                logmsg.verbose("Matched but existing artwork is same or better (existing: {existing_px}px, root: {root_px}px)", existing_px=existing_pixels, root_px=root_pixels)
                                 # Remove root file since we already have better/same
-                                logmsg.info("Removing matched artwork from downloads root: %item%")
+                                logmsg.verbose("Removing matched artwork from downloads root: %item%")
                                 if not dry_run:
                                     try:
                                         art_file.unlink()
