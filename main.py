@@ -532,22 +532,24 @@ def main() -> None:
             pass
         logmsg.header(None, key=header_key)  # Close Step 4 header
 
-        header_key = logmsg.header("Step 5: Embed missing artwork", "%msg% (%count% items)", key=header_key)
+        # Embed order: overlay force (5.1) → missing only (5.2) → optional embed-all (5.3).
+        # Overlay first so those tracks are not rewritten again by the missing-art pass.
+        if EMBED_FROM_UPDATES and albums_with_new_cover:
+            header_key = logmsg.header("Step 5.1: Embed artwork from updates", "%msg% (%count% items)", key=header_key)
+            for album_dir in sorted(albums_with_new_cover):
+                embed_art_into_audio_files(album_dir, DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
+            logmsg.header(None, key=header_key)
+
+        header_key = logmsg.header("Step 5.2: Embed missing artwork", "%msg% (%count% items)", key=header_key)
         embed_missing_art_global(DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED, EMBED_IF_MISSING)
-        logmsg.header(None, key=header_key)  # Close Step 5 header
+        logmsg.header(None, key=header_key)
 
         if EMBED_ALL:
-            header_key = logmsg.header("Step 5.5: Embed all artwork", "%msg% (%count% items)", key=header_key)
+            header_key = logmsg.header("Step 5.3: Embed all artwork", "%msg% (%count% items)", key=header_key)
             import os
             for dirpath, dirnames, filenames in os.walk(MUSIC_ROOT):
                 embed_art_into_audio_files(Path(dirpath), DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
-            logmsg.header(None, key=header_key)  # Close Step 5.5 header
-
-        if EMBED_FROM_UPDATES and albums_with_new_cover:
-            header_key = logmsg.header("Step 5.6: Embed artwork from updates", "%msg% (%count% items)", key=header_key)
-            for album_dir in sorted(albums_with_new_cover):
-                embed_art_into_audio_files(album_dir, DRY_RUN, BACKUP_ORIGINAL_FLAC_BEFORE_EMBED)
-            logmsg.header(None, key=header_key)  # Close Step 5.6 header
+            logmsg.header(None, key=header_key)
 
         header_key = logmsg.header("Step 6: Sync empty UPDATE overlay directory structure", "%msg%", key=header_key)
         sync_update_root_structure(DRY_RUN)

@@ -118,7 +118,7 @@ _UpdateOverlay /
 
 ## Embed mode (overlay covers **into FLAC tags**)
 
-- `**python main.py --mode embed`** — same pipeline as normal, plus a pass that pushes `**cover.jpg` from overlay-applied folders** **into FLAC (and backups)** after Step 5 for albums that gained a library cover via overlay **this run**.
+- `**python main.py --mode embed`** — same pipeline as normal, plus **Step 5.1** that pushes `**cover.jpg` from overlay-applied folders** **into audio tags (and backups)** for albums that gained a library cover via overlay **this run**, before **Step 5.2** fills any remaining files that still lack embedded art.
 - `**--mode normal`** alone does **not** overwrite existing embedded art with your new `**cover.jpg`**.
 
 Rule of thumb:

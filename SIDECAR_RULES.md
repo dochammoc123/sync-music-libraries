@@ -36,7 +36,7 @@ Use this for anything you copy by hand (including overlay). Pipeline behavior st
 
 - **Step 1 (Downloads processing)** may copy artwork from Downloads into the library **only when unambiguous**.
 - **Step 4 (Ensure cover/folder artwork)** is the primary place where missing sidecars are created (embedded/web), respecting multi-disc safety rules.
-- **Step 5 (Embed missing artwork)** fills **embedded** art only when tags lack it; image bytes always come from **local sidecars next to each track’s folder** (see below).
+- **Step 5.1 / 5.2 / 5.3 (Embed artwork)** — see below; image bytes always come from **local sidecars next to each track’s folder**.
 - **Downloads cleanup** should not delete potentially meaningful assets when artwork mapping is ambiguous.
 
 ### Step 1: Downloads → library artwork behavior (conservative for multi-disc)
@@ -93,22 +93,26 @@ If `album_layout_leaf_directories` finds **any** leaf, Step 4 treats **album roo
 
 After Step 4 completes, the script warns for albums that were touched in Step 1 (Downloads) when required sidecars are still missing next to audio-bearing root/leaf directories. This is meant to surface “Lilith-style” ambiguity where manual fixes are expected.
 
-### Step 5: Embedding into audio tags (`embed_missing_art_global`)
+### Step 5.1–5.3: Embedding into audio tags
 
-Implemented in `artwork.embed_missing_art_global()` — converts **sidecars → embedded art**, not the reverse.
+Order in `main.py` (so overlay force-embed is not repeated by the missing-art pass):
 
-- **When it runs:** **normal** and **embed** modes only (`restore` disables embedding). Controlled by `EMBED_IF_MISSING` in `main.py` (off in restore).
+| Step | When | Behavior |
+|------|------|----------|
+| **5.1** Embed from updates | `--mode embed` and album got `cover.jpg` from `UPDATE_ROOT` this run | Force-embed **all** audio under that album (`embed_art_into_audio_files`) |
+| **5.2** Embed missing | `normal` / `embed` (`EMBED_IF_MISSING`) | Only files that **still lack** embedded art (`embed_missing_art_global`) |
+| **5.3** Embed all | `--embed-all` (hidden) | Force-embed whole library from sidecars — use sparingly |
+
+#### Step 5.2 details (`embed_missing_art_global`)
+
 - **Which files:** Supported audio extensions (`AUDIO_EXT`); only those that **already have no** embedded picture (FLAC pictures, MP3 `APIC`, MP4 `covr`, plus Mutagen fallbacks).
-- **Which folder’s image:** **Strictly the directory that contains the audio file.** Tracks under `CD2/` never use album-root sidecars automatically — use `**cover.jpg`** there if present, else `**folder.jpg**`. Tracks sitting **directly under the album folder** use `**album_root/cover.jpg` only** (if there is only `folder.jpg` at root, Step 5 does not embed from it).
+- **Which folder’s image:** **Strictly the directory that contains the audio file.** Tracks under `CD2/` never use album-root sidecars automatically — use `**cover.jpg`** there if present, else `**folder.jpg**`. Tracks sitting **directly under the album folder** use `**album_root/cover.jpg` only** (if there is only `folder.jpg` at root, Step 5.2 does not embed from it).
 - **Subfolder-layout embed gate:** When **any** leaf folder exists (including **exactly one** leaf), embedding runs only after **every such leaf on disk** has **at least one** of `**cover.jpg` / `folder.jpg`**. If a leaf still has **neither**, the whole album is skipped for embedding. **Flat album** (**zero** leaves) never hits this gate.
 - **Backups:** Optional backup of each audio file before writing tags (`BACKUP_ORIGINAL_FLAC_BEFORE_EMBED` in normal/embed modes). **Step 8 backup sync** removes a backup only when the live file at the same relative path is identical or missing (orphan)—see **Backup mirror** in [USER_GUIDE.md](USER_GUIDE.md) for the **rename/move** caveat (orphan removal if you do not update `BACKUP_ROOT` paths).
 
-### Forced embed (overlay / advanced)
+#### Step 5.1 details (overlay force)
 
-Separate from “missing only”:
-
-- `**--mode embed` — Step 5.6:** For albums that gained `cover.jpg` from `UPDATE_ROOT`, `embed_art_into_audio_files()` re-embeds **all** audio under that album tree from sidecars (subfolders prefer their local `cover.jpg` / `folder.jpg`).
-- `**--embed-all` (hidden flag):** Walks the library and force-embeds from `cover.jpg` per album directory — broad overwrite; use sparingly.
+For albums that gained `cover.jpg` from `UPDATE_ROOT`, `embed_art_into_audio_files()` embeds **all** audio under that album tree from sidecars (subfolders prefer their local `cover.jpg` / `folder.jpg`). Runs **before** Step 5.2 so those tracks are not counted as “missing” and rewritten again.
 
 ### Downloads cleanup rules (preserve when ambiguous)
 
